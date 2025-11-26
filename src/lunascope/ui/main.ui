@@ -1018,11 +1018,11 @@
          <number>0</number>
         </property>
         <item>
-         <widget class="QTabWidget" name="tabWidget_3">
+         <widget class="QTabWidget" name="tab_settings">
           <property name="currentIndex">
            <number>0</number>
           </property>
-          <widget class="QWidget" name="tab_7">
+          <widget class="QWidget" name="tab_param">
            <attribute name="title">
             <string>Param</string>
            </attribute>
@@ -1044,8 +1044,14 @@
             </property>
             <item>
              <widget class="QPlainTextEdit" name="txt_param">
+              <property name="font">
+               <font>
+                <family>Courier New</family>
+                <pointsize>14</pointsize>
+               </font>
+              </property>
               <property name="placeholderText">
-               <string>(  key = value parameters, applied on loading / refreshing the EDF )</string>
+               <string>( key = value parameters, set on loading or refreshing )</string>
               </property>
              </widget>
             </item>
@@ -1098,6 +1104,41 @@
             </property>
             <item>
              <widget class="QTableView" name="tbl_aliases"/>
+            </item>
+           </layout>
+          </widget>
+          <widget class="QWidget" name="tab_cmap">
+           <attribute name="title">
+            <string>Config</string>
+           </attribute>
+           <layout class="QHBoxLayout" name="horizontalLayout_5">
+            <property name="spacing">
+             <number>0</number>
+            </property>
+            <property name="leftMargin">
+             <number>0</number>
+            </property>
+            <property name="topMargin">
+             <number>0</number>
+            </property>
+            <property name="rightMargin">
+             <number>0</number>
+            </property>
+            <property name="bottomMargin">
+             <number>0</number>
+            </property>
+            <item>
+             <widget class="QPlainTextEdit" name="txt_cmap">
+              <property name="font">
+               <font>
+                <family>Courier New</family>
+                <pointsize>14</pointsize>
+               </font>
+              </property>
+              <property name="placeholderText">
+               <string>( load/edit config options ) </string>
+              </property>
+             </widget>
             </item>
            </layout>
           </widget>

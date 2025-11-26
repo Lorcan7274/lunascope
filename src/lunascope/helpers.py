@@ -303,18 +303,15 @@ def override_colors(colors, names, overrides: dict):
 # ------------------------------------------------------------
 
 def random_darkbg_colors(n, seed=None):
-    """Return n pyqtgraph colors with good contrast on dark backgrounds."""
+    """Return n random pyqtgraph colors (no hue spacing constraints)."""
     rng = random.Random(seed)
-    hues, cols = [], []
-    while len(cols) < n:
-        h = rng.random()
-        s = rng.uniform(0.65, 0.95)   # vivid
-        v = rng.uniform(0.78, 0.95)   # bright enough for dark bg
-        # keep hues separated
-        if all(abs((h - h0 + 0.5) % 1 - 0.5) > 0.12 for h0 in hues):
-            r, g, b = (int(c * 255) for c in colorsys.hsv_to_rgb(h, s, v))
-            cols.append(pg.mkColor(r, g, b))
-            hues.append(h)
+    cols = []
+    for _ in range(n):
+        h = rng.random()                       # full hue range
+        s = rng.uniform(0.65, 0.95)            # vivid
+        v = rng.uniform(0.78, 0.95)            # bright on dark bg
+        r, g, b = colorsys.hsv_to_rgb(h, s, v)
+        cols.append(pg.mkColor(int(r*255), int(g*255), int(b*255)))
     return cols
 
 

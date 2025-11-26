@@ -22,6 +22,8 @@
 
 from PySide6.QtWidgets import QPlainTextEdit, QFileDialog
 from PySide6.QtWidgets import QVBoxLayout, QHeaderView
+from PySide6.QtWidgets import QMessageBox
+
 import pandas as pd
 
 class SettingsMixin:
@@ -44,36 +46,81 @@ class SettingsMixin:
     # load/save functions
 
     def _load_param(self):
-        txt_file, _ = QFileDialog.getOpenFileName(
-            self.ui,
-            "Open a parameter file",
-            "",
-            "Text (*.txt);;All Files (*)",
-            options=QFileDialog.Option.DontUseNativeDialog
-        )
+
+        # if this for cmap or param?
+        # determine based on the open tab
+        
+        idx = self.ui.tab_settings.currentIndex()
+        name = self.ui.tab_settings.tabText(idx)
+        is_cmap = name == 'Config'
+
+        if is_cmap is False:
+            txt_file, _ = QFileDialog.getOpenFileName(
+                self.ui,
+                "Open a parameter file",
+                "",
+                "Text (*.txt);;All Files (*)",
+                options=QFileDialog.Option.DontUseNativeDialog
+            )
+        else:
+            txt_file, _ = QFileDialog.getOpenFileName(
+                self.ui,
+                "Open a config file",
+                "",
+                "Text (*.txt *.cfg);;All Files (*)",
+                options=QFileDialog.Option.DontUseNativeDialog
+            )
+            
+        
         if txt_file:
             try:
                 text = open(txt_file, "r", encoding="utf-8").read()
-                self.ui.txt_param.setPlainText(text)
+                if is_cmap:
+                    self.ui.txt_cmap.setPlainText(text)
+                else:
+                    self.ui.txt_param.setPlainText(text)
             except (UnicodeDecodeError, OSError) as e:
                 QMessageBox.critical(
                     None,
-                    "Error opening parameter file",
+                    "Error opening file",
                     f"Could not load {txt_file}\nException: {type(e).__name__}: {e}"
                 )
 
 
     def _save_param(self):
 
-        new_file = self.ui.txt_param.toPlainText()
+        # if this for cmap or param?
+        # determine based on the open tab
+        idx = self.ui.tab_settings.currentIndex()
+        name = self.ui.tab_settings.tabText(idx)
+        is_cmap = name == 'Config'
+        is_param = name == 'Param'
 
-        filename, selected_filter = QFileDialog.getSaveFileName(
-            self,
-            "Save parameter file to .txt",
-            "",
-            "Text Files (*.txt);;All Files (*)",
-            options=QFileDialog.Option.DontUseNativeDialog
-        )
+        if is_cmap is False and is_param is False:
+            QMessageBox.critical(
+                None,
+                "Error saving file",
+                "Need to select either the Param or Config tab to Save" )
+            return
+        
+        if is_cmap is True:
+            new_file = self.ui.txt_cmap.toPlainText()
+            filename, selected_filter = QFileDialog.getSaveFileName(
+                self.ui,
+                "Save file to .cfg",
+                "",
+                "Config (text) Files (*.cfg *.txt);;All Files (*)",
+                options=QFileDialog.Option.DontUseNativeDialog
+            )            
+        else:
+            new_file = self.ui.txt_param.toPlainText()            
+            filename, selected_filter = QFileDialog.getSaveFileName(
+                self.ui,
+                "Save file to .txt",
+                "",
+                "Text Files (*.txt);;All Files (*)",
+                options=QFileDialog.Option.DontUseNativeDialog
+            )
 
         if filename:
             # Ensure .txt extension if none was given
@@ -89,10 +136,20 @@ class SettingsMixin:
     # reset all parameters
 
     def _reset_param(self):
-        self.ui.txt_param.clear()
-        self.proj.clear_vars()
-        self.proj.reinit()
-        self._update_params()
+        
+        idx = self.ui.tab_settings.currentIndex()
+        name = self.ui.tab_settings.tabText(idx)
+        is_cmap = name == 'Config'
+
+        if is_cmap is True:
+            self.ui.txt_cmap.clear()
+            self._clear_cmap()
+            self._apply_cmap()
+        else:
+            self.ui.txt_param.clear()
+            self.proj.clear_vars()
+            self.proj.reinit()
+            self._update_params()
         
     # ------------------------------------------------------------
     # reset all parameters: called when attaching a new EDF

@@ -125,14 +125,14 @@ class MetricsMixin:
 
         
     def _toggle_sigs(self):
-        n = len(self.ui.tbl_desc_signals.checked())
+        n = len(self.ui.tbl_desc_signals.checked_visible())
         if n == 0:
             self.ui.tbl_desc_signals.select_all_checks()
         else:
             self.ui.tbl_desc_signals.select_none_checks()
 
     def _toggle_annots(self):
-        n = len(self.ui.tbl_desc_annots.checked())
+        n = len(self.ui.tbl_desc_annots.checked_visible())
         if n == 0:
             self.ui.tbl_desc_annots.select_all_checks()
         else:
@@ -263,7 +263,7 @@ class MetricsMixin:
                 src_sig.setData(idx, "None", Qt.DisplayRole)
 
         # bind delegate on the PROXY column and reopen editors after proxy changes
-        filt_items = ["None", "0.3-35Hz", "Slow", "Delta", "Theta", "Alpha", "Sigma", "Beta", "Gamma"]
+        filt_items = ["None", "0.3-35Hz", "Slow", "Delta", "Theta", "Alpha", "Sigma", "Beta", "Gamma", "User"]
         view.setItemDelegateForColumn(PROXY_COL_FILTER, _ComboDelegate(filt_items, view))
 
         def _open_all():
@@ -280,11 +280,7 @@ class MetricsMixin:
         view.setColumnWidth(PROXY_COL_FILTER, 90)
         view.setColumnWidth(0, 10)
         view.horizontalHeader().setSectionResizeMode(PROXY_COL_FILTER, QHeaderView.Fixed)
-
-        
-
-
-
+    
         # inside your setup method
         self._signals_proxy = self.signals_table_proxy
         self._signals_view  = self.ui.tbl_desc_signals
@@ -338,7 +334,15 @@ class MetricsMixin:
                 self.ss.clear_filter(ch_label)
             else:
                 self.fmap[ch_label] = val
-                frqs = self.fmap_frqs[val]
+
+                if val == 'User':
+                    if ch_label in self.user_fmap_frqs:
+                        frqs = list( self.user_fmap_frqs[ch_label] )
+                    else:
+                        frqs = [ 99 , 1 ] # set to fail below
+                else:
+                    frqs = self.fmap_frqs[val]
+
                 sr = float(sr)
                 if frqs[1] <= sr / 2:
                     order = 2
@@ -356,126 +360,6 @@ class MetricsMixin:
         src_sig.dataChanged.connect(on_sig_changed)
 
 
-
-        # ---- OLD VERSION OF ABOVE BELOW... w/ Broken combo / proxy stuff... --- 
-
-        # df = self.p.table( 'HEADERS' , 'CH' )
-        # # may be empty EDF
-        # if len(df.index) > 0:
-        #     df = df[ [ 'CH' , 'PDIM' , 'SR' ] ]
-        # else:
-        #     df = pd.DataFrame(columns=["CH", "PDIM", "SR"])
-
-        # # re-order channels based on a cmap?
-        # if self.cmap_list:
-        #     df = sort_df_by_list( df , 0 , self.cmap_list )
-            
-        # # SOURCE model from your DataFrame
-        # src_sig = self.df_to_model(df)  # must return QStandardItemModel        
-        
-        # # add filter proxy
-        # self.signals_table_proxy = attach_comma_filter(
-        #     self.ui.tbl_desc_signals,
-        #     self.ui.txt_signals          
-        # )
-
-        # self.signals_table_proxy.setSourceModel(src_sig)
-
-        # # Put proxy on the view
-        # view = self.ui.tbl_desc_signals
-        # view.setModel(self.signals_table_proxy)
-
-        # # View config
-        # view.setSortingEnabled(False)
-        # h = view.horizontalHeader()
-        # h.setSectionResizeMode(QHeaderView.Interactive)
-        # h.setStretchLastSection(False)
-        # h.setMinimumSectionSize(50)
-        # h.setDefaultSectionSize(150)
-        # view.resizeColumnsToContents()
-        # view.setSelectionBehavior(QAbstractItemView.SelectRows)
-        # view.setSelectionMode(QAbstractItemView.SingleSelection)
-        # view.horizontalHeader().setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        # view.verticalHeader().setVisible(False)
-
-        
-        # # Add virtual checkbox column; channel_col_before_insert is SOURCE index of your channel column
-        # add_check_column(
-        #     view,
-        #     channel_col_before_insert=0,   # change if your "Channel" column isn't the first
-        #     header_text="Sel",
-        #     initial_checked=[],
-        #     on_change=lambda _: (self._clear_pg1(), self._update_scaling(), self._update_pg1()),
-        # )
-
-        # # add combo dropdown for filtering
-        # proxy_col = add_combo_column(
-        #     view=self.ui.tbl_desc_signals,
-        #     header_text="Filter",
-        #     items=["None", "0.3-35Hz", "Slow", "Delta", "Theta", "Alpha", "Sigma", "Beta" , "Gamma" ],
-        #     default_value="None",
-        #     insert_source_col=2,   # if None, append
-        #     open_persistent=True,
-        #     on_change=lambda _: (self._clear_pg1(), self._update_scaling(), self._update_pg1()),
-        #     width=90,
-        #     resize_mode=QHeaderView.Fixed,
-        # )
-
-        # view = self.ui.tbl_desc_signals
-        # view.setColumnWidth(proxy_col, 90)
-        # view.setColumnWidth(0, 10) 
-        # view.horizontalHeader().setSectionResizeMode(proxy_col, QHeaderView.Fixed)
-
-        # proxy = view.model()
-        # src_sig = getattr(proxy, "sourceModel", None) and proxy.sourceModel() or proxy
-
-        # # map proxy_col -> source column
-        # if src_sig is proxy:
-        #     target_src_col = proxy_col
-        # else:
-        #     target_src_col = proxy.mapToSource(proxy.index(0, proxy_col)).column()
-
-        # CH_SRC_COL = 1
-        
-        # def on_sig_changed(top_left, bottom_right, roles, *,
-        #                    src=src_sig, target_col=target_src_col, ch_col=CH_SRC_COL ):
-        #     if not (top_left.column() <= target_col <= bottom_right.column()):
-        #         return
-        #     for r in range(top_left.row(), bottom_right.row() + 1):
-        #         val = src.index(r, target_col).data(Qt.EditRole)
-        #         ch_label = src.index(r, ch_col).data(Qt.DisplayRole)
-        #         sr_col = 4 # currently, SR in 5th col.
-        #         sr = src.index(r, sr_col).data(Qt.DisplayRole)
-        #         if val == 'None':
-        #             self.fmap.pop( ch_label , None )
-        #             self.ss.clear_filter( ch_label )
-        #         else:
-        #             # for pg1_simple()
-        #             self.fmap[ ch_label ] = val
-
-        #             # for segsrv (rendered) signals
-        #             frqs = self.fmap_frqs[ val ]
-        #             sr = float( sr )
-        #             if frqs[1] <= sr/2:
-        #                 order = 2
-        #                 sos = butter( order ,
-        #                               frqs, 
-        #                               btype='band',
-        #                               fs= sr , 
-        #                               output='sos' )
-
-        #             self.ss.apply_filter( ch_label , sos.reshape(-1) )
-
-        #         # update view
-        #         self._clear_pg1()
-        #         self._update_scaling()
-        #         self._update_pg1()
-
-
-        # # add wiring
-        # src_sig.dataChanged.connect(on_sig_changed)
-            
-        
         
         # --------------------------------------------------------------------------------
         # populate annotations box
@@ -483,7 +367,9 @@ class MetricsMixin:
 
         # SOURCE model
         df = self.p.annots()
-
+        if not df.empty:
+            df = df[df["Annotations"] != "SleepStage"]
+        
         # re-order channels based on a cmap?                                                                                             
         if self.cmap_list:
             df = sort_df_by_list( df , 0 , self.cmap_list )
@@ -537,6 +423,7 @@ class MetricsMixin:
 
         # track all original annots (to keep the same y-axes)
         self.ssa_anns = self.p.edf.annots()
+        self.ssa_anns = [s for s in self.ssa_anns if s != "SleepStage"]
         self.ssa_anns_lookup = {v: i for i, v in enumerate(self.ssa_anns)}
         
         # but initialize a separate ss for annotations only
@@ -561,22 +448,10 @@ class MetricsMixin:
 
     def _update_instances(self, anns):
 
-        # request w/ hms and duration also (True)                                                                                                                                                                                           
-        evts = pd.Series(self.ssa.get_all_annots(anns, True ))
-	
-        # always define df                                                                                                                                                                                                                  
-        df = pd.DataFrame(columns=["class", "hms", "start", "dur"])
-
-        if len(evts) != 0:
-            a = evts.str.rsplit("| ", n=3, expand=True)
-            b = a[1].str.split("-", n=1, expand=True)
-
-            df = pd.DataFrame({
-                "class": a[0].str.strip(),
-                "hms": a[2].str.strip(),
-                "start": pd.to_numeric(b[0], errors="coerce"),
-                "dur": pd.to_numeric(a[3], errors="coerce")
-            }).sort_values("start", ascending=True, na_position="last")
+        # request w/ hms and duration also (True)
+        
+        rows = self.ssa.get_all_annots_with_inst_ids(anns, True)
+        df = pd.DataFrame(rows, columns=["class", "inst", "hms", "start", "dur"])
         self.events_model = self.df_to_model(df)
         
         self.events_table_proxy = QSortFilterProxyModel(self)
@@ -591,11 +466,6 @@ class MetricsMixin:
         h.setStretchLastSection(True)
         h.setSectionResizeMode(QHeaderView.Interactive)
         
-        #self.events_table_proxy.setFilterKeyColumn(-1)
-        #self.events_table_proxy.setFilterCaseSensitivity(Qt.CaseInsensitive)
-        #self.ui.txt_events.textChanged.connect(self.events_table_proxy.setFilterFixedString)
-#        self.ui.txt_events.textChanged.connect( self._on_events_filter_text )
-
         view.verticalHeader().setVisible(False)
         view.resizeColumnsToContents()
         view.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -636,8 +506,8 @@ class MetricsMixin:
         src_row   = src_idx.row()
 
         # get interval            
-        left = float(self.events_model.data(self.events_model.index(src_row, 2)))
-        right = left + float(self.events_model.data(self.events_model.index(src_row, 3)))
+        left = float(self.events_model.data(self.events_model.index(src_row, 3)))
+        right = left + float(self.events_model.data(self.events_model.index(src_row, 4)))
 
         # expand?
         left , right = expand_interval( left, right )

@@ -1,3 +1,4 @@
+
 #  --------------------------------------------------------------------
 #
 #  This file is part of Luna.
@@ -380,19 +381,20 @@ class SignalsMixin:
         # compute on separate thread
         # --> do not touch the GUI here
         
-        # pre-calculate any summary stats? [ignore for now]
-        #ss.calc_bands( bsigs )
-        #ss.calc_hjorths( hsigs )
+        # segsrv options
         throttle1_sr = 100 
         self.ss.input_throttle( throttle1_sr )
-        throttle2_np = 5 * 30 * 100 
+        throttle2_np = 10000
         self.ss.throttle( throttle2_np )
-        summary_mins = 30 
-        self.ss.summary_threshold_mins( summary_mins )
+
         # special version that releases the GIL
         self.ss.segsrv.populate_lunascope( chs = self.ss_chs , anns = self.ss_anns )
         self.ss.set_annot_format6( False ) # pyqtgraph, not plotly
         self.ss.set_clip_xaxes( False )
+
+        # any sig-mods?
+        self._render_cmaps()
+    
         
     def _render_signals(self):
 
@@ -504,7 +506,6 @@ class SignalsMixin:
         self.ss.window( self.last_x1, self.last_x2)
 
         self._update_scaling()
-#        self._update_pg1()  [ is called by update_scaling() ] 
 
         
     def on_window_range(self, lo: float, hi: float):
@@ -592,6 +593,8 @@ class SignalsMixin:
 
         nann = len( self.ss_anns )
 
+        nmods = len( self.sigmods ) 
+        
         #
         # clear prior items
         #
@@ -601,24 +604,55 @@ class SignalsMixin:
 
         for curve in self.curves:
             pi.removeItem(curve)
-
         self.curves.clear()
+
+        for curve in self.y0_curves:
+            pi.removeItem(curve)
+        self.y0_curves.clear()
+
+        for curve in self.sigmod_curves:
+            pi.removeItem(curve)
+        self.sigmod_curves.clear()
 
         for curve in self.annot_curves:
             pi.removeItem(curve)
-
         self.annot_curves.clear()
+
         
         #
         # initiate channels
         #
         
         for i in range(nchan):
-            pen = pg.mkPen( self.colors[i], width=1, cosmetic=True)
+            pen = pg.mkPen( self.colors[i], width= self.cfg_line_weight , cosmetic=True )
             c = pg.PlotCurveItem(pen=pen, connect='finite')
             pi.addItem(c)
             self.curves.append(c)
 
+        #
+        # y=0 lines
+        #
+
+        for i in range(nchan):
+            pen = pg.mkPen( 'gray', width=1, cosmetic=True )
+            pen.setDashPattern([4, 8])
+            c = pg.PlotCurveItem(pen=pen, connect='finite')
+            pi.addItem(c)
+            self.y0_curves.append(c)
+
+
+        #
+        # initiate sigmod curves (18 per channel) [ch1 x 18, ch2 x 18 , ... ] 
+        #
+
+        for i in range(nmods):
+            for j in range(18):
+                pen = pg.mkPen( self.rwb_sigmod_colors[j], width=self.cfg_line_weight, cosmetic=True) # fix to RWB for now
+                c = pg.PlotCurveItem(pen=pen, connect='finite')
+                pi.addItem(c)
+                self.sigmod_curves.append(c)
+        
+        
         #
         # initiate annotations
         #
@@ -706,10 +740,18 @@ class SignalsMixin:
         if len(self.ss_chs) == 0:
             self.pg1_annot_height = 0.8
 
+        # if cmap values specifed, use those
+        ch_set = [ ]
+        for ch in self.ss_chs:
+            if ch in self.cmap_fixed_min:
+                self.ss.fix_physical_scale( ch , self.cmap_fixed_min[ch] , self.cmap_fixed_max[ch] )
+                ch_set.append( ch )
+            
         # use empirical vals (default) 
         if self.ui.radio_empiric.isChecked():
             for ch in self.ss_chs:
-                self.ss.empirical_physical_scale( ch )
+                if ch not in ch_set:
+                    self.ss.empirical_physical_scale( ch )
 
             # & turn off other fixed scale , if set
             if self.ui.radio_fixedscale.isChecked() :
@@ -723,10 +765,12 @@ class SignalsMixin:
                 lwr = -1
                 upr = +1
             for ch in self.ss_chs:
-                self.ss.fix_physical_scale( ch , self.ui.spin_fixed_min.value(), self.ui.spin_fixed_max.value() )
+                if ch not in ch_set:
+                    self.ss.fix_physical_scale( ch , self.ui.spin_fixed_min.value(), self.ui.spin_fixed_max.value() )
         else:
             for ch in self.ss_chs:
-                self.ss.free_physical_scale( ch )
+                if ch not in ch_set:
+                    self.ss.free_physical_scale( ch )
 
         self.clip_signals = self.ui.radio_clip.isChecked()
         
@@ -781,6 +825,10 @@ class SignalsMixin:
             pi.removeItem(curve)
         self.curves.clear()
 
+        for curve in self.y0_curves:
+            pi.removeItem(curve)
+        self.y0_curves.clear()
+
         for curve in self.annot_curves:
             pi.removeItem(curve)
         self.annot_curves.clear()
@@ -810,6 +858,9 @@ class SignalsMixin:
         chs = self.ui.tbl_desc_signals.checked()
         chs = [x for x in self.ss_chs if x in chs ] 
 
+        # sigmod channels
+        sigmods = {k: v for k, v in self.sigmods.items() if k in self.ss_chs}
+
         # annots
         anns = self.ui.tbl_desc_annots.checked()
         anns = [x for x in self.ss_anns if x in anns ]
@@ -821,46 +872,75 @@ class SignalsMixin:
         # store for any updates
         self.last_x1 = x1
         self.last_x2 = x2
-        
+
         # get canvas
         pw = self.ui.pg1
         vb = pw.getPlotItem().getViewBox()
+
+        # window (pixels)
+        self.ss.segsrv.set_pixel_width( int( vb.width() ) )
+        
+        # set range (x-axis)
         vb.setRange(xRange=(x1,x2), padding=0, update=False)  # no immediate paint
 
         # ch-ordering? (based on index
         if self.cmap_list:
             chs = sorted( chs, key=lambda x: (self.cmap_list.index(x) if x in self.cmap_list else len(self.cmap_list) + chs.index(x)))
             anns = sorted( anns, key=lambda x: (self.cmap_list.index(x) if x in self.cmap_list else len(self.cmap_list) + anns.index(x)))
+
         
         # channels
         nchan = len( chs )
-        idx = 0        
+        idx = 0
+        sigmod_idx = 0 # n(ch) x 18
         tv = [ '' ] * ( len(chs) + len(anns) )
         yv = [ 0.5 ] * ( len(chs) + len(anns) )
         xv = [  x1 + ( x2 - x1 ) * 0.02 ] * ( len(chs) + len(anns) )
         for ch in chs:
-            # signals
-            x = self.ss.get_timetrack( ch )
-            y = self.ss.get_scaled_signal( ch , idx )
-            # note: if filters set, these will have been passed to segsrv, which will
-            #       take care of filtering in the above call
 
-            # draw
-            self.curves[nchan-idx-1].setData(x, y)            
-            # labels            
+            # y0 lines
+            if self.cfg_show_zero_line:
+                y0 = self.ss.get_scaled_y0( ch )
+                if y0 >= 0:
+                    self.y0_curves[idx].setData([ x1, x2 ], [ y0 , y0 ])
+                else:
+                    self.y0_curves[idx].setData([], [])
+                                    
+            # todo: check if we need reverse idx'ing, as per nchan
+            if ch in sigmods:
+                self.ss.apply_sigmod( self.sigmods[ ch ][ 'mod' ] , ch , chs.index( ch ) )
+                self.curves[nchan-idx-1].setData( [ ] , [ ] )
+                for b in range(18):
+                    print( 'sigmod ' , ch , b )
+                    tx1 = self.ss.get_sigmod_timetrack( b )
+                    ty1 = self.ss.get_sigmod_scaled_signal( b )
+                    self.sigmod_curves[sigmod_idx].setData(tx1, ty1)
+                    sigmod_idx = sigmod_idx + 1
+            else: # regular channel
+                # signals
+                x = self.ss.get_timetrack( ch )
+                y = self.ss.get_scaled_signal( ch , idx )
+                # note: if filters set, these will have been passed to segsrv, which will
+                #       take care of filtering in the above call
+                # draw
+                self.curves[nchan-idx-1].setData(x, y)
+
+            # labels w/ y-axis scale             
             ylim = self.ss.get_window_phys_range( ch )
             if self.show_labels:
-                tv[idx] = ' ' + ch + ' ' + str(round(ylim[0],3)) + ':' + str(round(ylim[1],3)) + ' (' + self.units[ ch ] +')'
+                tv[idx] = ' ' + ch + ' ' + str(round(ylim[0],3)) + ' : ' + str(round(ylim[1],3)) + ' (' + self.units[ ch ] +')'
             yv[idx] = self.ss.get_ylabel( idx ) 
             # next
             idx = idx + 1
-        
+
+                
         # annots
         aidx = 0
         self.ss.compile_windowed_annots( anns )
         for ann in anns:
             a0 = self.ss.get_annots_xaxes( ann )            
             if len(a0) == 0:
+                self.annot_curves[ aidx ].setData( [ ] , [ ] )
                 idx = idx + 1
                 aidx = aidx + 1
                 continue
@@ -868,7 +948,6 @@ class SignalsMixin:
             y0 = self.ss.get_annots_yaxes( ann )
             y1 = self.ss.get_annots_yaxes_ends( ann )
             self.annot_curves[aidx].setData( [ x1 , x2 ] , [ ( y0[0] + y1[0] ) / 2  , ( y0[0] + y1[0] ) / 2 ] )
-#            self.annot_mgr.toggle( ann , True )
             a0, a1 = _ensure_min_px_width( vb, a0, a1, px=1)  # 1-px minimum
             self.annot_mgr.update_track( ann , x0 = a0 , x1 = a1 , y0 = y0 , y1 = y1 , reduce = True )
             # labels
@@ -890,21 +969,21 @@ class SignalsMixin:
 
         # gaps (list of (start,stop) values
         gaps = self.ss.get_gaps()
-        x0 =  [ x[0] for x in gaps ]
-        x1 =  [ x[1] for x in gaps ]
-        y0 =  [ 0.01 for x in gaps ]
-        y1 =  [ 0.96 for x in gaps ]
-        gaps = self.annot_mgr.update_track( "__#gaps__" ,x0 = x0 , x1 = x1 , y0 = y0 , y1 = y1 )
+        gx0 =  [ x[0] for x in gaps ]
+        gx1 =  [ x[1] for x in gaps ]
+        gy0 =  [ 0.01 for x in gaps ]
+        gy1 =  [ 0.96 for x in gaps ]
+        gaps = self.annot_mgr.update_track( "__#gaps__" ,x0 = gx0 , x1 = gx1 , y0 = gy0 , y1 = gy1 )
             
         # clock-ticks                                                                                                          
-        x1 = self.ss.get_window_left()
-        x2 = self.ss.get_window_right()
+        tx1 = self.ss.get_window_left()
+        tx2 = self.ss.get_window_right()
         tks = self.ss.get_clock_ticks(6) 
         tx = list( tks.keys() )
         tv = list( tks.values() )
         ty = [ 0.99 ] * len( tx )
-        tv.append( self._durstr( x1 , x2 ) )
-        tx.append( x2 - 0.05 * ( x2 - x1 ) )
+        tv.append( self._durstr( tx1 , tx2 ) )
+        tx.append( tx2 - 0.05 * ( tx2 - tx1 ) )
         ty.append( 0.03 )
         self.tb.setData(tx, ty , tv )
 
@@ -989,9 +1068,13 @@ class SignalsMixin:
             y = d[:,1]  # unscaled signal
             # filter?
             if ch in self.fmap:
-                y = self.filter_signal( y , ( self.fmap[ch] , self.srs[ ch ] ) )
-            # need to scale manually: to 0/1
-            mn, mx = min(y), max(y)
+                y = self.filter_signal( y , ch, ( self.fmap[ch] , self.srs[ ch ] ) )
+            # need to scale manually: to 0/1, either empirically, or from fixed
+            if ch in self.cmap_fixed_min:
+                mn = self.cmap_fixed_min[ch]
+                mx = self.cmap_fixed_max[ch]
+            else:
+                mn, mx = min(y), max(y)
             if mx > mn: y = (y - mn) / (mx - mn)
             else: y = y - y
             # --> to grid value
@@ -1002,7 +1085,7 @@ class SignalsMixin:
             # labels
             ylim = [ mn , mx ] 
             if self.show_labels:
-                tv[idx] = ' ' + ch + ' ' + str(round(ylim[0],3)) + ':' + str(round(ylim[1],3)) + ' (' + self.units[ ch ] +')'
+                tv[idx] = ' ' + ch + ' ' + str(round(ylim[0],3)) + ' : ' + str(round(ylim[1],3)) + ' (' + self.units[ ch ] +')'
             yv[idx] = ybase + 0.5 * h
             # next
             idx = idx + 1
@@ -1030,8 +1113,6 @@ class SignalsMixin:
            
             # draw
             self.annot_curves[ aidx ].setData( [ x1 , x2 ] , [ ( y0[0] + y1[0] ) / 2  , ( y0[0] + y1[0] ) / 2 ] ) 
-
-            #            self.annot_mgr.toggle( ann , True )
             a0, a1 = _ensure_min_px_width( vb, a0, a1, px=1)  # 1-px minimum
             self.annot_mgr.update_track( ann , x0 = a0 , x1 = a1 , y0 = y0 , y1 = y1 , reduce = True )
 
@@ -1082,7 +1163,10 @@ class SignalsMixin:
 
 # ------------------------------------------------------------
 
-    def filter_signal( self , x , fs_key , order = 2):
+    def filter_signal( self , x , ch, fs_key , order = 2):
+
+        if fs_key[0] == 'User':
+            return self.user_filter_signal( x,  ch, fs_key )
 
         if fs_key in self.fmap_flts:
             return sosfilt( self.fmap_flts[ fs_key ] , x )
@@ -1099,6 +1183,31 @@ class SignalsMixin:
                 self.fmap_flts[ fs_key ] = sos
                 return sosfilt( sos , x )
         
+
+    def user_filter_signal( self , x , fs_key , ch, order = 2):
+
+        if ch not in self.user_fmap_frqs:
+            return x
+
+        # edit 'User' --> specific band for this ch
+        frqs = self.user_fmap_frqs[ch]
+        fs_key[0] = str( frqs[0] ) + ":" + str(frqs[1] )
+        
+        if fs_key in self.fmap_flts:
+            return sosfilt( self.fmap_flts[ fs_key ] , x )
+        else:
+            frqs = self.fmap_frqs[ fs_key[0] ]
+            sr = fs_key[1]
+            # ensure below Nyquist 
+            if frqs[1] <= sr / 2:
+                sos = butter( order,
+                              frqs , 
+                              btype='band',
+                              fs=sr , 
+                              output='sos' )
+                self.fmap_flts[ fs_key ] = sos
+                return sosfilt( sos , x )
+
 # ------------------------------------------------------------
 
 from PySide6 import QtCore, QtGui
@@ -1212,6 +1321,18 @@ class XRangeSelector(QtCore.QObject):
         sc(QtCore.Qt.Key_Up,    lambda: self._zoom(0.8))
         sc(QtCore.Qt.Key_Down,  lambda: self._zoom(1.25))
 
+        # ---- added: mouse wheel zoom ----
+        def _wheel(ev):
+            dy = ev.angleDelta().y()
+            if dy > 0:
+                self._zoom(0.8)     # zoom in
+            elif dy < 0:
+                self._zoom(1.25)    # zoom out
+            ev.accept()             # block default pg zoom
+
+        self.wid.wheelEvent = _wheel
+        
+        
     def _step(self, big: bool):
         if self.integer:
             # 30 or 300 if standard window, but if view is smaller, scale down

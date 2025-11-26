@@ -31,7 +31,7 @@ class MasksMixin:
         self.ui.butt_generic_mask.clicked.connect( self._apply_mask )
 
     # ------------------------------------------------------------
-    # Update list of signals (req. 32 Hz or more)
+    # Update list of potential mask annots
         
     def _update_mask_list(self):
 
@@ -40,8 +40,10 @@ class MasksMixin:
         self.ui.combo_if_mask.clear()
 
         anns = [ '<none>' ]
-        
-        anns.extend( self.p.edf.annots() )
+
+        lst = self.p.edf.annots() 
+        lst = [s for s in lst if s != "SleepStage"]
+        anns.extend( lst )
         
         self.ui.combo_ifnot_mask.addItems( anns )
 

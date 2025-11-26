@@ -102,6 +102,10 @@ class SoapPopsMixin:
 
         if not hasattr(self, "p"): return
 
+        # first clear
+        self.ui.combo_soap.clear()
+        self.ui.combo_pops.clear()
+
         # list all channels with sample frequencies > 32 Hz 
         df = self.p.headers()
 

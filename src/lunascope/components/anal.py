@@ -27,12 +27,18 @@ from typing import List, Tuple
 from concurrent.futures import ThreadPoolExecutor
 
 from  ..helpers import clear_rows
+from .tbl_funcs import attach_comma_filter, copy_selection
 
 from PySide6.QtWidgets import QPlainTextEdit, QFileDialog, QMessageBox
 from PySide6.QtCore import QMetaObject, Qt, Slot
 from PySide6.QtCore import Qt, QItemSelection, QSortFilterProxyModel, QRegularExpression
 from PySide6.QtGui import QStandardItemModel, QStandardItem
 from PySide6.QtWidgets import QAbstractItemView, QHeaderView
+
+from PySide6.QtGui import QKeySequence, QGuiApplication, QShortcut
+
+from PySide6.QtGui import QAction
+
 
 
 class AnalMixin:
@@ -306,26 +312,38 @@ class AnalMixin:
             tbl.rename(columns={"index": "VAR"}, inplace=True)
             tbl.columns = ["VAR"] + [f"row{i}" for i in range(1, tbl.shape[1])]
         
-        model = self.df_to_model( tbl )
+        self.anal_model = self.df_to_model( tbl )
+
         # attach proxy to model
         self.anal_table_proxy = QSortFilterProxyModel(self)
-        self.anal_table_proxy.setSourceModel(model)
-        self.ui.anal_table.setModel(self.anal_table_proxy)
+        self.anal_table_proxy.setSourceModel( self.anal_model )
+
+        view = self.ui.anal_table
+        view.setModel(self.anal_table_proxy)
 
         # filter only on first N cols (strata)
-        self.anal_table_proxy.setFilterKeyColumn(-1)
-        self.anal_table_proxy.setFilterCaseSensitivity(Qt.CaseInsensitive)
+        self.events_table_proxy = attach_comma_filter( self.ui.anal_table , self.ui.flt_table )
 
-        self.ui.flt_table.textChanged.connect(self._on_anal_filter_text)
-        
-        view = self.ui.anal_table
+#        self.anal_table_proxy.setFilterKeyColumn(-1)
+#        self.anal_table_proxy.setFilterCaseSensitivity(Qt.CaseInsensitive)
+#        self.ui.flt_table.textChanged.connect(self._on_anal_filter_text)
+                
         view.setSortingEnabled(False)
         h = view.horizontalHeader()
         h.setSectionResizeMode(QHeaderView.Interactive)  # user-resizable                                          
         h.setStretchLastSection(False)                   # no auto-stretch fighting you                            
         view.resizeColumnsToContents()
 
+        # copy functionality
+        copy_action = QAction("Copy", view)
+        copy_action.setShortcut(QKeySequence.Copy)
+        copy_action.triggered.connect(lambda: copy_selection(view))
+        view.addAction(copy_action)
+        view.setContextMenuPolicy(Qt.ActionsContextMenu)
+        copy_shortcut = QShortcut(QKeySequence.Copy, view)
+        copy_shortcut.activated.connect(lambda: copy_selection( view ))
 
+        
     def _on_anal_filter_text(self, text: str):
         rx = QRegularExpression(QRegularExpression.escape(text))
         rx.setPatternOptions(QRegularExpression.CaseInsensitiveOption)

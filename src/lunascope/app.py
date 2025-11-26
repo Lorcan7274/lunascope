@@ -62,7 +62,7 @@ def _parse_args(argv):
     ap.add_argument("--param", "-p", dest="param_file", metavar="FILE",
                     help="parameter file")
     ap.add_argument("--cmap", "-c", dest="cmap_file", metavar="FILE",
-                    help="color map file")
+                    help="channel map file")
 
     # allow options to appear before/after the positional on py>=3.7
     parse = getattr(ap, "parse_intermixed_args", ap.parse_args)
@@ -112,25 +112,33 @@ def main(argv=None) -> int:
         except (UnicodeDecodeError, OSError) as e:
             print(f"[Error] Could not load {args.param_file}: {type(e).__name__}: {e}", file=sys.stderr)
 
-    # optionally pre-load a color map
+    # optionally, pre-load a parameter file?
     if args.cmap_file:
         try:
-            text = open( args.cmap_file , "r", encoding="utf-8").read()            
-            controller.cmap = {}
-            controller.cmap_list = [ ]
-            for line in text.splitlines():
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                parts = line.replace("=", " ").replace("\t", " ").split()
-                if len(parts) >= 2:
-                    controller.cmap[parts[0]] = parts[1]
-                    controller.cmap_list.append( parts[0] )
-            controller.cmap_rlist = list(reversed(controller.cmap_list))
-            controller.palset = 'bespoke'
-
+            text = open( args.cmap_file , "r", encoding="utf-8").read()
+            controller.ui.txt_cmap.setPlainText(text)
         except (UnicodeDecodeError, OSError) as e:
-            print(f"[Error] Could not load {args.cmap_file}: {type(e).__name__}: {e}", file=sys.stderr)
+            print(f"[Error] Could not load {args.cap_file}: {type(e).__name__}: {e}", file=sys.stderr)
+
+    # [ OLD - this actually set the cols ] optionally pre-load a color map
+    # if args.cmap_file:
+    #     try:
+    #         text = open( args.cmap_file , "r", encoding="utf-8").read()            
+    #         controller.cmap = {}
+    #         controller.cmap_list = [ ]
+    #         for line in text.splitlines():
+    #             line = line.strip()
+    #             if not line or line.startswith("#"):
+    #                 continue
+    #             parts = line.replace("=", " ").replace("\t", " ").split()
+    #             if len(parts) >= 2:
+    #                 controller.cmap[parts[0]] = parts[1]
+    #                 controller.cmap_list.append( parts[0] )
+    #         controller.cmap_rlist = list(reversed(controller.cmap_list))
+    #         controller.palset = 'bespoke'
+
+    #     except (UnicodeDecodeError, OSError) as e:
+    #         print(f"[Error] Could not load {args.cmap_file}: {type(e).__name__}: {e}", file=sys.stderr)
 
                 
 

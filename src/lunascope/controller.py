@@ -35,6 +35,7 @@ from PySide6.QtWidgets import QDockWidget, QLabel, QFrame, QSizePolicy, QMessage
 from PySide6.QtWidgets import QMainWindow, QProgressBar, QTableView, QAbstractItemView
 from PySide6.QtWidgets import QFileDialog
 from PySide6.QtWidgets import QSplitter, QVBoxLayout, QWidget
+from PySide6.QtGui import QKeySequence, QGuiApplication
 
 import pyqtgraph as pg
 
@@ -51,7 +52,7 @@ from .components.masks import MasksMixin
 from .components.ctree import CTreeMixin
 from .components.spectrogram import SpecMixin
 from .components.soappops import SoapPopsMixin
-
+from .components.cmaps import CMapsMixin
 
 
 # ------------------------------------------------------------
@@ -60,10 +61,7 @@ from .components.soappops import SoapPopsMixin
 from PySide6.QtCore import QObject
 
 
-#    def lock_ui(self, msg="Processing…"): self.blocker.show_block(msg)
-#    def unlock_ui(self):                  self.blocker.hide_block()
-
-class Controller( QObject,
+class Controller( QObject, CMapsMixin, 
                   SListMixin , MetricsMixin ,
                   HypnoMixin , SoapPopsMixin, 
                   AnalMixin , SignalsMixin, 
@@ -71,10 +69,8 @@ class Controller( QObject,
                   SpecMixin , MasksMixin ):
 
     def __init__(self, ui, proj):
-        super().__init__()
 
-        self.ui = ui
-        self.proj = proj
+        super().__init__()
 
         # GUI
         self.ui = ui
@@ -82,15 +78,14 @@ class Controller( QObject,
         # Luna
         self.proj = proj
         
-        # send compute to a different thread
+        # set up threading for compute funcs
         self._exec = ThreadPoolExecutor(max_workers=1)
         self._busy = False
         self.blocker = Blocker(self.ui, "...Processing...\n...please wait...", alpha=120)
                 
-        # setups
-        self._init_colors()
-        
         # initiate each component
+        self._init_colors()
+        self._init_cmaps()
         self._init_slist()
         self._init_metrics()
         self._init_hypno()
@@ -156,7 +151,7 @@ class Controller( QObject,
         act_pal_muted    = QAction("Muted", self)
         act_pal_black    = QAction("Black", self)
         act_pal_random   = QAction("Random", self)
-        act_pal_load     = QAction("Bespoke (load)", self)
+#        act_pal_load     = QAction("Bespoke (load)", self)
         act_pal_bespoke  = QAction("Bespoke (apply)", self)
         act_pal_user     = QAction("Pick", self)
 
@@ -165,8 +160,8 @@ class Controller( QObject,
         act_pal_muted.triggered.connect(self._set_muted_palette)
         act_pal_black.triggered.connect(self._set_black_palette)
         act_pal_random.triggered.connect(self._set_random_palette)
-        act_pal_load.triggered.connect(self._load_palette)
-        act_pal_load.triggered.connect(self._set_bespoke_palette)
+#        act_pal_load.triggered.connect(self._load_palette)
+        act_pal_bespoke.triggered.connect(self._set_bespoke_palette)
         act_pal_user.triggered.connect(self._select_user_palette)
         
         self.ui.menuPalettes.addAction(act_pal_spectrum)
@@ -177,7 +172,7 @@ class Controller( QObject,
         self.ui.menuPalettes.addSeparator()
         self.ui.menuPalettes.addAction(act_pal_user)
         self.ui.menuPalettes.addSeparator()
-        self.ui.menuPalettes.addAction(act_pal_load)
+#        self.ui.menuPalettes.addAction(act_pal_load)
         self.ui.menuPalettes.addAction(act_pal_bespoke)
         
         # about menu
@@ -338,7 +333,7 @@ class Controller( QObject,
         param = self._parse_tab_pairs( self.ui.txt_param )
         for p in param:
             self.proj.var( p[0] , p[1] )
-
+            
         # attach the individual by ID (i.e. as list may be filtered)
         id_str = current.siblingAtColumn(0).data(Qt.DisplayRole)
         
@@ -390,8 +385,10 @@ class Controller( QObject,
         
         # initiate graphs
         self.curves = [ ]
+        self.y0_curves = [ ] 
+        self.sigmod_curves = [ ] 
         self.annot_curves = [ ] 
-
+        
         # and update things that need updating
         self._update_metrics()
         self._render_hypnogram()
@@ -399,6 +396,9 @@ class Controller( QObject,
         self._update_mask_list()
         self._update_soap_list()
         self._update_params()
+
+        # get/set cmaps (done automatically via updates) 
+        self._apply_cmaps()
 
         # initially, no signals rendered / not rendered / not current
         self._set_render_status( False , False )
@@ -424,9 +424,6 @@ class Controller( QObject,
         if getattr(self, "anal_table_proxy", None) is not None:
             clear_rows( self.anal_table_proxy , keep_headers = False )
 
-        #clear_rows( self.ui.tbl_desc_signals )
-        #clear_rows( self.ui.tbl_desc_annots )
-
         if getattr(self, "signals_table_proxy", None) is not None:
             clear_rows( self.signals_table_proxy )
 
@@ -434,18 +431,12 @@ class Controller( QObject,
             clear_rows( self.annots_table_proxy )
 
         clear_rows( self.ui.anal_tables ) 
-#        clear_rows( self.ui.tbl_soap1 )
-#        clear_rows( self.ui.tbl_pops1 )
-#        clear_rows( self.ui.tbl_hypno1 )
-#        clear_rows( self.ui.tbl_hypno2 )
-#        clear_rows( self.ui.tbl_hypno3 )
 
         self.ui.combo_spectrogram.clear()
         self.ui.combo_pops.clear()
         self.ui.combo_soap.clear()
 
         self.ui.txt_out.clear()
-        # self.ui.txt_inp.clear() 
         
         self.spectrogramcanvas.ax.cla()
         self.spectrogramcanvas.figure.canvas.draw_idle()
@@ -463,7 +454,7 @@ class Controller( QObject,
         self.pops_df = pd.DataFrame()
         
         # filters: chennels -> filters
-        self.fmap = { } 
+        self.fmap = { }
 
         # filter label -> frqs
         self.fmap_frqs = {
@@ -474,7 +465,11 @@ class Controller( QObject,
             "Alpha": [8,11],
             "Sigma": [11,15],
             "Beta": [15,30] ,
-            "Gamma": [30,50] } 
+            "Gamma": [30,50] ,
+            "User": [ ] } 
+
+        # user-speific filter map: { ch : [ lwr , upr ] } 
+        self.user_fmap_frqs = { } 
 
         # SR + label --> butterworth model
         self.fmap_flts = { } 
@@ -510,197 +505,7 @@ class Controller( QObject,
         self.ui.label_spacing.setEnabled( self.rendered )
         self.ui.label_scale.setEnabled( self.rendered )
         self.ui.radio_fixedscale.setEnabled( self.rendered )
-        
-    #
-    # handle palettes
-    #
-
-    def _init_colors(self):
-
-        self.cmap = {}
-
-        self.cmap_list = [ ]
-        self.cmap_rlist = [ ] 
-
-        self.stgcols_hex = {
-            'N1': '#20B2DA',  # rgba(32,178,218,1)
-            'N2': '#0000FF',  # blue
-            'N3': '#000080',  # navy
-            'R':  '#FF0000',  # red
-            'W':  '#008000',  # green (CSS "green")
-            '?':  '#808080',  # gray
-            'L':  '#FFFF00',  # yellow
-        }
-
-        
-    def _set_default_palette(self):        
-        if not hasattr(self, 'palset'):
-            self._set_spectrum_palette()
-            self.palset = 'spectrum'
-
-
-    def set_palette(self):
-        if not hasattr(self, 'palset'):
-            self._set_default_palette()
-        if self.palset == 'spectrum': self._set_spectrum_palette()
-        if self.palset == 'white': self._set_white_palette()
-        if self.palset == 'black': self._set_black_palette()
-        if self.palset == 'muted': self._set_muted_palette()
-        if self.palset == 'random': self._set_random_palette()
-        if self.palset == 'bespoke': self._set_bespoke_palette()
-        if self.palset == 'user': self._set_user_palette()
-            
-    def _set_spectrum_palette(self):
-        self.palset = 'spectrum'
-        self.ui.pg1.setBackground('black')        
-        nchan = len( self.ui.tbl_desc_signals.checked() )
-        self.colors = [pg.intColor(i, hues=nchan) for i in range(nchan)]
-        anns = self.ui.tbl_desc_annots.checked()
-        nanns = len( anns )
-        self.acolors = [pg.intColor(i, hues=nanns) for i in range(nanns)]
-        self.acolors = self._update_stage_cols( self.acolors , anns )
-        self._update_cols()
-        
-    def _set_white_palette(self):        
-        self.palset = 'white'
-        self.ui.pg1.setBackground('#E0E0E0')
-        nchan = len( self.ui.tbl_desc_signals.checked() )      
-        self.colors = ['#101010'] * nchan
-        anns = self.ui.tbl_desc_annots.checked()
-        nanns = len( anns )
-        self.acolors = ['#101010'] * nanns
-        self.acolors = self._update_stage_cols( self.acolors , anns )
-        self._update_cols()
-
-    def _set_muted_palette(self):
-        self.palset = 'muted'
-        self.ui.pg1.setBackground('#E0E0E0')
-        nchan = len( self.ui.tbl_desc_signals.checked() )
-        self.colors = ['#101010'] * nchan
-        anns = self.ui.tbl_desc_annots.checked()
-        nanns = len( anns )
-        self.acolors = ['#101010'] * nanns
-        self.acolors = self._update_stage_cols( self.acolors , anns )
-        self._update_cols()
-
-    def _set_black_palette(self):
-        self.palset = 'black'
-        self.ui.pg1.setBackground('#101010')
-        nchan = len( self.ui.tbl_desc_signals.checked() )
-        self.colors = ['#E0E0E0'] * nchan
-        anns = self.ui.tbl_desc_annots.checked()
-        nanns = len( anns )
-        self.acolors = ['#E0E0E0'] * nanns
-        self.acolors = self._update_stage_cols( self.acolors , anns )
-        self._update_cols()
-        
-    def _set_random_palette(self):
-        self.palset = 'random'
-        self.ui.pg1.setBackground('#101010')
-        nchan = len( self.ui.tbl_desc_signals.checked() )
-        self.colors = random_darkbg_colors( nchan )
-        anns = self.ui.tbl_desc_annots.checked()
-        nanns = len( anns )
-        self.acolors = random_darkbg_colors( nanns )
-        self.acolors = self._update_stage_cols( self.acolors , anns )
-        self._update_cols()
-
-    def _select_user_palette(self):
-        self.palset = 'user'
-        self.c1, self.c2 = pick_two_colors()
-        self.ui.pg1.setBackground(self.c1)
-        nchan = len( self.ui.tbl_desc_signals.checked() )
-        self.colors = [self.c2] * nchan
-        anns = self.ui.tbl_desc_annots.checked()
-        nanns = len( anns )
-        self.acolors = [self.c2] * nanns
-        self.acolors = self._update_stage_cols( self.acolors , anns )
-        self._update_cols()
-
-    def _set_user_palette(self):
-        self.palset = 'user'
-        # assume self.c1 and self.c2 already set
-        #self.c1, self.c2 = pick_two_colors()
-        self.ui.pg1.setBackground(self.c1)
-        nchan = len( self.ui.tbl_desc_signals.checked() )
-        self.colors = [self.c2] * nchan
-        anns = self.ui.tbl_desc_annots.checked()
-        nanns = len( anns )
-        self.acolors = [self.c2] * nanns
-        self.acolors = self._update_stage_cols( self.acolors , anns )
-        self._update_cols()
-        
-    def _set_bespoke_palette(self):        
-        # back default black (i.e. for things not seen)
-        self._set_black_palette()
-        self.palset = 'bespoke'
-        chs = self.ui.tbl_desc_signals.checked()
-        # re-order list
-        if self.cmap_list:
-            chs = sorted( chs, key=lambda x: (self.cmap_list.index(x) if x in self.cmap_list else len(self.cmap_list) + chs.index(x)))
-            chs.reverse()
-        nchan = len( chs )
-        # set signal colors
-        self.colors = override_colors(self.colors, chs, self.cmap)
-        # and annots
-        anns = self.ui.tbl_desc_annots.checked()
-        if self.cmap_rlist:
-            anns = sorted( anns, key=lambda x: (self.cmap_list.index(x) if x in self.cmap_list else len(self.cmap_list) + anns.index(x)))
-        self.acolors = override_colors(self.acolors, anns, self.cmap)
-        self.acolors = self._update_stage_cols( self.acolors , anns )
-        self._update_cols()
-
-
-    def _update_stage_cols(self,pal,anns):
-        return [self.stgcols_hex.get(a_i, p_i) for a_i, p_i in zip(anns, pal)]
-
-    
-    def _load_palette(self):
-        txt_file, _ = QFileDialog.getOpenFileName(
-            self.ui,
-            "Open color map",
-            "",
-            "Text (*.txt *.map *.pal);;All Files (*)",
-            options=QFileDialog.Option.DontUseNativeDialog
-        )
-
-        if txt_file:
-            try:
-                text = open(txt_file, "r", encoding="utf-8").read()
-                
-                self.cmap = {}
-                self.cmap_list = [ ]
-                self.cmap_rlist = [ ] 
-                for line in text.splitlines():
-                    line = line.strip()
-                    if not line or line.startswith("#"):
-                        continue
-                    parts = line.replace("=", " ").replace("\t", " ").split()
-                    if len(parts) >= 2:
-                        self.cmap[parts[0]] = parts[1]
-                        self.cmap_list.append( parts[0] )
-
-                # reverse order (for plotting goes y 0 - 1 is bottom - top currently
-                # and can't be bothered to fix
-                self.cmap_rlist = list(reversed(self.cmap_list))
-                
-                # and set them
-                self._set_bespoke_palette()
-                
-            except (UnicodeDecodeError, OSError) as e:
-                QMessageBox.critical(
-                    self.ui,
-                    "Error opening color map",
-                    f"Could not load {txt_file}\nException: {type(e).__name__}: {e}"
-                )
-            
-    def _update_cols(self):
-        for c, col in zip(self.curves, self.colors):
-            c.setPen(pg.mkPen(col, width=1, cosmetic=True))
-        for c, col in zip(self.annot_curves, self.acolors):
-            c.setPen(pg.mkPen(col, width=1, cosmetic=True))
-
-                
+                        
         
     def show_about(self):
         box = QMessageBox(self.ui)

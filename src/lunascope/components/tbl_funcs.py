@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
     QStyle, QStyleOptionViewItem, QHeaderView
 )
 from PySide6.QtGui import QIcon, QStandardItem
-
+from PySide6.QtGui import QGuiApplication
 
 from typing import Iterable, Optional, Callable, List
 from PySide6.QtCore import Qt, QSignalBlocker
@@ -167,181 +167,6 @@ def add_combo_column(
     return proxy_col
 
 
-
-# -----------------------------------------------------------------------------
-# old add_check_column() that failed on some builds
-# -----------------------------------------------------------------------------
-
-
-# def add_check_column(
-#     view: QTableView,
-#     channel_col_before_insert: int,
-#     header_text: str = "✔",
-#     initial_checked: Optional[Iterable[str]] = None,
-#     on_change: Optional[Callable[[List[str]], None]] = None,
-#     visible_only: bool = False,  # True = affect only filtered rows
-# ) -> None:
-#     model = view.model()
-#     proxy: Optional[QSortFilterProxyModel] = None
-
-#     if isinstance(model, QSortFilterProxyModel):
-#         proxy = model
-#         src = proxy.sourceModel()
-#     else:
-#         src = model
-
-#     if not isinstance(src, QStandardItemModel):
-#         raise TypeError("Model must be QStandardItemModel or a QSortFilterProxyModel wrapping one.")
-
-#     _squelch = False
-#     prev_sort = view.isSortingEnabled()
-#     view.setSortingEnabled(False)
-
-#     # insert checkbox col at 0 on SOURCE
-#     src.insertColumn(0)
-#     if header_text:
-#         src.setHeaderData(0, Qt.Horizontal, header_text)
-#     view.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-
-#     checked = set(map(str, initial_checked or []))
-#     chan_col_after = channel_col_before_insert + 1  # after insertion on SOURCE
-
-#     # helpers to iterate rows and map indexes
-#     def _row_range():
-#         if proxy and visible_only:
-#             return range(proxy.rowCount())
-#         return range(src.rowCount())
-
-#     def _s_index(r: int, c: int):
-#         if proxy and visible_only:
-#             return proxy.mapToSource(proxy.index(r, c))
-#         elif proxy and not visible_only:
-#             # we want ALL rows in source
-#             return src.index(r, c)  # r already source row in this branch
-#         else:
-#             return src.index(r, c)
-
-#     # populate without per-item signals
-#     src.blockSignals(True)
-#     try:
-#         if proxy and not visible_only:
-#             # iterate ALL source rows
-#             for r in range(src.rowCount()):
-#                 it = QStandardItem()
-#                 it.setEditable(False)
-#                 it.setCheckable(True)
-#                 ch = str(src.data(src.index(r, chan_col_after)))
-#                 it.setCheckState(Qt.Checked if ch in checked else Qt.Unchecked)
-#                 it.setDragEnabled(True)
-#                 it.setDropEnabled(True)
-#                 src.setItem(r, 0, it)
-#         else:
-#             # iterate visible rows (proxy) or direct source when no proxy
-#             for r in _row_range():
-#                 it = QStandardItem()
-#                 it.setEditable(False)
-#                 it.setCheckable(True)
-#                 si = _s_index(r, chan_col_after)
-#                 ch = str(src.data(si))
-#                 it.setCheckState(Qt.Checked if ch in checked else Qt.Unchecked)
-#                 it.setDragEnabled(True)
-#                 it.setDropEnabled(True)
-#                 src.setItem(si.row(), 0, it)
-#     finally:
-#         src.blockSignals(False)
-
-#     # repaint column 0 via SOURCE so proxy relays it
-#     def _repaint_col0():
-#         if not src.rowCount():
-#             return
-#         tl = src.index(0, 0)
-#         br = src.index(src.rowCount() - 1, 0)
-#         nonlocal _squelch
-#         was = _squelch
-#         _squelch = True
-#         try:
-#             src.dataChanged.emit(tl, br, [Qt.CheckStateRole])
-#         finally:
-#             _squelch = was
-
-#     _repaint_col0()
-
-#     def _checked() -> List[str]:
-#         out: List[str] = []
-#         if proxy and visible_only:
-#             for r in range(proxy.rowCount()):
-#                 si0 = _s_index(r, 0)
-#                 it = src.item(si0.row(), 0)
-#                 if it and it.checkState() == Qt.Checked:
-#                     out.append(str(src.data(_s_index(r, chan_col_after))))
-#         else:
-#             for r in range(src.rowCount()):
-#                 it = src.item(r, 0)
-#                 if it and it.checkState() == Qt.Checked:
-#                     out.append(str(src.data(src.index(r, chan_col_after))))
-#         return out
-
-#     setattr(view, "checked", _checked)
-
-#     def _loop_set(state: Qt.CheckState, xs: Optional[Iterable[str]] = None):
-#         nonlocal _squelch
-#         _squelch = True
-#         blocker = QSignalBlocker(src)
-#         try:
-#             target_set = set(map(str, xs)) if xs is not None else None
-#             if proxy and visible_only:
-#                 rng = range(proxy.rowCount())
-#                 for r in rng:
-#                     srow = _s_index(r, 0).row()
-#                     it = src.item(srow, 0)
-#                     if it is None:
-#                         continue
-#                     if target_set is not None:
-#                         ch = str(src.data(src.index(srow, chan_col_after)))
-#                         tgt = Qt.Checked if ch in target_set else Qt.Unchecked
-#                         if it.checkState() != tgt:
-#                             it.setCheckState(tgt)
-#                     else:
-#                         if it.checkState() != state:
-#                             it.setCheckState(state)
-#             else:
-#                 rng = range(src.rowCount())
-#                 for r in rng:
-#                     it = src.item(r, 0)
-#                     if it is None:
-#                         continue
-#                     if target_set is not None:
-#                         ch = str(src.data(src.index(r, chan_col_after)))
-#                         tgt = Qt.Checked if ch in target_set else Qt.Unchecked
-#                         if it.checkState() != tgt:
-#                             it.setCheckState(tgt)
-#                     else:
-#                         if it.checkState() != state:
-#                             it.setCheckState(state)
-#         finally:
-#             del blocker
-#             _squelch = False
-#         _repaint_col0()
-#         if on_change:
-#             on_change(_checked())
-
-#     setattr(view, "select_all_checks", lambda: _loop_set(Qt.Checked))
-#     setattr(view, "select_none_checks", lambda: _loop_set(Qt.Unchecked))
-#     setattr(view, "set", lambda xs: _loop_set(Qt.PartiallyChecked, xs))
-
-#     def _on_item_changed(itm: QStandardItem):
-#         if _squelch or itm.column() != 0:
-#             return
-#         if on_change:
-#             on_change(_checked())
-
-#     if not getattr(src, "_checkcol_connected", False):
-#         src.itemChanged.connect(_on_item_changed)
-#         setattr(src, "_checkcol_connected", True)
-
-#     view.setSortingEnabled(prev_sort)
-
-
     
 # ------------------------------------------------------------
 #
@@ -409,6 +234,9 @@ def add_check_column(view, channel_col_before_insert, header_text="✔",
     _debounce = QTimer(view)
     _debounce.setSingleShot(True)
 
+    def _checked_visible(self=view, _src=src, _proxy=proxy, _cc=chan_col_after):
+        return _checked(self, _src=_src, _proxy=_proxy, _vis=True, _cc=_cc)
+    
     def _checked(self=view, _src=src, _proxy=proxy, _vis=visible_only, _cc=chan_col_after):
         out = []
         if _proxy and _vis:
@@ -482,7 +310,8 @@ def add_check_column(view, channel_col_before_insert, header_text="✔",
             target = None if xs is None else (xs if isinstance(xs, set) else set(map(str, xs)))
 
             # choose rows once
-            if _proxy and visible_only:
+#            if _proxy and visible_only:
+            if _proxy:
                 pr = _proxy.rowCount()
                 src_rows = []
                 for r in range(pr):
@@ -541,6 +370,7 @@ def add_check_column(view, channel_col_before_insert, header_text="✔",
     # bind helpers
     try:
         view.checked = types.MethodType(_checked, view)
+        view.checked_visible = types.MethodType(_checked_visible, view )
         view.select_all_checks = types.MethodType(lambda self: _loop_set(Qt.Checked), view)
         view.select_none_checks = types.MethodType(lambda self: _loop_set(Qt.Unchecked), view)
         view.set_checked_by_labels = types.MethodType(lambda self, xs: _loop_set(Qt.PartiallyChecked, xs), view)
@@ -607,3 +437,101 @@ def attach_comma_filter(table_view, line_edit, proxy=None):
     return proxy
 
 
+
+# ------------------------------------------------------------
+#
+# set signal filters programmatically
+#
+# ------------------------------------------------------------
+
+
+def set_filter_for_channel(proxy, channel_name: str, filter_code: str):
+    """
+    Programmatically set the filter for the given channel.
+    Updates the source model directly; proxy view & combo boxes update automatically.
+    """
+
+    src = proxy.sourceModel() if hasattr(proxy, "sourceModel") else proxy
+
+    ROWS = src.rowCount()
+    CH_COL = 1
+    FLT_COL = 2
+
+    # Find the source row with matching channel label
+    target_row = None
+    for r in range(ROWS):
+        ch = src.index(r, CH_COL).data(Qt.DisplayRole)
+        if ch == channel_name:
+            target_row = r
+            break
+
+    if target_row is None:
+        print(f"[WARN] Channel '{channel_name}' not found in table.")
+        return
+
+    # Set filter value
+    idx = src.index(target_row, FLT_COL)
+    ok = src.setData(idx, filter_code, Qt.EditRole)
+
+    if not ok:
+        print(f"[WARN] setData failed for channel '{channel_name}'")
+        return
+
+    # nb. persistent editor will update automatically due to _reopen_all_later logic
+
+    
+# --------------------------------------------------------------------------------
+# copy table
+
+
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QGuiApplication, QCursor
+from PySide6.QtWidgets import QTableView, QToolTip
+
+
+def copy_selection(table: QTableView, with_headers: bool = True, show_message: bool = True):
+    sel = table.selectionModel()
+    if not sel or not sel.hasSelection():
+        return
+
+    model = table.model()
+    indexes = sel.selectedIndexes()
+    if not indexes:
+        return
+
+    # Sort and get unique rows/cols
+    indexes = sorted(indexes, key=lambda x: (x.row(), x.column()))
+    rows = sorted({idx.row() for idx in indexes})
+    cols = sorted({idx.column() for idx in indexes})
+
+    # Build lookup for cell values
+    values = {}
+    for idx in indexes:
+        r, c = idx.row(), idx.column()
+        val = model.data(idx, Qt.DisplayRole)
+        values[(r, c)] = "" if val is None else str(val)
+
+    lines = []
+
+    # Optional header row
+    if with_headers:
+        header_cells = []
+        for c in cols:
+            h = model.headerData(c, Qt.Horizontal, Qt.DisplayRole)
+            header_cells.append("" if h is None else str(h))
+        lines.append("\t".join(header_cells))
+
+    # Data rows
+    for r in rows:
+        row_cells = [values.get((r, c), "") for c in cols]
+        lines.append("\t".join(row_cells))
+
+    text = "\n".join(lines)
+    QGuiApplication.clipboard().setText(text)
+
+    if show_message:
+        QToolTip.showText(
+            QCursor.pos(),
+            f"Copied {len(rows)}×{len(cols)} cells" + (" (with headers)" if with_headers else ""),
+            table,
+        )
