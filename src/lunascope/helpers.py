@@ -193,8 +193,8 @@ def add_dock_shortcuts(win, view_menu):
             act.setShortcut("Ctrl+9")
         elif act.text() == "(-) Masks":
             act.setShortcut("Ctrl+-")
-        elif act.text() == "(/) Commands":
-            act.setShortcut("Ctrl+/")
+#        elif act.text() == "(/) Commands":
+#            act.setShortcut("Ctrl+/")
 
     return act_show_all
 

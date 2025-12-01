@@ -82,7 +82,7 @@ class Controller( QObject, CMapsMixin,
         self._exec = ThreadPoolExecutor(max_workers=1)
         self._busy = False
         self.blocker = Blocker(self.ui, "...Processing...\n...please wait...", alpha=120)
-                
+
         # initiate each component
         self._init_colors()
         self._init_cmaps()
@@ -107,13 +107,15 @@ class Controller( QObject, CMapsMixin,
         act_load_edf = QAction("Load EDF", self)
         act_load_annot = QAction("Load Annotations", self)
         act_refresh = QAction("Refresh", self)
-
+        act_proj_eval = QAction("Evaluate (project)", self)
+        
         # connect to same slots as buttons
         act_load_slist.triggered.connect(self.open_file)
         act_build_slist.triggered.connect(self.open_folder)
         act_load_edf.triggered.connect(self.open_edf)
         act_load_annot.triggered.connect(self.open_annot)
         act_refresh.triggered.connect(self._refresh)
+        act_proj_eval.triggered.connect(self._proj_eval)
 
         self.ui.menuProject.addAction(act_load_slist)
         self.ui.menuProject.addAction(act_build_slist)
@@ -122,6 +124,8 @@ class Controller( QObject, CMapsMixin,
         self.ui.menuProject.addAction(act_load_annot)
         self.ui.menuProject.addSeparator()
         self.ui.menuProject.addAction(act_refresh)
+        self.ui.menuProject.addSeparator()
+        self.ui.menuProject.addAction(act_proj_eval)
 
         # set up menu items: viewing
         self.ui.menuView.addAction(self.ui.dock_slist.toggleViewAction())
@@ -138,7 +142,7 @@ class Controller( QObject, CMapsMixin,
         self.ui.menuView.addAction(self.ui.dock_console.toggleViewAction())
         self.ui.menuView.addAction(self.ui.dock_outputs.toggleViewAction())
         self.ui.menuView.addSeparator()
-        self.ui.menuView.addAction(self.ui.dock_help.toggleViewAction())
+#        self.ui.menuView.addAction(self.ui.dock_help.toggleViewAction())
 
         # set up menu: about
         act_about = QAction("Help", self)
@@ -209,11 +213,13 @@ class Controller( QObject, CMapsMixin,
         self.ui.dock_help.hide()
         self.ui.dock_console.hide()
         self.ui.dock_outputs.hide()
+        self.ui.dock_hypno.hide()
+        self.ui.dock_spectrogram.hide()
+        self.ui.dock_mask.hide()
         
         # arrange docks: lock and resize
         self.ui.setCorner(Qt.TopRightCorner,    Qt.RightDockWidgetArea)
         self.ui.setCorner(Qt.BottomRightCorner, Qt.RightDockWidgetArea)
-
         
         # arrange docks: lower docks (console, outputs)
         w = self.ui.width()
@@ -226,7 +232,7 @@ class Controller( QObject, CMapsMixin,
         # arrange docks: left docks (samples, settings)
         self.ui.resizeDocks(
             [self.ui.dock_slist, self.ui.dock_settings],
-            [int(w * 0.7), int(w * 0.3)],
+            [int(w * 0.5), int(w * 0.5)],
             Qt.Vertical
         )
 
@@ -313,6 +319,15 @@ class Controller( QObject, CMapsMixin,
     def unlock_ui(self):
         self.blocker.hide_block()
 
+    # ------------------------------------------------------------
+    # clear all, i.e. drop current record
+    # ------------------------------------------------------------
+
+    def _drop_inst(self):
+        # clear existing stuff
+        self._clear_all()
+        self.proj.clear_vars()
+        self.proj.reinit()
             
     # ------------------------------------------------------------
     # attach a new record
@@ -385,7 +400,8 @@ class Controller( QObject, CMapsMixin,
         
         # initiate graphs
         self.curves = [ ]
-        self.y0_curves = [ ] 
+        self.y0_curves = [ ]
+        self.y_curves = [ ] 
         self.sigmod_curves = [ ] 
         self.annot_curves = [ ] 
         
@@ -436,7 +452,8 @@ class Controller( QObject, CMapsMixin,
         self.ui.combo_pops.clear()
         self.ui.combo_soap.clear()
 
-        self.ui.txt_out.clear()
+        if not getattr(self, "project_mode", False):
+            self.ui.txt_out.clear()
         
         self.spectrogramcanvas.ax.cla()
         self.spectrogramcanvas.figure.canvas.draw_idle()

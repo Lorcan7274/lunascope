@@ -610,6 +610,10 @@ class SignalsMixin:
             pi.removeItem(curve)
         self.y0_curves.clear()
 
+        for curve in self.y_curves:
+            pi.removeItem(curve)
+        self.y_curves.clear()
+
         for curve in self.sigmod_curves:
             pi.removeItem(curve)
         self.sigmod_curves.clear()
@@ -633,13 +637,29 @@ class SignalsMixin:
         # y=0 lines
         #
 
+        y0col = 'gray'
+        if self.palset == 'white' or self.palset == 'muted':
+            y0col = 'black'
+
         for i in range(nchan):
-            pen = pg.mkPen( 'gray', width=1, cosmetic=True )
-            pen.setDashPattern([4, 8])
+            pen = pg.mkPen( y0col, width=2, cosmetic=True )
+            pen.setDashPattern([8, 4])
             c = pg.PlotCurveItem(pen=pen, connect='finite')
             pi.addItem(c)
             self.y0_curves.append(c)
 
+        #
+        # y=x lines
+        #
+        ycol = 'orange'
+        if self.palset == 'white' or self.palset == 'muted':
+            ycol = 'black'
+        for i in range(self.cmap_n_ylines):
+            pen = pg.mkPen( ycol , width=1, cosmetic=True )
+            pen.setDashPattern([4, 8])
+            c = pg.PlotCurveItem(pen=pen, connect='finite')
+            pi.addItem(c)
+            self.y_curves.append(c)
 
         #
         # initiate sigmod curves (18 per channel) [ch1 x 18, ch2 x 18 , ... ] 
@@ -829,6 +849,10 @@ class SignalsMixin:
             pi.removeItem(curve)
         self.y0_curves.clear()
 
+        for curve in self.y_curves:
+            pi.removeItem(curve)
+        self.y_curves.clear()
+
         for curve in self.annot_curves:
             pi.removeItem(curve)
         self.annot_curves.clear()
@@ -900,12 +924,20 @@ class SignalsMixin:
 
             # y0 lines
             if self.cfg_show_zero_line:
-                y0 = self.ss.get_scaled_y0( ch )
+                y0 = self.ss.get_scaled_y( ch , 0 )
                 if y0 >= 0:
                     self.y0_curves[idx].setData([ x1, x2 ], [ y0 , y0 ])
                 else:
                     self.y0_curves[idx].setData([], [])
                                     
+            # y-lines
+            if ch in self.cmap_ylines_idx:
+                yidx = self.cmap_ylines_idx[ ch ]
+                yval = self.cmap_ylines[ ch ]
+                for i in range( len( yidx ) ):
+                    yl = self.ss.get_scaled_y( ch , yval[i] )
+                    self.y_curves[ yidx[i] ].setData([ x1, x2 ], [ yl , yl ])
+                    
             # todo: check if we need reverse idx'ing, as per nchan
             if ch in sigmods:
                 self.ss.apply_sigmod( self.sigmods[ ch ][ 'mod' ] , ch , chs.index( ch ) )

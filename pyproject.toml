@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lunascope"
-version = "0.2.2"
+version = "0.2.3"
 description = "Sleep-EEG viewer and interface to Luna"
 readme = "README.md"
 requires-python = ">=3.9, <3.14"

@@ -102,7 +102,6 @@ class SpecMixin:
 
     # ------------------------------------------------------------
     # Caclculate a spectrogram
-
     
     def _calc_spectrogram(self):
 
@@ -184,9 +183,10 @@ class SpecMixin:
     def _derive_spectrogram(self, p, ch, minf, maxf, w):
         # worker thread: do not touch GUI,
         # return numpy arrays (by ref)
-        
-        df = p.silent_proc( "PSD min-sr=32 epoch-spectrum dB sig="+ch+" min="+str(minf)+" max="+str(maxf) )[ 'PSD: CH_E_F' ]        
-        
+
+        df = p.silent_proc_lunascope( "PSD min-sr=32 epoch-spectrum dB sig="
+                                      +ch+" min="+str(minf)+" max="+str(maxf) )[ 'PSD: CH_E_F' ]        
+
         x = df['E'].to_numpy(dtype=int)
         y = df['F'].to_numpy(dtype=float)
         z = df[ 'PSD' ].to_numpy(dtype=float)

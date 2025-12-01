@@ -91,6 +91,9 @@ class SoapPopsMixin:
         self.popscanvas = MplCanvas(self.ui.host_pops)
         self.ui.host_pops.layout().setContentsMargins(0,0,0,0)
         self.ui.host_pops.layout().addWidget( self.popscanvas )
+
+        # POPS resources
+        pops_path = self.ui.txt_pops_path.text()
         
         # wiring
         self.ui.butt_soap.clicked.connect( self._calc_soap )
