@@ -24,7 +24,7 @@ from os import path
 import os
 from pathlib import Path
         
-from PySide6.QtWidgets import QFileDialog, QHeaderView, QAbstractItemView
+from PySide6.QtWidgets import QFileDialog, QHeaderView, QAbstractItemView, QMessageBox
 from PySide6.QtCore import Qt, QDir, QRegularExpression, QSortFilterProxyModel
 from PySide6.QtGui import QStandardItemModel, QStandardItem
 
@@ -35,6 +35,32 @@ from pandas.api.types import is_numeric_dtype, is_integer_dtype
 from .tbl_funcs import attach_comma_filter
 
 class SListMixin:
+
+    def _find_matching_annotation_file(self, edf_file: str):
+        exts = [".annot", ".xml", ".eannot", ".tsv"]
+        p = Path(edf_file)
+        stem = p.stem.lower()
+        nsrr_stem = f"{stem}-nsrr"
+        parent = p.parent
+        if not parent.exists():
+            return None
+
+        by_ext = {e: [] for e in exts}
+        for cand in parent.iterdir():
+            if not cand.is_file():
+                continue
+            cand_stem = cand.stem.lower()
+            if cand_stem != stem and cand_stem != nsrr_stem:
+                continue
+            sfx = cand.suffix.lower()
+            if sfx in by_ext:
+                by_ext[sfx].append(cand)
+
+        for e in exts:
+            if by_ext[e]:
+                by_ext[e].sort(key=lambda x: x.name.lower())
+                return str(by_ext[e][0])
+        return None
 
     def _init_slist(self):
 
@@ -162,8 +188,26 @@ class SListMixin:
         if edf_file != "":
 
             base = path.splitext(path.basename(edf_file))[0]
+            annot_file = "."
 
-            row = [ base , edf_file , "." ] 
+            matching_annot = self._find_matching_annotation_file(edf_file)
+            if matching_annot is not None:
+                msg = (
+                    f"Found matching annotation file for this EDF:\n\n"
+                    f"{matching_annot}\n\n"
+                    f"Load it together with the EDF?"
+                )
+                ans = QMessageBox.question(
+                    self.ui,
+                    "Load Matching Annotation?",
+                    msg,
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes,
+                )
+                if ans == QMessageBox.Yes:
+                    annot_file = matching_annot
+
+            row = [ base , edf_file , annot_file ] 
             
             # specify SL directly
             self.proj.clear()
@@ -392,4 +436,3 @@ class SListMixin:
                 model.setItem(r, c_idx, item)
 
         return model
-

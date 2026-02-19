@@ -324,33 +324,44 @@ class MetricsMixin:
                            src=src_sig, target_col=target_src_col, ch_col=CH_SRC_COL):
             if not (top_left.column() <= target_col <= bottom_right.column()):
                 return
+            can_update_backend = hasattr(self, "ss") and getattr(self, "rendered", False)
             for r in range(top_left.row(), bottom_right.row() + 1):
                 val = src.index(r, target_col).data(Qt.EditRole) or 'None'
                 ch_label = src.index(r, ch_col).data(Qt.DisplayRole)
                 sr = src.index(r, SRC_COL_SR).data(Qt.DisplayRole)
 
-            if val == 'None':
-                self.fmap.pop(ch_label, None)
-                self.ss.clear_filter(ch_label)
-            else:
+                if val == 'None':
+                    self.fmap.pop(ch_label, None)
+                    if can_update_backend:
+                        self.ss.clear_filter(ch_label)
+                    continue
+
                 self.fmap[ch_label] = val
 
                 if val == 'User':
                     if ch_label in self.user_fmap_frqs:
-                        frqs = list( self.user_fmap_frqs[ch_label] )
+                        frqs = list(self.user_fmap_frqs[ch_label])
                     else:
-                        frqs = [ 99 , 1 ] # set to fail below
+                        frqs = []
                 else:
                     frqs = self.fmap_frqs[val]
 
                 sr = float(sr)
-                if frqs[1] <= sr / 2:
-                    order = 2
-                    sos = butter(order, frqs, btype='band', fs=sr, output='sos')
-                    self.ss.apply_filter(ch_label, sos.reshape(-1))
+                valid_band = (
+                    len(frqs) == 2 and
+                    frqs[0] < frqs[1] and
+                    frqs[0] >= 0 and
+                    frqs[1] <= sr / 2
+                )
+                if valid_band:
+                    if can_update_backend:
+                        order = 2
+                        sos = butter(order, frqs, btype='band', fs=sr, output='sos')
+                        self.ss.apply_filter(ch_label, sos.reshape(-1))
                 else:
                     self.fmap.pop(ch_label, None)
-                    self.ss.clear_filter(ch_label)
+                    if can_update_backend:
+                        self.ss.clear_filter(ch_label)
 
             self._clear_pg1()
             self._update_scaling() # calls _update_pg1() 
@@ -555,6 +566,4 @@ def expand_interval(left, right, *, factor=2.0, point_width=10.0, min_left=0.0):
         L += shift
         R += shift
     return L, R
-
-
 

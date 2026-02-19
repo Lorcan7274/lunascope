@@ -161,9 +161,9 @@ def add_dock_shortcuts(win, view_menu):
     act_show_all.setShortcut("Ctrl+0")
     
     def toggle_all():
-        docks = win.findChildren(QDockWidget)
+        # get all docks except Commands
+        docks = [ d for d in win.findChildren(QDockWidget) if d.objectName() != "dock_help" ]
         all_hidden = all(not d.isVisible() for d in docks)
-        # If all hidden → show all, else hide all
         for d in docks:
             d.setVisible(all_hidden)
 

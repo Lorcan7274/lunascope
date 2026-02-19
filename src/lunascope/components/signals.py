@@ -32,7 +32,7 @@ from concurrent.futures import ThreadPoolExecutor
 from PySide6.QtCore import QMetaObject, Qt, Slot
 
 import pyqtgraph as pg
-from PySide6.QtWidgets import QProgressBar, QMessageBox
+from PySide6.QtWidgets import QProgressBar, QMessageBox, QDoubleSpinBox, QLabel, QHBoxLayout, QWidget
 from PySide6.QtCore import QSignalBlocker
 
 class SignalsMixin:
@@ -50,6 +50,7 @@ class SignalsMixin:
         # pgh - hypnogram, controls view on pg1
         
         self.ui.butt_render.clicked.connect( self._render_signals )
+        self._init_line_weight_control()
 
         # pyqtgraph config options
         pg.setConfigOptions(useOpenGL=False, antialias=False)  
@@ -90,6 +91,57 @@ class SignalsMixin:
         
         self.last_x1 = 0
         self.last_x2 = 30
+
+    def _init_line_weight_control(self):
+        if getattr(self, "_line_weight_widget", None) is not None:
+            return
+
+        parent = self.ui.butt_render.parentWidget()
+        if parent is None:
+            return
+        layout = parent.layout()
+        if layout is None:
+            return
+
+        holder = QWidget(parent)
+        hlay = QHBoxLayout(holder)
+        hlay.setContentsMargins(0, 0, 0, 0)
+        hlay.setSpacing(6)
+
+        lab = QLabel("Line", holder)
+        spin = QDoubleSpinBox(holder)
+        spin.setDecimals(1)
+        spin.setSingleStep(0.5)
+        spin.setRange(0.5, 8.0)
+        spin.setValue(float(getattr(self, "cfg_line_weight", 1.0)))
+        spin.setToolTip("Trace line width")
+
+        hlay.addWidget(lab)
+        hlay.addWidget(spin)
+
+        idx = -1
+        if hasattr(layout, "indexOf"):
+            idx = layout.indexOf(self.ui.butt_render)
+
+        if idx >= 0 and hasattr(layout, "insertWidget"):
+            layout.insertWidget(idx + 1, holder)
+        else:
+            layout.addWidget(holder)
+
+        spin.valueChanged.connect(self._on_line_weight_changed)
+        self._line_weight_widget = holder
+        self._line_weight_spin = spin
+
+    def _on_line_weight_changed(self, value: float):
+        self.cfg_line_weight = float(value)
+
+        # Keep parsed cfg in sync for runtime operations that inspect cfg dict.
+        if hasattr(self, "cfg") and isinstance(self.cfg, dict):
+            self.cfg.setdefault("par", {})
+            self.cfg["par"]["line-weight"] = str(self.cfg_line_weight)
+
+        if hasattr(self, "_update_cols"):
+            self._update_cols()
 
         
     # --------------------------------------------------------------------------------
@@ -237,7 +289,7 @@ class SignalsMixin:
         self.sel = XRangeSelector(h, bounds=(0, self.ns),
                              integer=True,
                              click_span=30.0,
-                             min_span=5.0,
+                             min_span=1.0,
                              step=30, big_step=300 )
         
         self.sel.rangeSelected.connect(self.on_window_range)  
@@ -389,11 +441,36 @@ class SignalsMixin:
 
         # special version that releases the GIL
         self.ss.segsrv.populate_lunascope( chs = self.ss_chs , anns = self.ss_anns )
+        self._apply_backend_filters()
         self.ss.set_annot_format6( False ) # pyqtgraph, not plotly
         self.ss.set_clip_xaxes( False )
 
         # any sig-mods?
         self._render_cmaps()
+
+    def _apply_backend_filters(self):
+        # Apply currently selected channel filters only after segsrv has
+        # channel data loaded; applying earlier can leave stale empty buffers.
+        self.ss.clear_filters()
+        for ch_label, fcode in self.fmap.items():
+            if fcode == "None" or ch_label not in self.ss_chs:
+                continue
+            if ch_label not in self.srs:
+                continue
+
+            if fcode == "User":
+                frqs = self.user_fmap_frqs.get(ch_label, [])
+            else:
+                frqs = self.fmap_frqs.get(fcode, [])
+
+            if len(frqs) != 2:
+                continue
+
+            sr = float(self.srs[ch_label])
+            if frqs[0] < frqs[1] and frqs[1] <= sr / 2:
+                order = 2
+                sos = butter(order, frqs, btype='band', fs=sr, output='sos')
+                self.ss.apply_filter(ch_label, sos.reshape(-1))
     
         
     def _render_signals(self):
@@ -523,6 +600,28 @@ class SignalsMixin:
             t1 = self.ss.get_window_left_hms()
             t2 = self.ss.get_window_right_hms()
         else: # annot only segsrv
+            # In non-render mode with signals selected, cap at 30s without drift.
+            chs = self.ui.tbl_desc_signals.checked()
+            max_simple_span = 30.0
+            if len(chs) != 0 and (hi - lo) > max_simple_span:
+                prev_lo = getattr(self, "last_x1", None)
+                prev_hi = getattr(self, "last_x2", None)
+                prev_span = None if (prev_lo is None or prev_hi is None) else (prev_hi - prev_lo)
+
+                if prev_span is not None and abs(prev_span - max_simple_span) < 1e-6:
+                    lo, hi = prev_lo, prev_hi
+                else:
+                    c = 0.5 * (lo + hi)
+                    lo, hi = c - 0.5 * max_simple_span, c + 0.5 * max_simple_span
+                    if lo < 0:
+                        lo, hi = 0.0, max_simple_span
+                    if hi > self.ns:
+                        hi = float(self.ns)
+                        lo = max(0.0, hi - max_simple_span)
+
+                if getattr(self, "sel", None) is not None:
+                    self.sel.setRange(lo, hi, emit=False)
+
             self.ssa.window( lo  , hi )
             t1 = self.ssa.get_window_left_hms()
             t2 = self.ssa.get_window_right_hms()
@@ -943,7 +1042,7 @@ class SignalsMixin:
                 self.ss.apply_sigmod( self.sigmods[ ch ][ 'mod' ] , ch , chs.index( ch ) )
                 self.curves[nchan-idx-1].setData( [ ] , [ ] )
                 for b in range(18):
-                    print( 'sigmod ' , ch , b )
+                    # print( 'sigmod ' , ch , b )
                     tx1 = self.ss.get_sigmod_timetrack( b )
                     ty1 = self.ss.get_sigmod_scaled_signal( b )
                     self.sigmod_curves[sigmod_idx].setData(tx1, ty1)
@@ -1056,12 +1155,6 @@ class SignalsMixin:
         x1 = self.ssa.get_window_left()
         x2 = self.ssa.get_window_right()
 
-        # if 1+ signals, do not allow large windows
-        if len(chs) != 0 and x2 - x1 > 30:
-            # will be 38
-            self.sel.setRange(x1+4, x1+30+4)
-            return
-        
         # store for any updates
         self.last_x1 = x1
         self.last_x2 = x2
@@ -1198,7 +1291,7 @@ class SignalsMixin:
     def filter_signal( self , x , ch, fs_key , order = 2):
 
         if fs_key[0] == 'User':
-            return self.user_filter_signal( x,  ch, fs_key )
+            return self.user_filter_signal( x, fs_key, ch )
 
         if fs_key in self.fmap_flts:
             return sosfilt( self.fmap_flts[ fs_key ] , x )
@@ -1214,6 +1307,7 @@ class SignalsMixin:
                               output='sos' )
                 self.fmap_flts[ fs_key ] = sos
                 return sosfilt( sos , x )
+        return x
         
 
     def user_filter_signal( self , x , fs_key , ch, order = 2):
@@ -1223,22 +1317,25 @@ class SignalsMixin:
 
         # edit 'User' --> specific band for this ch
         frqs = self.user_fmap_frqs[ch]
-        fs_key[0] = str( frqs[0] ) + ":" + str(frqs[1] )
-        
-        if fs_key in self.fmap_flts:
-            return sosfilt( self.fmap_flts[ fs_key ] , x )
+        sr = fs_key[1]
+        if len(frqs) != 2:
+            return x
+        if not (frqs[0] < frqs[1] and frqs[0] >= 0 and frqs[1] <= sr / 2):
+            return x
+
+        # cache key for this channel's user band at this sampling rate
+        key = (f"User:{frqs[0]}-{frqs[1]}", sr, ch)
+        if key in self.fmap_flts:
+            return sosfilt( self.fmap_flts[ key ] , x )
         else:
-            frqs = self.fmap_frqs[ fs_key[0] ]
-            sr = fs_key[1]
-            # ensure below Nyquist 
-            if frqs[1] <= sr / 2:
-                sos = butter( order,
-                              frqs , 
-                              btype='band',
-                              fs=sr , 
-                              output='sos' )
-                self.fmap_flts[ fs_key ] = sos
-                return sosfilt( sos , x )
+            sos = butter( order,
+                          frqs ,
+                          btype='band',
+                          fs=sr ,
+                          output='sos' )
+            self.fmap_flts[ key ] = sos
+            return sosfilt( sos , x )
+        return x
 
 # ------------------------------------------------------------
 
@@ -1257,7 +1354,7 @@ class XRangeSelector(QtCore.QObject):
     rangeSelected = QtCore.Signal(float, float)
 
     def __init__(self, plot, bounds=None, integer=False,
-                 click_span=30.0, min_span=5.0,
+                 click_span=30.0, min_span=1.0,
                  line_width=6, step=1, big_step=10, step_px=3, big_step_px=15,
                  drag_thresh_px=6, edge_tol_px=10, thin_px=16):
         super().__init__(plot)
@@ -1371,7 +1468,8 @@ class XRangeSelector(QtCore.QObject):
             self._ensure_region_visible()
             lo, hi = self.region.getRegion()
             wd = hi - lo
-            if wd < 30: return wd/2
+            if wd < 30:
+                return max(1.0, float(int(round(wd / 2.0))))
             return self.big_step if big else self.step
         px = self.big_step_px if big else self.step_px
         (xmin, xmax), w = self.vb.viewRange()[0], max(1.0, float(self.vb.width() or 1))
@@ -1385,6 +1483,16 @@ class XRangeSelector(QtCore.QObject):
     
     # ---------- helpers ----------
     def _snap(self, x): return int(round(x)) if self.integer else float(x)
+
+    def _snap_pair(self, lo, hi):
+        if not self.integer:
+            return float(lo), float(hi)
+        min_w = max(1, int(np.ceil(self.min_span)))
+        span_i = max(min_w, int(round(hi - lo)))
+        c = 0.5 * (float(lo) + float(hi))
+        lo_i = int(round(c - 0.5 * span_i))
+        hi_i = lo_i + span_i
+        return float(lo_i), float(hi_i)
 
     def _in_vb(self, scene_pos): return self.vb.sceneBoundingRect().contains(scene_pos)
 
@@ -1420,6 +1528,30 @@ class XRangeSelector(QtCore.QObject):
             return max(0.0, float(self.bounds[1] - self.bounds[0]))
         xmin, xmax = self.vb.viewRange()[0]
         return max(0.0, float(xmax - xmin))
+
+    def _integer_zoom_ladder(self, max_w: float):
+        # Fine control at short windows, then progressively coarser steps.
+        base = [1, 2, 3, 4, 5, 6, 8, 10, 12, 15, 20, 30, 45, 60, 90, 120, 180, 300]
+        if max_w <= 0:
+            return base
+        max_i = max(1, int(np.floor(max_w)))
+        ladder = [x for x in base if x <= max_i]
+        if not ladder:
+            ladder = [1]
+        if ladder[-1] < max_i:
+            # Extend smoothly to large windows in render mode;
+            # avoid single-step jump from 300s to whole-night.
+            curr = ladder[-1]
+            while curr < max_i:
+                nxt = int(np.ceil(curr * 1.5))
+                if nxt <= curr:
+                    nxt = curr + 1
+                if nxt >= max_i:
+                    ladder.append(max_i)
+                    break
+                ladder.append(nxt)
+                curr = nxt
+        return ladder
 
     def _clamp_pair(self, lo, hi):
         if self.bounds is None:
@@ -1466,9 +1598,14 @@ class XRangeSelector(QtCore.QObject):
         self.wid.setFocus()
         self._schedule_emit(lo, hi)
 
-    def _schedule_emit(self, lo, hi):
-        lo, hi = self._snap(lo), self._snap(hi)
-        self._pending = (lo, hi)
+    def _schedule_emit(self, lo, hi, snap: bool = True):
+        if snap:
+            lo, hi = self._snap_pair(lo, hi)
+            lo, hi = self._enforce_span_limits(lo, hi)
+            lo, hi = self._snap_pair(lo, hi)
+        else:
+            lo, hi = self._enforce_span_limits(float(lo), float(hi))
+        self._pending = (float(lo), float(hi))
         if not self._emit_timer.isActive():
             self._emit_timer.start(0)
 
@@ -1670,7 +1807,8 @@ class XRangeSelector(QtCore.QObject):
         if self._setting_region:
             return
         lo, hi = self.region.getRegion()
-        lo, hi = self._enforce_span_limits(self._snap(lo), self._snap(hi))
+        lo, hi = self._snap_pair(lo, hi)
+        lo, hi = self._enforce_span_limits(lo, hi)
         self._set_region_silent(lo, hi)
         self._schedule_emit(lo, hi)
 
@@ -1682,7 +1820,9 @@ class XRangeSelector(QtCore.QObject):
     def _nudge(self, dx):
         self._ensure_region_visible()        
         lo, hi = self.region.getRegion()
-        lo, hi = self._clamp_pair(self._snap(lo)+dx, self._snap(hi)+dx)
+        lo, hi = self._snap_pair(lo, hi)
+        lo, hi = self._clamp_pair(lo + dx, hi + dx)
+        lo, hi = self._enforce_span_limits(lo, hi)
         self._set_region_silent(lo, hi)
         self._schedule_emit(lo, hi)
 
@@ -1693,6 +1833,25 @@ class XRangeSelector(QtCore.QObject):
         w = max(hi - lo, 0.0)
         max_w = self._max_span()
         min_w = min(self.min_span, max_w) if max_w > 0 else self.min_span
+
+        if self.integer:
+            ladder = self._integer_zoom_ladder(max_w)
+            curr = int(max(1, round(w)))
+            if factor < 1.0:
+                # zoom in: next smaller rung
+                smaller = [x for x in ladder if x < curr]
+                new_w = float(smaller[-1] if smaller else ladder[0])
+            else:
+                # zoom out: next larger rung
+                larger = [x for x in ladder if x > curr]
+                new_w = float(larger[0] if larger else ladder[-1])
+            lo2, hi2 = c - 0.5 * new_w, c + 0.5 * new_w
+            lo2, hi2 = self._enforce_span_limits(lo2, hi2)
+            self._set_region_silent(lo2, hi2)
+            # Preserve exact midpoint while zooming through discrete rung widths.
+            self._schedule_emit(lo2, hi2, snap=False)
+            return
+
         if w <= 0:
             w = min(max_w if max_w > 0 else self.click_span, self.click_span)
         new_w = w * float(factor)
@@ -2012,8 +2171,3 @@ def _ensure_min_px_width(vb, x0, x1, px=1):
     x0a = np.where(too_narrow, xc - 0.5*wmin, x0)
     x1a = np.where(too_narrow, xc + 0.5*wmin, x1)
     return x0a, x1a
-
-
-
-
-

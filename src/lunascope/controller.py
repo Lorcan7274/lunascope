@@ -213,10 +213,11 @@ class Controller( QObject, CMapsMixin,
         self.ui.dock_help.hide()
         self.ui.dock_console.hide()
         self.ui.dock_outputs.hide()
-        self.ui.dock_hypno.hide()
-        self.ui.dock_spectrogram.hide()
         self.ui.dock_mask.hide()
-        
+
+        self.ui.dock_hypno.show()
+        self.ui.dock_spectrogram.show()
+
         # arrange docks: lock and resize
         self.ui.setCorner(Qt.TopRightCorner,    Qt.RightDockWidgetArea)
         self.ui.setCorner(Qt.BottomRightCorner, Qt.RightDockWidgetArea)
@@ -261,6 +262,10 @@ class Controller( QObject, CMapsMixin,
         cw.setMinimumWidth(0)
         cw.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
+        # hide these after resizing
+        self.ui.dock_hypno.hide()
+        self.ui.dock_spectrogram.hide()
+        self.ui.dock_spectrogram.widget().setMinimumHeight(240)
         
         # ------------------------------------------------------------
         # set up status bar

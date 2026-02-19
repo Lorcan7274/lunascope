@@ -23,6 +23,7 @@
 import re
 from pathlib import Path
 from PySide6.QtWidgets import QMessageBox
+from PySide6.QtCore import QSignalBlocker
 
 from .tbl_funcs import set_filter_for_channel
 from ..helpers import override_colors
@@ -75,13 +76,17 @@ class CMapsMixin:
         self.ui.txt_pops_path.setText( self.cfg_pops_path )
         self.ui.txt_pops_model.setText( self.cfg_pops_model )
 
+        self.cmap_use_na_for_empty = True
+        self.cmap_na_token = "NA"
+        
         
     #
     # clear the current cmap
     #
     
     def _clear_cmaps(self):
-        pass
+        self._init_cmaps()
+        
     
     #
     # apply the current cmap (on attach/refresh) only called on 'render'
@@ -93,6 +98,13 @@ class CMapsMixin:
         # reset priors
         self._clear_cmaps()
         
+        # helpers
+        def ucfirst(s: str) -> str:
+            return s[:1].upper() + s[1:]
+
+        def istrue(s: str) -> bool:
+            return ucfirst(s) in [ 'Y', 'T', '1' ]
+
         # take current text in        
         text = self.ui.txt_cmap.toPlainText()
         try:
@@ -101,7 +113,7 @@ class CMapsMixin:
             QMessageBox.critical(self.ui, "CMap parse error", str(e))
             return
 
-#        print( self.cfg ) 
+        # print( self.cfg ) 
         # get sigmod pals
         # for now, just the default (rwb)
 
@@ -117,6 +129,10 @@ class CMapsMixin:
 
         if 'line-weight' in self.cfg['par']:
             self.cfg_line_weight = float( self.cfg['par']['line-weight'] )
+            if getattr(self, "_line_weight_spin", None) is not None:
+                b = QSignalBlocker(self._line_weight_spin)
+                self._line_weight_spin.setValue(self.cfg_line_weight)
+                del b
             
         if 'show-lines' in self.cfg['par']:
             t = self.cfg['par']['show-lines']            
@@ -125,7 +141,13 @@ class CMapsMixin:
             else:
                 self.cfg_show_zero_line = False
 
-
+        # copy/save tbls: treatment of empty values
+        if 'table-allow-empty' in self.cfg['par']:
+            self.cmap_use_na_for_empty = not istrue( self.cfg['par']['table-allow-empty'] )
+                       
+        if 'na-token' in self.cfg['par']:
+            self.cmap_na_token = self.cfg['par']['na-token']                       
+            
         # POPS
 
         if 'pops-path' in self.cfg['par']:
@@ -136,13 +158,7 @@ class CMapsMixin:
             self.cfg_pops_model = self.cfg['par']['pops-model']
             self.ui.txt_pops_model.setText( self.cfg_pops_model )
 
-                
-        def ucfirst(s: str) -> str:
-            return s[:1].upper() + s[1:]
-
-        def istrue(s: str) -> bool:
-            return ucfirst(s) in [ 'Y', 'T', '1' ]
-        
+                        
         # dock viz
         if 'project-dock' in self.cfg['par']:
             t = self.cfg['par']['project-dock']
@@ -167,6 +183,18 @@ class CMapsMixin:
         if 'mask-dock' in self.cfg['par']:
             t = self.cfg['par']['mask-dock']
             self.ui.dock_mask.setVisible( istrue(t) )
+
+        if 'signal-dock' in self.cfg['par']:
+            t = self.cfg['par']['signal-dock']
+            self.ui.dock_sig.setVisible( istrue(t) )
+
+        if 'annots-dock' in self.cfg['par']:
+            t = self.cfg['par']['annots-dock']
+            self.ui.dock_annot.setVisible( istrue(t) )
+
+        if 'instance-dock' in self.cfg['par']:
+            t = self.cfg['par']['instance-dock']
+            self.ui.dock_annots.setVisible( istrue(t) )
 
         if 'outputs-dock' in self.cfg['par']:
             t = self.cfg['par']['outputs-dock']
@@ -230,9 +258,17 @@ class CMapsMixin:
             # ch order
             self.cmap_list.append( ch )
             # optionaly, a color
-            if 'col' in self.cfg['sig'][ch]:
-                self.cmap[ch] = self.cfg['sig'][ch]['col']
+            col = self.cfg['sig'][ch].get('col')
+            if col is not None and str(col).strip() != "":
+                self.cmap[ch] = col
                 
+        for ann in self.cfg['ann_order']:
+            # ch order
+            self.cmap_list.append( ann )
+            # optionaly, a color
+            col = self.cfg['ann'][ann].get('col')
+            if col is not None and str(col).strip() != "":
+                self.cmap[ann] = col
 
         # reverse order (for plotting goes y 0 - 1 is bottom - top currently
         # and can't be bothered to fix
@@ -310,28 +346,27 @@ class CMapsMixin:
         }
 
         # signal modulation colors: red-white-blue
-        self.rwb_sigmod_colors = [
-            (255,255,255),
-            (204,217,255),
-            (140,179,255),
-            (77,128,255),
-            (26,64,255),
-            (102,140,255),
-            (179,204,255),
-            (255,255,255),
-            (255,179,179),
-            (255,115,115),
-            (255,64,64),
-            (255,26,26),
-            (255,102,102),
-            (255,179,179),
-            (255,217,217),
-            (255,242,242),
-            (255,255,255),
-            (255,255,255),
+        self.rwb_sigmod_colors = [    
+        ( 26,  64, 255),  #  0  -pi      neg peak (blue)
+        ( 77, 128, 255),  #  1
+        (140, 179, 255),  #  2
+        (204, 217, 255),  #  3
+        (160, 160, 160),  #  4  -pi/2    ZC (gray)
+        (255, 217, 217),  #  5
+        (255, 179, 179),  #  6
+        (255, 115, 115),  #  7
+        (255,  64,  64),  #  8
+        (255,  26,  26),  #  9   0       pos peak (red)
+        (255,  64,  64),  # 10
+        (255, 115, 115),  # 11
+        (255, 179, 179),  # 12
+        (160, 160, 160),  # 13  +pi/2    ZC (gray)
+        (204, 217, 255),  # 14
+        (140, 179, 255),  # 15
+        ( 77, 128, 255),  # 16
+        ( 26,  64, 255),  # 17  +pi      neg peak (blue, wrap)
         ]
 
-        
     def _set_default_palette(self):        
         if not hasattr(self, 'palset'):
             self._set_spectrum_palette()
@@ -494,10 +529,14 @@ class CMapsMixin:
                 )
             
     def _update_cols(self):
+        lw = float(getattr(self, "cfg_line_weight", 1.0))
         for c, col in zip(self.curves, self.colors):
-            c.setPen(pg.mkPen(col, width=1, cosmetic=True))
+            c.setPen(pg.mkPen(col, width=lw, cosmetic=True))
+        for i, c in enumerate(self.sigmod_curves):
+            col = self.rwb_sigmod_colors[i % len(self.rwb_sigmod_colors)]
+            c.setPen(pg.mkPen(col, width=lw, cosmetic=True))
         for c, col in zip(self.annot_curves, self.acolors):
-            c.setPen(pg.mkPen(col, width=1, cosmetic=True))
+            c.setPen(pg.mkPen(col, width=lw, cosmetic=True))
 
 
 
@@ -513,7 +552,7 @@ class CMapsMixin:
 def parse_cmap(text: str):
     """
     Parse cmap text with sections [par], [mod], [pal], [sig], [ann].
-
+    
     Returns a dict:
         {
           "par": { "key":value, ... },
@@ -541,9 +580,10 @@ def parse_cmap(text: str):
     }
 
     BUILTIN_PALETTES = {"rwb", "rainbow", "saturation"}
-            
-    current_section = None
 
+    # assume [par] at start 
+    current_section = 'par'
+    
     # For [pal] we may span multiple lines to collect 18 colors
     pending_pal_label = None
     pending_pal_colors = []
@@ -570,10 +610,6 @@ def parse_cmap(text: str):
             if current_section == "pal":
                 finish_pending_palette()
             current_section = line[1:-1]  # 'par', 'mod', 'pal', 'sig', 'ann'
-            continue
-
-        if current_section is None:
-            # ignore anything before first section header
             continue
 
         if current_section == "pal":
@@ -694,7 +730,7 @@ def parse_cmap(text: str):
                         raise ValueError(
                             f"Duplicate col in [ann] '{label}' on line {lineno}"
                         )
-                    rec["col"] = field[4:]
+                    rec["col"] = field[4:]                    
                 else:
                     raise ValueError(
                         f"Unknown token in [ann] '{label}' on line {lineno}: {field}"

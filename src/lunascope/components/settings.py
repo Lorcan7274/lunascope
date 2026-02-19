@@ -59,7 +59,7 @@ class SettingsMixin:
                 self.ui,
                 "Open a parameter file",
                 "",
-                "Text (*.txt);;All Files (*)",
+                "Param Files (*.txt *.par *);;All Files (*)",
                 options=QFileDialog.Option.DontUseNativeDialog
             )
         else:

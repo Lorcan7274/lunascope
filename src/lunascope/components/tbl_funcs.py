@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QIcon, QStandardItem
 from PySide6.QtGui import QGuiApplication
+from PySide6.QtWidgets import QFileDialog
 
 from typing import Iterable, Optional, Callable, List
 from PySide6.QtCore import Qt, QSignalBlocker
@@ -37,7 +38,7 @@ from PySide6.QtCore import QSortFilterProxyModel
 
 
 class ComboDelegate(QStyledItemDelegate):
-    def __init__(self, items, parent: QObject | None = None):
+    def __init__(self, items, parent: Optional[QObject] = None):
         super().__init__(parent)
         self.items = list(items)
 
@@ -484,12 +485,19 @@ def set_filter_for_channel(proxy, channel_name: str, filter_code: str):
 # copy table
 
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QGuiApplication, QCursor
 from PySide6.QtWidgets import QTableView, QToolTip
+from PySide6.QtGui import QGuiApplication, QCursor
+from PySide6.QtCore import Qt
 
+def copy_selection(
+    table: QTableView,
+    _self,
+    with_headers: bool = True,
+    show_message: bool = True ):
 
-def copy_selection(table: QTableView, with_headers: bool = True, show_message: bool = True):
+    use_na_for_empty = _self.cmap_use_na_for_empty
+    na_token = _self.cmap_na_token
+
     sel = table.selectionModel()
     if not sel or not sel.hasSelection():
         return
@@ -498,6 +506,15 @@ def copy_selection(table: QTableView, with_headers: bool = True, show_message: b
     indexes = sel.selectedIndexes()
     if not indexes:
         return
+
+    # helper to format cell values
+    def fmt_val(val):
+        if val is None:
+            return na_token if use_na_for_empty else ""
+        s = str(val)
+        if use_na_for_empty and s == "":
+            return na_token
+        return s
 
     # Sort and get unique rows/cols
     indexes = sorted(indexes, key=lambda x: (x.row(), x.column()))
@@ -509,11 +526,11 @@ def copy_selection(table: QTableView, with_headers: bool = True, show_message: b
     for idx in indexes:
         r, c = idx.row(), idx.column()
         val = model.data(idx, Qt.DisplayRole)
-        values[(r, c)] = "" if val is None else str(val)
+        values[(r, c)] = fmt_val(val)
 
     lines = []
 
-    # Optional header row
+    # Optional header row (leave headers as-is; no NA substitution)
     if with_headers:
         header_cells = []
         for c in cols:
@@ -523,7 +540,8 @@ def copy_selection(table: QTableView, with_headers: bool = True, show_message: b
 
     # Data rows
     for r in rows:
-        row_cells = [values.get((r, c), "") for c in cols]
+        # for non-selected cells inside the rectangular block, treat as empty/NA
+        row_cells = [values.get((r, c), fmt_val(None)) for c in cols]
         lines.append("\t".join(row_cells))
 
     text = "\n".join(lines)
@@ -535,3 +553,62 @@ def copy_selection(table: QTableView, with_headers: bool = True, show_message: b
             f"Copied {len(rows)}×{len(cols)} cells" + (" (with headers)" if with_headers else ""),
             table,
         )
+
+
+# ------------------------------------------------------------
+# save .tsv
+
+from PySide6.QtWidgets import QFileDialog
+from PySide6.QtCore import Qt
+
+def save_table_as_tsv(view,_self):
+
+    use_na_for_empty = _self.cmap_use_na_for_empty
+    na_token = _self.cmap_na_token
+    
+    model = view.model()
+    if model is None:
+        return
+
+    path, _ = QFileDialog.getSaveFileName(
+        view,
+        "Save as TSV",
+        "",
+        "TSV files (*.tsv);;All Files (*)",
+        options=QFileDialog.Option.DontUseNativeDialog,
+    )
+    if not path:
+        return
+
+    if not path.lower().endswith(".tsv"):
+        path += ".tsv"
+
+    rows = model.rowCount()
+    cols = model.columnCount()
+
+    def fmt_val(val):
+        if val is None:
+            return na_token if use_na_for_empty else ""
+        s = str(val)
+        if use_na_for_empty and s == "":
+            return na_token
+        return s
+
+    with open(path, "w", encoding="utf-8") as f:
+
+        # --- HEADER ROW (corrected) ---
+        header_cells = []
+        for c in range(cols):
+            hdr = model.headerData(c, Qt.Horizontal, Qt.DisplayRole)
+            header_cells.append("" if hdr is None else str(hdr))
+        f.write("\t".join(header_cells) + "\n")
+
+        # --- DATA ROWS ---
+        for r in range(rows):
+            row_cells = []
+            for c in range(cols):
+                idx = model.index(r, c)
+                val = model.data(idx, Qt.DisplayRole)
+                row_cells.append(fmt_val(val))
+            f.write("\t".join(row_cells) + "\n")
+            

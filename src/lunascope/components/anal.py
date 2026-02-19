@@ -27,7 +27,7 @@ from typing import List, Tuple
 from concurrent.futures import ThreadPoolExecutor
 
 from  ..helpers import clear_rows
-from .tbl_funcs import attach_comma_filter, copy_selection
+from .tbl_funcs import attach_comma_filter, copy_selection, save_table_as_tsv
 
 from PySide6.QtWidgets import QPlainTextEdit, QFileDialog, QMessageBox
 from PySide6.QtCore import QMetaObject, Qt, Slot
@@ -74,6 +74,23 @@ class AnalMixin:
         self.ui.anal_tables.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.ui.anal_tables.setSelectionMode(QAbstractItemView.SingleSelection)
 
+        view = self.ui.anal_table
+
+        # --- Copy action ---
+        copy_action = QAction("Copy", view)
+        copy_action.setShortcut(QKeySequence.Copy)
+        copy_action.setShortcutContext(Qt.WidgetWithChildrenShortcut)
+        copy_action.triggered.connect(lambda: copy_selection(view,self))
+        view.addAction(copy_action)
+
+        # --- Save-as-TSV action ---
+        tsv_action = QAction("Save as TSV…", view)
+        tsv_action.triggered.connect(lambda: save_table_as_tsv(view,self))
+        view.addAction(tsv_action)
+
+        view.setContextMenuPolicy(Qt.ActionsContextMenu)
+   
+        
         # whether single-sample or whole-project mode
         self.project_mode = False
 
@@ -387,27 +404,15 @@ class AnalMixin:
         view = self.ui.anal_table
         view.setModel(self.anal_table_proxy)
 
-        # filter only on first N cols (strata)
+        # filter rows on any cols
+        self.ui.flt_table.clear()
         self.events_table_proxy = attach_comma_filter( self.ui.anal_table , self.ui.flt_table )
-
-#        self.anal_table_proxy.setFilterKeyColumn(-1)
-#        self.anal_table_proxy.setFilterCaseSensitivity(Qt.CaseInsensitive)
-#        self.ui.flt_table.textChanged.connect(self._on_anal_filter_text)
-                
+        
         view.setSortingEnabled(False)
         h = view.horizontalHeader()
         h.setSectionResizeMode(QHeaderView.Interactive)  # user-resizable                                          
         h.setStretchLastSection(False)                   # no auto-stretch fighting you                            
         view.resizeColumnsToContents()
-
-        # copy functionality
-        copy_action = QAction("Copy", view)
-        copy_action.setShortcut(QKeySequence.Copy)
-        copy_action.triggered.connect(lambda: copy_selection(view))
-        view.addAction(copy_action)
-        view.setContextMenuPolicy(Qt.ActionsContextMenu)
-        copy_shortcut = QShortcut(QKeySequence.Copy, view)
-        copy_shortcut.activated.connect(lambda: copy_selection( view ))
 
         
     def _on_anal_filter_text(self, text: str):
@@ -557,6 +562,7 @@ class AnalMixin:
 
     def _proj_eval(self):
 
+        
         view = self.ui.tbl_slist
         model = view.model()
         if not model:
@@ -569,7 +575,8 @@ class AnalMixin:
 
         clear_rows(self.ui.anal_tables)
         clear_rows(self.ui.anal_table)
-
+        self.ui.txt_out.clear()
+        
         # project accumulators
         self._proj_view = view
         self._proj_model = model
