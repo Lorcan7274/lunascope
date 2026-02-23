@@ -401,7 +401,7 @@ class Controller( QObject, CMapsMixin,
                         self.ui,
                         "Reload EDF",
                         "Done - now reload the new EDF (or make a new sample list)" )
-                    return
+                return
         
         # initiate graphs
         self.curves = [ ]
@@ -555,4 +555,3 @@ class Controller( QObject, CMapsMixin,
             lbl.setOpenExternalLinks(True)
 
         box.exec()
-
