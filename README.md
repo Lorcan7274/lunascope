@@ -4,7 +4,7 @@ A viewer and frontend for Luna (http://zzz.bwh.harvard.edu/luna/)
 
 Requirements: 
 
- - Python 3.9 - 3.13: 3.14 currently not supported.
+ - Python 3.9 - 3.14
 
  - Compatible with CPython: PyPy not supported.
 
