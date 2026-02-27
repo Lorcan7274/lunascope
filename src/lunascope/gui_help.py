@@ -83,7 +83,7 @@ WIDGET_HELP: dict[str, str] = {
     "combo_soap": "Channel used for SOAP (requires valid staging).",
     "spin_soap_pc": "SOAP P_C threshold.",
     "butt_soap": "Run SOAP and plot hypnodensity output.",
-    "combo_pops": "Channel(s) used for POPS. Optional: enter a comma-delimited list manually.",
+    "combo_pops": "Channel(s) used for POPS. Open dropdown and check one or more channels.",
     "txt_pops_path": "Folder containing POPS model files (*.mod).",
     "txt_pops_model": "POPS model basename (for example: s2).",
     "check_pops_ignore_obs": "Ignore observed staging and run POPS in prediction-only mode.",

@@ -26,6 +26,7 @@ import lunapi as lp
 import pandas as pd
 
 import os, sys, threading
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 
 from PySide6.QtCore import QModelIndex, QObject, Signal, Qt, QSortFilterProxyModel
@@ -54,6 +55,7 @@ from .components.spectrogram import SpecMixin
 from .components.soappops import SoapPopsMixin
 from .components.cmaps import CMapsMixin
 from .gui_help import apply_gui_help, set_render_button_help
+from .session_state import save_session_file, load_session_file
 
 
 # ------------------------------------------------------------
@@ -109,6 +111,8 @@ class Controller( QObject, CMapsMixin,
         act_load_annot = QAction("Load Annotations", self)
         act_refresh = QAction("Refresh", self)
         act_proj_eval = QAction("Evaluate (project)", self)
+        act_save_session = QAction("Save Session...", self)
+        act_load_session = QAction("Load Session...", self)
         
         # connect to same slots as buttons
         act_load_slist.triggered.connect(self.open_file)
@@ -117,6 +121,8 @@ class Controller( QObject, CMapsMixin,
         act_load_annot.triggered.connect(self.open_annot)
         act_refresh.triggered.connect(self._refresh)
         act_proj_eval.triggered.connect(self._proj_eval)
+        act_save_session.triggered.connect(self._save_session_state)
+        act_load_session.triggered.connect(self._load_session_state)
 
         self.ui.menuProject.addAction(act_load_slist)
         self.ui.menuProject.addAction(act_build_slist)
@@ -127,6 +133,9 @@ class Controller( QObject, CMapsMixin,
         self.ui.menuProject.addAction(act_refresh)
         self.ui.menuProject.addSeparator()
         self.ui.menuProject.addAction(act_proj_eval)
+        self.ui.menuProject.addSeparator()
+        self.ui.menuProject.addAction(act_save_session)
+        self.ui.menuProject.addAction(act_load_session)
 
         # set up menu items: viewing
         self.ui.menuView.addAction(self.ui.dock_slist.toggleViewAction())
@@ -176,6 +185,8 @@ class Controller( QObject, CMapsMixin,
             "project_load_annot": act_load_annot,
             "project_refresh": act_refresh,
             "project_eval": act_proj_eval,
+            "project_save_session": act_save_session,
+            "project_load_session": act_load_session,
             "about_help": act_about,
             "palette_spectrum": act_pal_spectrum,
             "palette_white": act_pal_white,
@@ -576,3 +587,158 @@ class Controller( QObject, CMapsMixin,
             lbl.setOpenExternalLinks(True)
 
         box.exec()
+
+    def _save_session_state(self):
+        filename, _ = QFileDialog.getSaveFileName(
+            self.ui,
+            "Save Session",
+            "",
+            "Lunascope Session (*.lss);;JSON (*.json);;All Files (*)",
+            options=QFileDialog.Option.DontUseNativeDialog,
+        )
+        if not filename:
+            return
+
+        app_meta = {
+            "lunascope_version": __version__,
+        }
+        try:
+            x = lp.version()
+            app_meta["lunapi_version"] = x.get("lunapi")
+            app_meta["luna_version"] = x.get("luna")
+        except Exception:
+            pass
+
+        try:
+            session_meta = {}
+            slabel = self.ui.lbl_slist.text().strip() if hasattr(self.ui, "lbl_slist") else ""
+            if slabel and slabel not in {"(none)", "<internal>"}:
+                session_meta["slist_path"] = slabel
+
+            # Save current displayed sample rows so internal EDF-based sessions can be restored.
+            model = self.ui.tbl_slist.model() if hasattr(self.ui, "tbl_slist") else None
+            rows = []
+            if model is not None:
+                for r in range(model.rowCount()):
+                    row = []
+                    for c in range(3):
+                        idx = model.index(r, c)
+                        row.append(str(model.data(idx, Qt.DisplayRole) or ""))
+                    rows.append(row)
+            if rows:
+                session_meta["sample_rows"] = rows
+
+            sel = self.ui.tbl_slist.selectionModel() if hasattr(self.ui, "tbl_slist") else None
+            if sel and sel.currentIndex().isValid():
+                session_meta["selected_row"] = int(sel.currentIndex().row())
+
+            save_session_file(
+                filename,
+                self.ui,
+                app_meta=app_meta,
+                session_meta=session_meta,
+            )
+        except Exception as e:
+            QMessageBox.critical(
+                self.ui,
+                "Save Session Error",
+                f"Could not save session.\n\n{type(e).__name__}: {e}",
+            )
+            return
+
+    def _load_session_state(self):
+        filename, _ = QFileDialog.getOpenFileName(
+            self.ui,
+            "Load Session",
+            "",
+            "Lunascope Session (*.lss);;JSON (*.json);;All Files (*)",
+            options=QFileDialog.Option.DontUseNativeDialog,
+        )
+        if not filename:
+            return
+
+        self.load_session_state_file(filename)
+
+    def load_session_state_file(self, filename: str):
+        slist_load_note = None
+        try:
+            res = load_session_file(filename, self.ui)
+        except Exception as e:
+            QMessageBox.critical(
+                self.ui,
+                "Load Session Error",
+                f"Could not load session.\n\n{type(e).__name__}: {e}",
+            )
+            return
+
+        # Optional Phase 1 project pointer restore: re-load sample list path if provided.
+        try:
+            smeta = res.get("state", {}).get("session", {})
+            slist_path = smeta.get("slist_path")
+            selected_row = int(smeta.get("selected_row", 0))
+            if slist_path:
+                p = Path(str(slist_path)).expanduser()
+                if p.is_file():
+                    folder_path = str(p.parent) + os.sep
+                    self.proj.var("path", folder_path)
+                    self._read_slist_from_file(str(p))
+                    model = self.ui.tbl_slist.model()
+                    if model and model.rowCount() > 0:
+                        row = max(0, min(selected_row, model.rowCount() - 1))
+                        self.ui.tbl_slist.setCurrentIndex(model.index(row, 0))
+                        self.ui.tbl_slist.selectRow(row)
+                    slist_load_note = f"slist loaded: {p}"
+                else:
+                    slist_load_note = f"slist missing: {p}"
+            else:
+                sample_rows = smeta.get("sample_rows")
+                if isinstance(sample_rows, list) and sample_rows:
+                    self.proj.clear()
+                    self.proj.eng.set_sample_list(sample_rows)
+                    df = self.proj.sample_list()
+                    model = self.df_to_model(df)
+                    self._proxy.setSourceModel(model)
+                    self.ui.lbl_slist.setText("<internal>")
+                    view = self.ui.tbl_slist
+                    h = view.horizontalHeader()
+                    h.setSectionResizeMode(QHeaderView.Interactive)
+                    h.setStretchLastSection(False)
+                    view.resizeColumnsToContents()
+                    view.setSelectionBehavior(QAbstractItemView.SelectRows)
+                    view.setSelectionMode(QAbstractItemView.SingleSelection)
+                    view.verticalHeader().setVisible(True)
+                    if model.rowCount() > 0:
+                        row = max(0, min(selected_row, model.rowCount() - 1))
+                        self.ui.tbl_slist.setCurrentIndex(model.index(row, 0))
+                        self.ui.tbl_slist.selectRow(row)
+                    slist_load_note = "internal sample list restored"
+        except Exception as e:
+            slist_load_note = f"slist restore error: {type(e).__name__}: {e}"
+
+        rep = res["report"]
+        has_issues = bool(rep.get("deferred") or rep.get("skipped") or rep.get("missing"))
+        details = []
+        if slist_load_note and ("missing:" in slist_load_note or "error:" in slist_load_note):
+            details.append(f"Session project context: {slist_load_note}")
+        if rep.get("deferred_items"):
+            details.append("Deferred items:")
+            details.extend(f"  - {x}" for x in rep["deferred_items"][:20])
+        if rep.get("skipped_items"):
+            details.append("Skipped items:")
+            details.extend(f"  - {x}" for x in rep["skipped_items"][:20])
+        if rep.get("missing_items"):
+            details.append("Missing items:")
+            details.extend(f"  - {x}" for x in rep["missing_items"][:20])
+        details_text = ("\n\n" + "\n".join(details)) if details else ""
+
+        if has_issues or details:
+            QMessageBox.information(
+                self.ui,
+                "Session Loaded",
+                f"Loaded session:\n{res['path']}\n\n"
+                f"Restored: {rep['restored']}\n"
+                f"Deferred: {rep.get('deferred', 0)}\n"
+                f"Skipped: {rep['skipped']}\n"
+                f"Missing: {rep['missing']}"
+                f"{details_text}",
+            )

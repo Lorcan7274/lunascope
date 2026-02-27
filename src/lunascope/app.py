@@ -58,7 +58,7 @@ def _load_ui():
 def _parse_args(argv):
     ap = argparse.ArgumentParser(prog="lunascope")
     ap.add_argument("slist_file", nargs="?", metavar="FILE",
-                    help="a sample list, EDF or .annot file (optional)")
+                    help="a sample list, EDF, .annot, or .lss session file (optional)")
     ap.add_argument("--param", "-p", dest="param_file", metavar="FILE",
                     help="parameter file")
     ap.add_argument("--cmap", "-c", dest="cmap_file", metavar="FILE",
@@ -92,8 +92,11 @@ def main(argv=None) -> int:
     
     if args.slist_file:
 
+        # Lunascope session?
+        if args.slist_file.lower().endswith(".lss"):
+            controller.load_session_state_file(args.slist_file)
         # EDF?
-        if args.slist_file.lower().endswith(".edf"):
+        elif args.slist_file.lower().endswith(".edf"):
             controller.open_edf( args.slist_file )
         # .annot file?
         elif args.slist_file.lower().endswith(".annot"):
@@ -163,4 +166,3 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

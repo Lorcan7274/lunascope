@@ -19,14 +19,88 @@
 #
 #  --------------------------------------------------------------------
 
-from PySide6.QtWidgets import QVBoxLayout, QMessageBox
-from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QVBoxLayout, QMessageBox, QComboBox
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QStandardItemModel, QStandardItem
 import os
 from pathlib import Path
 import pandas as pd
 
 from .mplcanvas import MplCanvas
 from .plts import hypno_density, hypno
+
+
+class MultiSelectComboBox(QComboBox):
+    """QComboBox with checkable items and persistent popup for multi-select."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setModel(QStandardItemModel(self))
+        self.setEditable(True)
+        self.lineEdit().setReadOnly(True)
+        self.lineEdit().setPlaceholderText("Select one or more channels")
+        self.view().pressed.connect(self._on_item_pressed)
+        self._skip_hide_once = False
+
+    def _on_item_pressed(self, index):
+        item = self.model().itemFromIndex(index)
+        if item is None:
+            return
+        item.setCheckState(Qt.Unchecked if item.checkState() == Qt.Checked else Qt.Checked)
+        self._skip_hide_once = True
+        # Defer refresh so it wins over combo internals updating current index text.
+        QTimer.singleShot(0, self._refresh_text)
+
+    def hidePopup(self):
+        if self._skip_hide_once:
+            self._skip_hide_once = False
+            return
+        super().hidePopup()
+        self._refresh_text()
+
+    def set_items(self, labels, checked_labels=None):
+        checked = set(checked_labels or [])
+        model = self.model()
+        model.clear()
+        for lab in labels:
+            item = QStandardItem(str(lab))
+            item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
+            item.setData(Qt.Checked if lab in checked else Qt.Unchecked, Qt.CheckStateRole)
+            model.appendRow(item)
+        self._refresh_text()
+
+    def checked_items(self):
+        out = []
+        model = self.model()
+        for r in range(model.rowCount()):
+            item = model.item(r)
+            if item and item.checkState() == Qt.Checked:
+                out.append(item.text())
+        return out
+
+    def _refresh_text(self):
+        chs = self.checked_items()
+        self.setCurrentIndex(-1)
+        if not chs:
+            self.lineEdit().setText("")
+        elif len(chs) <= 3:
+            self.lineEdit().setText(", ".join(chs))
+        else:
+            self.lineEdit().setText(f"{len(chs)} selected")
+
+
+def _replace_with_multiselect(combo: QComboBox) -> MultiSelectComboBox:
+    parent = combo.parentWidget()
+    if parent is None:
+        return MultiSelectComboBox()
+    layout = parent.layout()
+    multi = MultiSelectComboBox(parent)
+    multi.setObjectName(combo.objectName())
+    if layout is not None and hasattr(layout, "replaceWidget"):
+        layout.replaceWidget(combo, multi)
+    combo.hide()
+    combo.deleteLater()
+    return multi
         
 class SoapPopsMixin:
 
@@ -94,12 +168,21 @@ class SoapPopsMixin:
 
         # POPS resources
         pops_path = self.ui.txt_pops_path.text()
+
+        # Replace Designer combo with a checkable multi-select control.
+        self.ui.combo_pops = _replace_with_multiselect(self.ui.combo_pops)
         
         # wiring
         self.ui.butt_soap.clicked.connect( self._calc_soap )
         self.ui.butt_pops.clicked.connect( self._calc_pops )
 
         self.ui.radio_pops_hypnodens.toggled.connect( self._render_pops_hypno )
+
+    def _parse_pops_channels(self):
+        if hasattr(self.ui.combo_pops, "checked_items"):
+            return self.ui.combo_pops.checked_items()
+        txt = self.ui.combo_pops.currentText().strip()
+        return [txt] if txt else []
         
     def _update_soap_list(self):
 
@@ -107,7 +190,12 @@ class SoapPopsMixin:
 
         # first clear
         self.ui.combo_soap.clear()
-        self.ui.combo_pops.clear()
+        prev_checked = []
+        if hasattr(self.ui.combo_pops, "checked_items"):
+            prev_checked = self.ui.combo_pops.checked_items()
+        else:
+            prev = self.ui.combo_pops.currentText().strip()
+            prev_checked = [prev] if prev else []
 
         # list all channels with sample frequencies > 32 Hz 
         df = self.p.headers()
@@ -118,7 +206,13 @@ class SoapPopsMixin:
             chs = [ ]
 
         self.ui.combo_soap.addItems( chs )
-        self.ui.combo_pops.addItems( chs )
+        if hasattr(self.ui.combo_pops, "set_items"):
+            self.ui.combo_pops.set_items(chs, checked_labels=prev_checked)
+        else:
+            self.ui.combo_pops.clear()
+            self.ui.combo_pops.addItems(chs)
+            if prev_checked:
+                self.ui.combo_pops.setCurrentText(prev_checked[0])
 
         
     # ------------------------------------------------------------
@@ -194,10 +288,23 @@ class SoapPopsMixin:
             QMessageBox.critical( self.ui , "Error", "No suitable signal for POPS" )
             return
 
-        # parameters
-        pops_chs = self.ui.combo_pops.currentText()
-        if type( pops_chs ) is str: pops_chs = [ pops_chs ] 
-        pops_chs = ",".join( pops_chs )
+        # parameters (single-channel dropdown or manual comma list)
+        pops_chs_list = self._parse_pops_channels()
+        if not pops_chs_list:
+            QMessageBox.critical( self.ui , "Error", "No POPS channel selected" )
+            return
+
+        # ensure channels are valid
+        valid_chs = set(self.p.edf.channels())
+        bad = [c for c in pops_chs_list if c not in valid_chs]
+        if bad:
+            QMessageBox.critical(
+                self.ui,
+                "Error",
+                "Invalid POPS channel(s): " + ", ".join(bad),
+            )
+            return
+        pops_chs = ",".join(pops_chs_list)
 
         pops_path = self.ui.txt_pops_path.text()
         pops_model = self.ui.txt_pops_model.text()
