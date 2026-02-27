@@ -88,12 +88,25 @@ def plot_hjorth( ch , ax , p , gui ):
     ax.clear()
 
     # get stats
-    p.eval( 'EPOCH dur=30 verbose & SIGSTATS epoch sig=' + ch ) 
-    df = p.table( 'SIGSTATS' , 'CH_E' ) 
-    dt = p.table( 'EPOCH' , 'E' )  
+    res = p.silent_proc_lunascope('EPOCH dur=30 verbose & SIGSTATS epoch sig=' + ch)
+    df = res.get('SIGSTATS: CH_E')
+    dt = res.get('EPOCH: E')
+    if df is None or dt is None or len(df) == 0 or len(dt) == 0:
+        return ax
 
-    # times
-    x = dt["START"].to_numpy(float)
+    # Align Hjorth rows to epoch START using E, so gaps map consistently
+    # with the spectrogram x-axis.
+    if "E" in df.columns and "E" in dt.columns and "START" in dt.columns:
+        dx = df[["E"]].merge(dt[["E", "START"]], on="E", how="left")
+        if not dx["START"].notna().any():
+            return ax
+        x = dx["START"].to_numpy(float)
+    elif "START" in dt.columns:
+        x = dt["START"].to_numpy(float)
+        if len(x) != len(df):
+            x = x[:len(df)]
+    else:
+        return ax
     
     def _norm(arr: np.ndarray) -> np.ndarray:
         mn = np.nanmin(arr)
@@ -168,6 +181,8 @@ def plot_spec( xi,yi,zi, ch, minf, maxf, ax , gui, clear = True):
     ax.set_ylabel('Frequency (Hz)')
     ax.set( ylim=(minf,maxf) )
     p1 = ax.pcolormesh(xi, yi, zi, cmap = 'turbo' )
+    if len(xi) > 1:
+        ax.set_xlim(0, float(np.nanmax(xi)))
     ax.margins(x=0, y=0.2)
     return ax  
 
