@@ -53,6 +53,7 @@ from .components.ctree import CTreeMixin
 from .components.spectrogram import SpecMixin
 from .components.soappops import SoapPopsMixin
 from .components.cmaps import CMapsMixin
+from .gui_help import apply_gui_help, set_render_button_help
 
 
 # ------------------------------------------------------------
@@ -167,6 +168,23 @@ class Controller( QObject, CMapsMixin,
 #        act_pal_load.triggered.connect(self._load_palette)
         act_pal_bespoke.triggered.connect(self._set_bespoke_palette)
         act_pal_user.triggered.connect(self._select_user_palette)
+
+        self._help_actions = {
+            "project_load_slist": act_load_slist,
+            "project_build_slist": act_build_slist,
+            "project_load_edf": act_load_edf,
+            "project_load_annot": act_load_annot,
+            "project_refresh": act_refresh,
+            "project_eval": act_proj_eval,
+            "about_help": act_about,
+            "palette_spectrum": act_pal_spectrum,
+            "palette_white": act_pal_white,
+            "palette_muted": act_pal_muted,
+            "palette_black": act_pal_black,
+            "palette_random": act_pal_random,
+            "palette_pick": act_pal_user,
+            "palette_bespoke": act_pal_bespoke,
+        }
         
         self.ui.menuPalettes.addAction(act_pal_spectrum)
         self.ui.menuPalettes.addAction(act_pal_white)
@@ -312,6 +330,8 @@ class Controller( QObject, CMapsMixin,
         # size overall app window
         
         self.ui.resize(1200, 800)
+        apply_gui_help(self.ui, self._help_actions)
+        set_render_button_help(self.ui, rendered=False, current=False)
 
 
     # ------------------------------------------------------------
@@ -527,6 +547,7 @@ class Controller( QObject, CMapsMixin,
         self.ui.label_spacing.setEnabled( self.rendered )
         self.ui.label_scale.setEnabled( self.rendered )
         self.ui.radio_fixedscale.setEnabled( self.rendered )
+        set_render_button_help(self.ui, rendered=self.rendered, current=self.current)
                         
         
     def show_about(self):
