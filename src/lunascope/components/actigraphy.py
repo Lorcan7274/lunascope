@@ -47,6 +47,8 @@ from PySide6.QtWidgets import (
 
 class ActigraphyMixin:
 
+    _ACTIGRAPHY_FLOAT_SIZE = (1200, 820)
+
     _ACT_EPOCH_STEPS = [
         (60, "1 min"),
         (120, "2 min"),
@@ -126,6 +128,10 @@ class ActigraphyMixin:
         check_overlay = QCheckBox("Annot overlay", controls)
         check_overlay.setObjectName("check_actigraphy_overlay")
 
+        check_detail = QCheckBox("Show lower plots", controls)
+        check_detail.setObjectName("check_actigraphy_detail")
+        check_detail.setChecked(True)
+
         lab_palette = QLabel("Palette", controls)
         combo_palette = QComboBox(controls)
         combo_palette.setObjectName("combo_actigraphy_palette")
@@ -150,6 +156,7 @@ class ActigraphyMixin:
         cgrid.addWidget(lab_epoch, 0, 6)
         cgrid.addWidget(combo_epoch, 0, 7)
         cgrid.addWidget(check_overlay, 0, 8, 1, 2)
+        cgrid.addWidget(check_detail, 1, 8, 1, 2)
 
         cgrid.addWidget(lab_annot, 1, 0)
         cgrid.addWidget(combo_annot, 1, 1)
@@ -202,6 +209,7 @@ class ActigraphyMixin:
         self.ui.combo_actigraphy_render = combo_render
         self.ui.combo_actigraphy_source = combo_source
         self.ui.check_actigraphy_overlay = check_overlay
+        self.ui.check_actigraphy_detail = check_detail
         self.ui.combo_actigraphy_palette = combo_palette
         self.ui.combo_actigraphy_annot = combo_annot
         self.ui.host_actigraphy = host
@@ -251,8 +259,10 @@ class ActigraphyMixin:
         self.ui.combo_actigraphy_render.currentIndexChanged.connect(self._schedule_actigraphy_update)
         self.ui.combo_actigraphy_source.currentIndexChanged.connect(self._on_actigraphy_source_changed)
         self.ui.check_actigraphy_overlay.toggled.connect(self._schedule_actigraphy_update)
+        self.ui.check_actigraphy_detail.toggled.connect(self._refresh_actigraphy_view)
         self.ui.combo_actigraphy_palette.currentIndexChanged.connect(self._schedule_actigraphy_update)
         self.ui.combo_actigraphy_annot.currentIndexChanged.connect(self._schedule_actigraphy_update)
+
     def _ensure_actigraphy_canvas(self, *_args):
         if getattr(self, "actigraphycanvas", None) is not None:
             return self.actigraphycanvas
@@ -327,6 +337,7 @@ class ActigraphyMixin:
 
     def _on_actigraphy_visibility_changed(self, visible):
         if visible:
+            self._present_actigraphy_dock()
             self._schedule_actigraphy_update()
 
     def _schedule_actigraphy_update(self, *_args):
@@ -342,6 +353,41 @@ class ActigraphyMixin:
         if not hasattr(self, "p"):
             return
         self._calc_actigraphy()
+
+    def _refresh_actigraphy_view(self, *_args):
+        if getattr(self, "_busy", False):
+            return
+        if not getattr(self.ui, "dock_actigraphy", None) or not self.ui.dock_actigraphy.isVisible():
+            return
+        if self._act_last_data is not None:
+            self._complete_actigraphy(self._act_last_data)
+            return
+        self._schedule_actigraphy_update()
+
+    def _present_actigraphy_dock(self):
+        dock = getattr(self.ui, "dock_actigraphy", None)
+        if dock is None or not dock.isVisible():
+            return
+
+        was_floating = dock.isFloating()
+        if not was_floating:
+            dock.setFloating(True)
+
+        target_w, target_h = self._ACTIGRAPHY_FLOAT_SIZE
+        if dock.width() < target_w or dock.height() < target_h:
+            dock.resize(target_w, target_h)
+
+        if was_floating:
+            return
+
+        try:
+            parent_geom = self.ui.frameGeometry()
+            center = parent_geom.center()
+            rect = dock.frameGeometry()
+            rect.moveCenter(center)
+            dock.move(rect.topLeft())
+        except Exception:
+            pass
 
     def _update_actigraphy_list(self):
         combo = self.ui.combo_actigraphy
@@ -400,8 +446,6 @@ class ActigraphyMixin:
         else:
             act_action.setShortcut(QKeySequence())
             hyp_action.setShortcut(QKeySequence("Ctrl+7"))
-            if self.ui.dock_actigraphy.isFloating():
-                self.ui.dock_actigraphy.setFloating(False)
 
     def _actigraphy_context_menu(self, pos):
         self._ensure_actigraphy_canvas()
@@ -994,15 +1038,23 @@ class ActigraphyMixin:
         fig = self.actigraphycanvas.figure
         fig.clf()
         fig.patch.set_facecolor("#0f1724")
-        gs = fig.add_gridspec(3, 2, width_ratios=[40, 2], height_ratios=[2.8, 1.25, 1.0])
-        ax_raster = fig.add_subplot(gs[0, 0])
-        cax = fig.add_subplot(gs[0, 1])
-        ax_profile = fig.add_subplot(gs[1, 0], sharex=ax_raster)
-        ax_daily = fig.add_subplot(gs[2, 0])
-        fig.add_subplot(gs[1, 1]).set_axis_off()
-        fig.add_subplot(gs[2, 1]).set_axis_off()
-        axs = (ax_raster, ax_profile, ax_daily)
-        fig.subplots_adjust(left=0.08, right=0.94, top=0.94, bottom=0.08, hspace=0.48, wspace=0.06)
+        show_lower = bool(getattr(self.ui, "check_actigraphy_detail", None) and self.ui.check_actigraphy_detail.isChecked())
+        if show_lower:
+            gs = fig.add_gridspec(3, 2, width_ratios=[40, 2], height_ratios=[2.8, 1.25, 1.0])
+            ax_raster = fig.add_subplot(gs[0, 0])
+            cax = fig.add_subplot(gs[0, 1])
+            ax_profile = fig.add_subplot(gs[1, 0], sharex=ax_raster)
+            ax_daily = fig.add_subplot(gs[2, 0])
+            fig.add_subplot(gs[1, 1]).set_axis_off()
+            fig.add_subplot(gs[2, 1]).set_axis_off()
+            axs = (ax_raster, ax_profile, ax_daily)
+            fig.subplots_adjust(left=0.08, right=0.94, top=0.94, bottom=0.08, hspace=0.48, wspace=0.06)
+        else:
+            gs = fig.add_gridspec(1, 2, width_ratios=[40, 2])
+            ax_raster = fig.add_subplot(gs[0, 0])
+            cax = fig.add_subplot(gs[0, 1])
+            axs = (ax_raster, None, None)
+            fig.subplots_adjust(left=0.06, right=0.95, top=0.96, bottom=0.06, hspace=0.0, wspace=0.06)
 
         matrix = np.asarray(data["matrix"], dtype=float)
         epoch_dur = int(data["epoch_dur"])
@@ -1072,20 +1124,21 @@ class ActigraphyMixin:
                 except Exception as e:
                     warnings.append(f"Raw annotation overlay failed: {type(e).__name__}: {e}")
                     self._actigraphy_debug("complete_overlay_err", error=f"{type(e).__name__}: {e}")
-            try:
-                self._plot_actigraphy_profile(axs[1], data["profile"], epoch_dur, data["value_label"], double=double)
-                self._actigraphy_debug("complete_profile_ok")
-            except Exception as e:
-                warnings.append(f"Actigraphy profile plot failed: {type(e).__name__}: {e}")
-                axs[1].set_axis_off()
-                self._actigraphy_debug("complete_profile_err", error=f"{type(e).__name__}: {e}")
-            try:
-                self._plot_actigraphy_daily(axs[2], data["daily_mean"], data["value_label"])
-                self._actigraphy_debug("complete_daily_ok")
-            except Exception as e:
-                warnings.append(f"Actigraphy daily plot failed: {type(e).__name__}: {e}")
-                axs[2].set_axis_off()
-                self._actigraphy_debug("complete_daily_err", error=f"{type(e).__name__}: {e}")
+            if show_lower:
+                try:
+                    self._plot_actigraphy_profile(axs[1], data["profile"], epoch_dur, data["value_label"], double=double)
+                    self._actigraphy_debug("complete_profile_ok")
+                except Exception as e:
+                    warnings.append(f"Actigraphy profile plot failed: {type(e).__name__}: {e}")
+                    axs[1].set_axis_off()
+                    self._actigraphy_debug("complete_profile_err", error=f"{type(e).__name__}: {e}")
+                try:
+                    self._plot_actigraphy_daily(axs[2], data["daily_mean"], data["value_label"])
+                    self._actigraphy_debug("complete_daily_ok")
+                except Exception as e:
+                    warnings.append(f"Actigraphy daily plot failed: {type(e).__name__}: {e}")
+                    axs[2].set_axis_off()
+                    self._actigraphy_debug("complete_daily_err", error=f"{type(e).__name__}: {e}")
             try:
                 self._update_actigraphy_summary(data)
                 self._actigraphy_debug("complete_summary_ok")
@@ -1300,6 +1353,10 @@ class ActigraphyMixin:
                     if np.isfinite(lo) and np.isfinite(hi) and hi > lo:
                         global_limits = (lo, hi)
 
+        if ndays > 0:
+            for y in np.arange(0.5, ndays + 1.0, 1.0):
+                ax.hlines(y, 0, xmax, color="#334155", linewidth=0.5, alpha=0.45)
+
         for i, (x, y) in enumerate(rows, start=1):
             y0 = float(i)
             if x.size == 0 or y.size == 0:
@@ -1334,7 +1391,6 @@ class ActigraphyMixin:
                 yt = yt.copy()
                 yt[masked_pts] = np.nan
             ax.plot(xx, yt, color="#7dd3fc", linewidth=0.8, alpha=0.95)
-            ax.hlines(y0, 0, xmax, color="#334155", linewidth=0.5, alpha=0.45)
 
         if missing.ndim == 2 and missing.shape[0] == ndays:
             if double:

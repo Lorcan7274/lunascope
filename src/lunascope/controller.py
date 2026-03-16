@@ -298,6 +298,7 @@ class Controller( QObject, CMapsMixin,
         self.ui.dock_hypno.hide()
         self.ui.dock_spectrogram.hide()
         self.ui.dock_actigraphy.hide()
+        self._detach_actigraphy_dock_from_main_layout()
         self.ui.dock_spectrogram.widget().setMinimumHeight(240)
         
         # ------------------------------------------------------------
@@ -537,6 +538,7 @@ class Controller( QObject, CMapsMixin,
             self._update_mode_badge()
         if hasattr(self, "_sync_multiday_actigraphy_dock"):
             self._sync_multiday_actigraphy_dock()
+        self._detach_actigraphy_dock_from_main_layout()
 
         if getattr(self, "soapcanvas", None) is not None:
             self.soapcanvas.ax.cla()
@@ -702,6 +704,22 @@ class Controller( QObject, CMapsMixin,
 
         self.load_session_state_file(filename)
 
+    def _detach_actigraphy_dock_from_main_layout(self):
+        dock = getattr(self.ui, "dock_actigraphy", None)
+        if dock is None:
+            return
+
+        was_visible = dock.isVisible()
+        if not dock.isFloating():
+            dock.setFloating(True)
+
+        if was_visible:
+            if hasattr(self, "_present_actigraphy_dock"):
+                self._present_actigraphy_dock()
+            dock.raise_()
+        else:
+            dock.hide()
+
     def load_session_state_file(self, filename: str):
         slist_load_note = None
         try:
@@ -757,6 +775,8 @@ class Controller( QObject, CMapsMixin,
                     slist_load_note = "internal sample list restored"
         except Exception as e:
             slist_load_note = f"slist restore error: {type(e).__name__}: {e}"
+
+        self._detach_actigraphy_dock_from_main_layout()
 
         rep = res["report"]
         has_issues = bool(rep.get("deferred") or rep.get("skipped") or rep.get("missing"))
