@@ -23,6 +23,7 @@
 import lunapi as lp
 import io
 import numpy as np
+from lunascope.helpers import winsorize_array
 
 from PySide6.QtWidgets import QVBoxLayout, QMessageBox
 from PySide6 import QtCore, QtWidgets, QtGui
@@ -326,7 +327,7 @@ class SpecMixin:
         x = x[ incl ]
         y = y[ incl ]
         z = z[ incl ]
-        z = lp.winsorize( z , limits=[w, w] )
+        z = winsorize_array(z, w)
 
         if x.size == 0 or y.size == 0:
             return np.array([]), np.array([]), np.array([])

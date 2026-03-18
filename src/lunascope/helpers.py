@@ -39,6 +39,7 @@ import sys
 import random, colorsys
 import pyqtgraph as pg
 import pandas as pd
+import numpy as np
 
 
 
@@ -144,6 +145,22 @@ def sort_df_by_list(df, col_idx, order_list):
 
     df_sorted = df.sort_values("_pos", kind="stable").drop(columns=["_key_lower", "_pos"])
     return df_sorted
+
+
+def winsorize_array(values, limit):
+    arr = np.asarray(values, dtype=float).copy()
+    lim = float(limit)
+    if lim <= 0:
+        return arr
+    if lim >= 0.5:
+        lim = 0.5
+    good = np.isfinite(arr)
+    if not np.any(good):
+        return arr
+    lo = np.nanquantile(arr[good], lim)
+    hi = np.nanquantile(arr[good], 1.0 - lim)
+    arr[good] = np.clip(arr[good], lo, hi)
+    return arr
 
 
         

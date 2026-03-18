@@ -21,6 +21,7 @@
 
 import lunapi as lp
 import numpy as np
+from lunascope.helpers import winsorize_array
 
 from matplotlib.patches import Rectangle
 from matplotlib.collections import PatchCollection
@@ -121,9 +122,9 @@ def plot_hjorth( ch , ax , p , gui , epoch_dur=30 ):
 
     # standardize Hjorth values
     w = gui.spin_win.value()
-    y1 = _norm(lp.winsorize( df["H1"].to_numpy(float) , limits = [w,w] ))
-    y2 = _norm(lp.winsorize( df["H2"].to_numpy(float) , limits = [w,w] ))
-    y3 = _norm(lp.winsorize( df["H3"].to_numpy(float) , limits = [w,w] ))
+    y1 = _norm(winsorize_array(df["H1"].to_numpy(float), w))
+    y2 = _norm(winsorize_array(df["H2"].to_numpy(float), w))
+    y3 = _norm(winsorize_array(df["H3"].to_numpy(float), w))
 
     # color axes
     idx2 = np.clip(np.rint(y2 * 99).astype(int), 0, 99)
