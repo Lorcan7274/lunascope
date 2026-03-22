@@ -68,7 +68,7 @@ macos.permissions =
 mode = standalone
 
 # specify any extra nuitka arguments
-extra_args = --quiet --noinclude-qt-translations --include-package=scipy --nofollow-import-to=ipywidgets --nofollow-import-to=IPython --include-package-data=lunascope
+extra_args = --quiet --noinclude-qt-translations --include-package=scipy --nofollow-import-to=ipywidgets --nofollow-import-to=IPython --include-package-data=lunascope --assume-yes-for-downloads --output-filename=Lunascope
 
 [buildozer]
 

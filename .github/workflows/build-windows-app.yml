@@ -31,8 +31,7 @@ jobs:
 
       - name: Zip app
         run: |
-          $src = if (Test-Path dist\Lunascope) { "dist\Lunascope" } else { "deployment\launch.dist" }
-          Compress-Archive -Path $src -DestinationPath Lunascope-Windows.zip
+          Compress-Archive -Path dist\Lunascope.dist -DestinationPath Lunascope-Windows.zip
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
