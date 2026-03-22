@@ -27,7 +27,7 @@ jobs:
       - name: Build app
         run: |
           source .venv/bin/activate
-          pyside6-deploy -c pysidedeploy.spec
+          echo Y | pyside6-deploy -c pysidedeploy.spec
 
       - name: Zip app bundle
         run: |

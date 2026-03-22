@@ -24,7 +24,7 @@ jobs:
           .venv\Scripts\pip install nuitka
 
       - name: Build app
-        run: .venv\Scripts\pyside6-deploy -c pysidedeploy.spec
+        run: echo Y | .venv\Scripts\pyside6-deploy -c pysidedeploy.spec
 
       - name: Zip app
         run: Compress-Archive -Path dist\Lunascope -DestinationPath dist\Lunascope-Windows.zip
