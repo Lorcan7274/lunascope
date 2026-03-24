@@ -58,6 +58,7 @@ class CMapsMixin:
     def _init_cmaps(self):
 
         self.cfg = { } 
+        self.cmap_explicit_ann_cols = set()
 
         # extracted : ch -> mod_label
         self.sigmods = { } 
@@ -278,6 +279,7 @@ class CMapsMixin:
             col = self.cfg['ann'][ann].get('col')
             if col is not None and str(col).strip() != "":
                 self.cmap[ann] = col
+                self.cmap_explicit_ann_cols.add(ann)
 
         # reverse order (for plotting goes y 0 - 1 is bottom - top currently
         # and can't be bothered to fix
@@ -349,7 +351,8 @@ class CMapsMixin:
             'N2': '#0000FF',  # blue
             'N3': '#000080',  # navy
             'R':  '#FF0000',  # red
-            'S':  '#800080',  # purple (blend of NREM blue and REM red)
+            'SP': '#800080',  # purple (blend of NREM blue and REM red)
+            'WP': '#008000',  # green (CSS "green")
             'W':  '#008000',  # green (CSS "green")
             '?':  '#808080',  # gray
             'L':  '#FFFF00',  # yellow
@@ -496,7 +499,14 @@ class CMapsMixin:
 
 
     def _update_stage_cols(self,pal,anns):
-        return [self.stgcols_hex.get(a_i, p_i) for a_i, p_i in zip(anns, pal)]
+        updated = []
+        explicit = getattr(self, "cmap_explicit_ann_cols", set())
+        for a_i, p_i in zip(anns, pal):
+            if a_i in explicit and a_i in self.cmap:
+                updated.append(self.cmap[a_i])
+            else:
+                updated.append(self.stgcols_hex.get(a_i, p_i))
+        return updated
 
     
     def _load_palette(self):
@@ -515,6 +525,7 @@ class CMapsMixin:
                 self.cmap = {}
                 self.cmap_list = [ ]
                 self.cmap_rlist = [ ] 
+                self.cmap_explicit_ann_cols = set()
                 for line in text.splitlines():
                     line = line.strip()
                     if not line or line.startswith("#"):

@@ -465,14 +465,11 @@ class MetricsMixin:
         rows = self.ssa.get_all_annots_with_inst_ids(anns, True)
         df = pd.DataFrame(rows, columns=["class", "inst", "hms", "start", "dur"])
         self.events_model = self.df_to_model(df)
-        
-        self.events_table_proxy = QSortFilterProxyModel(self)
-        self.events_table_proxy.setSourceModel(self.events_model)
 
         view = self.ui.tbl_desc_events
-        view.setModel(self.events_table_proxy)
-
         self.events_table_proxy = attach_comma_filter(self.ui.tbl_desc_events, self.ui.txt_events)
+        self.events_table_proxy.setSourceModel(self.events_model)
+        view.setModel(self.events_table_proxy)
         
         h = view.horizontalHeader()
         h.setStretchLastSection(True)
@@ -513,13 +510,28 @@ class MetricsMixin:
     def _on_row_changed(self, curr: QModelIndex, _prev: QModelIndex):
         if not curr.isValid():
             return
-        proxy_row = curr.row()
-        src_idx   = self.events_table_proxy.mapToSource(curr)
-        src_row   = src_idx.row()
+
+        model = curr.model()
+        src_idx = curr
+        while isinstance(model, QSortFilterProxyModel):
+            src_idx = model.mapToSource(src_idx)
+            if not src_idx.isValid():
+                return
+            model = model.sourceModel()
+
+        if model is not self.events_model:
+            return
+
+        src_row = src_idx.row()
 
         # get interval            
-        left = float(self.events_model.data(self.events_model.index(src_row, 3)))
-        right = left + float(self.events_model.data(self.events_model.index(src_row, 4)))
+        left_data = self.events_model.data(self.events_model.index(src_row, 3))
+        dur_data = self.events_model.data(self.events_model.index(src_row, 4))
+        if left_data is None or dur_data is None:
+            return
+
+        left = float(left_data)
+        right = left + float(dur_data)
 
         # expand?
         left , right = expand_interval( left, right )

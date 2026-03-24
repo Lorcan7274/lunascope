@@ -39,12 +39,12 @@ class SignalsMixin:
 
     def _navigator_stage_query_classes(self):
         # Include both detailed staging and generic sleep/wake aliases.
-        return ['N1', 'N2', 'N3', 'R', 'S', 'W', '?', 'L']
+        return ['N1', 'N2', 'N3', 'R', 'W', 'SP', 'WP', '?', 'L']
 
     def _navigator_stage_mode(self, stage_values):
         vals = set(stage_values)
         has_detailed = any(s in vals for s in ('N1', 'N2', 'N3', 'R'))
-        has_sw = any(s in vals for s in ('S', 'W'))
+        has_sw = any(s in vals for s in ('SP', 'WP'))
         if has_detailed:
             return 'detailed'
         if has_sw:
@@ -58,7 +58,7 @@ class SignalsMixin:
         if mode == 'detailed':
             keep = {'N1', 'N2', 'N3', 'R', 'W', '?', 'L'}
         elif mode == 'sw':
-            keep = {'S', 'W', '?', 'L'}
+            keep = {'SP', 'WP', '?', 'L'}
         else:
             keep = {'W', '?', 'L'}
         return df[df[class_col].isin(keep)].copy()
@@ -285,7 +285,8 @@ class SignalsMixin:
                  'N2': 0.06666666666666667,
                  'N3': 0.0,
                 'R': 0.2,
-                'S': 0.1,
+                'SP': 0.1,
+                'WP': 0.26666666666666666,
                 'W': 0.26666666666666666,
                 '?': 0.3333333333333333,
                 'L': 0.4}
@@ -372,9 +373,11 @@ class SignalsMixin:
         self._day_lines_pgh = []
         if self.multiday_mode:
             for _t in self._compute_day_boundaries():
-                _line = pg.InfiniteLine(pos=_t, angle=90,
-                    pen=pg.mkPen((255, 255, 180, 80), width=1,
-                                 style=QtCore.Qt.DashLine))
+                _line = pg.InfiniteLine(
+                    pos=_t,
+                    angle=90,
+                    pen=self._day_delimiter_pen(navigator=True),
+                )
                 pi.addItem(_line)
                 self._day_lines_pgh.append(_line)
 
@@ -412,7 +415,7 @@ class SignalsMixin:
 
         mode = self._navigator_stage_mode(stg_evts['Class'].tolist()) if len(stg_evts) else 'other'
         if mode == 'sw':
-            # Generic S/W mode: draw directly from annotations, no STAGE call needed.
+            # Generic SP/WP mode: draw directly from annotations, no STAGE call needed.
             df = stg_evts[['Start', 'Stop', 'Class']].copy()
             df.rename(columns={'Start': 'START', 'Stop': 'STOP', 'Class': 'OSTAGE'}, inplace=True)
         else:
@@ -909,9 +912,11 @@ class SignalsMixin:
         self._day_lines_pg1 = []
         if getattr(self, 'multiday_mode', False):
             for _t in self._compute_day_boundaries():
-                _line = pg.InfiniteLine(pos=_t, angle=90,
-                    pen=pg.mkPen((255, 255, 180, 50), width=1,
-                                 style=QtCore.Qt.DashLine))
+                _line = pg.InfiniteLine(
+                    pos=_t,
+                    angle=90,
+                    pen=self._day_delimiter_pen(navigator=False),
+                )
                 pi.addItem(_line)
                 self._day_lines_pg1.append(_line)
         
@@ -1205,7 +1210,7 @@ class SignalsMixin:
         tx2 = self.ss.get_window_right()
         tks = self.ss.get_clock_ticks(6, multiday=self.multiday_mode)
         tx = list( tks.keys() )
-        tv = list( tks.values() )
+        tv = self._format_clock_tick_labels(tx, list(tks.values()), tx1, tx2)
         ty = [ 0.99 ] * len( tx )
         tv.append( self._durstr( tx1 , tx2 ) )
         tx.append( tx2 - 0.05 * ( tx2 - tx1 ) )
@@ -1224,6 +1229,26 @@ class SignalsMixin:
         d = d/60
         return format(d, ".1f")+'h'
 
+    def _format_clock_tick_labels(self, tick_positions, fallback_labels, x1, x2):
+        if getattr(self, 'multiday_mode', False):
+            return fallback_labels
+
+        show_seconds = (x2 - x1) <= 3600.0
+        start_tod = int(getattr(self, '_record_start_tod_secs', 0))
+        labels = []
+        for tick, fallback in zip(tick_positions, fallback_labels):
+            try:
+                total = (start_tod + int(round(float(tick)))) % 86400
+            except (TypeError, ValueError):
+                labels.append(fallback)
+                continue
+
+            hh = total // 3600
+            mm = (total % 3600) // 60
+            ss = total % 60
+            labels.append(f"{hh:02d}:{mm:02d}:{ss:02d}" if show_seconds else f"{hh:02d}:{mm:02d}")
+        return labels
+
     def _compute_day_boundaries(self):
         """Return list of seconds-from-record-start for each day anchor boundary."""
         anchor_secs = getattr(self, 'cfg_day_anchor', 12) * 3600
@@ -1234,6 +1259,15 @@ class SignalsMixin:
             boundaries.append(t)
             t += 86400
         return boundaries
+
+    def _day_delimiter_pen(self, navigator: bool):
+        alpha = 120 if navigator else 90
+        return pg.mkPen(
+            (255, 255, 180, alpha),
+            width=2,
+            style=QtCore.Qt.DashLine,
+            cosmetic=True,
+        )
     
     # --------------------------------------------------------------------------------
     #
@@ -1255,10 +1289,25 @@ class SignalsMixin:
 
         # annots
         anns = self.ui.tbl_desc_annots.checked()
-        
+
         # window (sec)
         x1 = self.ssa.get_window_left()
         x2 = self.ssa.get_window_right()
+
+        # Guard: if signals are checked and window exceeds the non-render max
+        # (e.g. zoomed out to whole night while viewing annotations only, then
+        # a channel is checked on), snap back to a 30s epoch at the left edge
+        # before attempting to load data.
+        max_simple_span = 3600.0 if getattr(self, 'multiday_mode', False) else 30.0
+        if len(chs) > 0 and (x2 - x1) > max_simple_span:
+            x2 = x1 + max_simple_span
+            ns = getattr(self, 'ns', None)
+            if ns is not None and x2 > ns:
+                x2 = float(ns)
+                x1 = max(0.0, x2 - max_simple_span)
+            self.ssa.window(x1, x2)
+            if getattr(self, "sel", None) is not None:
+                self.sel.setRange(x1, x2, emit=False)
 
         # store for any updates
         self.last_x1 = x1
@@ -1379,7 +1428,7 @@ class SignalsMixin:
         x2 = self.ssa.get_window_right()
         tks = self.ssa.get_clock_ticks(6, multiday=self.multiday_mode)
         tx = list( tks.keys() )
-        tv = list( tks.values() )
+        tv = self._format_clock_tick_labels(tx, list(tks.values()), x1, x2)
         ty = [ 0.99 ] * len( tx )
         tv.append( self._durstr( x1 , x2 ) )
         tx.append( x2 - 0.05 * ( x2 - x1 ) )

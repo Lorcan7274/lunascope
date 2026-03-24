@@ -435,6 +435,10 @@ def attach_comma_filter(table_view, line_edit, proxy=None):
 
     proxy.setFilterKeyColumn(-1)
     proxy.setFilterCaseSensitivity(Qt.CaseInsensitive)
+
+    # Apply any filter text already present (e.g. after table re-population)
+    on_text_changed(line_edit.text())
+
     return proxy
 
 

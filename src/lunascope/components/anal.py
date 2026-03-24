@@ -151,6 +151,7 @@ class AnalMixin:
         # get/set parameters
         self.proj.clear_vars()
         self.proj.reinit()
+        self.p.refresh_channel_vars()
         self.proj.silence( False )
         param = self._parse_tab_pairs( self.ui.txt_param )
         for p in param:
@@ -205,6 +206,10 @@ class AnalMixin:
                 self._accumulate_project_results(tbls)
             else:
                 self._render_tables(tbls)
+                if hasattr(self, "_render_hypnogram"):
+                    self._render_hypnogram()
+                if hasattr(self, "_update_hypnogram"):
+                    self._update_hypnogram()
 
         finally:
             self.unlock_ui()

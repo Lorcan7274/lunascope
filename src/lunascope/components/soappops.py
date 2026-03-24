@@ -104,7 +104,7 @@ class SoapPopsMixin:
     def _stage_validation_classes(self):
         if hasattr(self, "_navigator_stage_query_classes"):
             return self._navigator_stage_query_classes()
-        return ['N1', 'N2', 'N3', 'R', 'S', 'W', '?', 'L']
+        return ['N1', 'N2', 'N3', 'R', 'W', 'SP', 'WP', '?', 'L']
 
     def _stage_validation_df(self):
         try:
@@ -141,7 +141,7 @@ class SoapPopsMixin:
     def _stage_validation_unique_count(self, df):
         if df.empty or 'Class' not in df.columns:
             return 0
-        valid = {'N1', 'N2', 'N3', 'R', 'S', 'W'}
+        valid = {'N1', 'N2', 'N3', 'R', 'W', 'SP', 'WP'}
         return int(df.loc[df['Class'].isin(valid), 'Class'].nunique())
 
     def _ensure_soap_canvas(self):
