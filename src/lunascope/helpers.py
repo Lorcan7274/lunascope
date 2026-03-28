@@ -96,7 +96,7 @@ def clear_rows(target, *, keep_headers: bool = True) -> None:
             cols = src.columnCount()
             for c in range(cols):
                 try:
-                    src.setHeaderData(c, QtCore.Qt.Horizontal, "")
+                    src.setHeaderData(c, Qt.Horizontal, "")
                 except Exception:
                     pass
         return
@@ -104,7 +104,7 @@ def clear_rows(target, *, keep_headers: bool = True) -> None:
     # Fallback: rebuild an empty QStandardItemModel, preserving or blanking headers
     cols = src.columnCount()
     headers = [
-        src.headerData(c, QtCore.Qt.Horizontal, QtCore.Qt.DisplayRole)
+        src.headerData(c, Qt.Horizontal, Qt.DisplayRole)
         for c in range(cols)
     ]
     new = QStandardItemModel(view or proxy)

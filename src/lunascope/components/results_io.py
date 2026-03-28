@@ -26,7 +26,78 @@ import zipfile
 
 import pandas as pd
 
-from PySide6.QtWidgets import QFileDialog, QMessageBox
+from PySide6.QtCore import Qt, QEvent
+from PySide6.QtWidgets import QFileDialog, QMessageBox, QHeaderView, QToolTip
+
+
+class HelpHeaderView(QHeaderView):
+    """Horizontal header for the output table.
+    Hovering a column shows the Luna variable description as a tooltip.
+    Results are cached per (cmd, strata, var) so Luna is only queried once.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(Qt.Horizontal, parent)
+        self.setSectionsClickable(True)   # required for sort-by-column to work
+        self._help_cmd = None
+        self._help_strata = None
+        self._cache: dict[tuple, str] = {}
+
+    def set_help_context(self, cmd: str, strata: str) -> None:
+        self._help_cmd = cmd
+        self._help_strata = strata
+
+    def event(self, e):
+        if e.type() == QEvent.Type.ToolTip and self._help_cmd:
+            section = self.logicalIndexAt(e.pos())
+            if section >= 0:
+                tip = self._tip_for_section(section)
+                if tip:
+                    QToolTip.showText(e.globalPos(), tip, self)
+                    e.accept()
+                    return True
+        return super().event(e)
+
+    def _tip_for_section(self, section: int) -> str:
+        model = self.model()
+        if model is None:
+            return ""
+        var = model.headerData(section, Qt.Horizontal, Qt.DisplayRole)
+        if not var:
+            return ""
+        var = str(var)
+        key = (self._help_cmd, self._help_strata, var)
+        if key in self._cache:
+            return self._cache[key]
+        tip = self._lookup(self._help_cmd, self._help_strata, var)
+        self._cache[key] = tip
+        return tip
+
+    @staticmethod
+    def _lookup(cmd: str, strata: str, var: str) -> str:
+        try:
+            import lunapi as lp
+        except ImportError:
+            return ""
+        # 1. Direct match using strata as the table key
+        try:
+            desc = lp.fetch_desc_var(cmd, strata, var)
+            if desc:
+                return f"{cmd} / {var}\n{desc}"
+        except Exception:
+            pass
+        # 2. Scan all tables for this command (strata format may differ)
+        try:
+            for tbl in (lp.fetch_tbls(cmd) or []):
+                try:
+                    desc = lp.fetch_desc_var(cmd, tbl, var)
+                    if desc:
+                        return f"{cmd} / {var}\n{desc}"
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return ""
 
 
 class ResultsIOMixin:
@@ -35,6 +106,14 @@ class ResultsIOMixin:
         self.ui.butt_out_save.clicked.connect(self._save_results)
         self.ui.butt_out_load.clicked.connect(self._load_results)
         self.ui.butt_out_clear.clicked.connect(self._clear_results)
+        # install help-aware header on the output table (done once at init)
+        self._help_header = HelpHeaderView(self.ui.anal_table)
+        self.ui.anal_table.setHorizontalHeader(self._help_header)
+
+    def _update_table(self, cmd, stratum):
+        """Wraps AnalMixin._update_table to update the help header context."""
+        super()._update_table(cmd, stratum)
+        self._help_header.set_help_context(cmd, stratum)
 
     # ------------------------------------------------------------------
     # Save
@@ -112,7 +191,7 @@ class ResultsIOMixin:
                 df = self.results.get(key)
                 if df is not None:
                     buf = io.StringIO()
-                    df.to_csv(buf, sep="\t", index=False)
+                    df.to_csv(buf, sep="\t", index=False, na_rep="NA")
                     zf.writestr(f"{folder}/{key}.tsv", buf.getvalue())
 
     # ------------------------------------------------------------------

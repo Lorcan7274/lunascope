@@ -205,7 +205,7 @@ class MetricsMixin:
             df = sort_df_by_list(df, 0, self.cmap_list)
 
         # SOURCE model from your DataFrame
-        src_sig = self.df_to_model(df)  # QStandardItemModel
+        src_sig = self.df_to_std_model(df)  # needs insertColumn / add_check_column
 
         # add filter proxy
         self.signals_table_proxy = attach_comma_filter(
@@ -385,7 +385,7 @@ class MetricsMixin:
         if self.cmap_list:
             df = sort_df_by_list( df , 0 , self.cmap_list )
         
-        src = self.df_to_model(df)  # must be QStandardItemModel
+        src = self.df_to_std_model(df)  # needs add_check_column
         
         # add filter proxy
         self.annots_table_proxy = attach_comma_filter(

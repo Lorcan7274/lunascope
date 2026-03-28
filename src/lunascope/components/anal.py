@@ -28,6 +28,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from  ..helpers import clear_rows
 from .tbl_funcs import attach_comma_filter, copy_selection, save_table_as_tsv
+from .slist import NumericSortFilterProxy
 
 from PySide6.QtWidgets import QPlainTextEdit, QFileDialog, QMessageBox
 from PySide6.QtCore import QMetaObject, Qt, Slot
@@ -402,6 +403,23 @@ class AnalMixin:
         
         tbl = self.results[ "_".join( [ cmd , stratum ] ) ]
 
+        # sort by ID, then by E or N if present
+        # use pd.to_numeric coercion so string-typed columns from .db files sort correctly
+        sort_cols = ["ID"] if "ID" in tbl.columns else []
+        for col in ("E", "N"):
+            if col in tbl.columns:
+                sort_cols.append(col)
+                break
+        if sort_cols:
+            try:
+                tbl = tbl.sort_values(
+                    sort_cols,
+                    key=lambda s: pd.to_numeric(s, errors="coerce") if s.name in ("E", "N") else s,
+                    na_position="last",
+                )
+            except Exception:
+                pass
+
         if not self.project_mode:
             tbl = tbl.drop(columns=["ID"])
 
@@ -415,18 +433,18 @@ class AnalMixin:
         
         self.anal_model = self.df_to_model( tbl )
 
-        # attach proxy to model
-        self.anal_table_proxy = QSortFilterProxyModel(self)
+        # single proxy handles both numeric sort and comma filter
+        self.anal_table_proxy = NumericSortFilterProxy(self)
         self.anal_table_proxy.setSourceModel( self.anal_model )
 
         view = self.ui.anal_table
         view.setModel(self.anal_table_proxy)
 
-        # filter rows on any cols
+        # pass existing proxy so attach_comma_filter wires the filter without wrapping again
         self.ui.flt_table.clear()
-        self.events_table_proxy = attach_comma_filter( self.ui.anal_table , self.ui.flt_table )
-        
-        view.setSortingEnabled(False)
+        self.events_table_proxy = attach_comma_filter( self.ui.anal_table , self.ui.flt_table , proxy=self.anal_table_proxy )
+
+        view.setSortingEnabled(True)
         h = view.horizontalHeader()
         h.setSectionResizeMode(QHeaderView.Interactive)  # user-resizable
         h.setStretchLastSection(False)                   # no auto-stretch fighting you

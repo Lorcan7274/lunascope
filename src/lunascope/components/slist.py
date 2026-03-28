@@ -25,7 +25,7 @@ import os
 from pathlib import Path
         
 from PySide6.QtWidgets import QFileDialog, QHeaderView, QAbstractItemView, QMessageBox
-from PySide6.QtCore import Qt, QDir, QRegularExpression, QSortFilterProxyModel
+from PySide6.QtCore import Qt, QDir, QRegularExpression, QSortFilterProxyModel, QAbstractTableModel, QModelIndex
 from PySide6.QtGui import QStandardItemModel, QStandardItem
 
 import pandas as pd
@@ -33,6 +33,120 @@ import numpy as np
 from pandas.api.types import is_numeric_dtype, is_integer_dtype
 
 from .tbl_funcs import attach_comma_filter
+
+
+class NumericSortFilterProxy(QSortFilterProxyModel):
+    """QSortFilterProxyModel with numeric sort and fast row filtering.
+
+    When the source is a DataFrameModel, filterAcceptsRow matches against a
+    pre-built per-row string (one Python call per row) instead of calling
+    data() for every column (ncols calls per row).
+    """
+
+    def lessThan(self, left, right):
+        lv = left.data(Qt.DisplayRole) or ""
+        rv = right.data(Qt.DisplayRole) or ""
+        try:
+            return float(lv) < float(rv)
+        except (TypeError, ValueError):
+            return str(lv) < str(rv)
+
+    def filterAcceptsRow(self, source_row, source_parent):
+        rx = self.filterRegularExpression()
+        if not rx.pattern():
+            return True
+        src = self.sourceModel()
+        if isinstance(src, DataFrameModel) and source_row < len(src._row_text):
+            return bool(rx.match(src._row_text[source_row]).hasMatch())
+        return super().filterAcceptsRow(source_row, source_parent)
+
+
+class DataFrameModel(QAbstractTableModel):
+    """Read-only model backed by a pandas DataFrame.
+
+    Qt calls data() only for visible cells, so large DataFrames render fast.
+    The constructor internally copies the DataFrame (via coerce_numeric_df)
+    so the caller's data can be freed without affecting the model.
+    """
+
+    def __init__(self, df, float_decimals_default=3, float_decimals_per_col=None, parent=None):
+        super().__init__(parent)
+        # coerce_numeric_df does df.copy() internally — model owns its data
+        # SListMixin is defined later in this same file; resolved at call time
+        self._df = SListMixin.coerce_numeric_df(
+            df,
+            decimals_default=float_decimals_default,
+            decimals_per_col=float_decimals_per_col or {},
+        )
+        digs = float_decimals_per_col or {}
+        cols = list(self._df.columns)
+        self._col_is_int   = [pd.api.types.is_integer_dtype(self._df[c].dtype) for c in cols]
+        self._col_is_float = [pd.api.types.is_float_dtype(self._df[c].dtype)   for c in cols]
+        self._float_digs   = [digs.get(c, float_decimals_default) for c in cols]
+        # Pre-compute a tab-joined search string per row for fast proxy filtering.
+        # Built once here; NumericSortFilterProxy.filterAcceptsRow uses it directly.
+        self._row_text = self._build_row_text()
+
+    def _build_row_text(self) -> list[str]:
+        """Build one tab-joined search string per row using vectorised pandas ops."""
+        parts = []
+        for c, col in enumerate(self._df.columns):
+            s = self._df[col]
+            if self._col_is_int[c]:
+                parts.append(s.apply(lambda v: "" if pd.isna(v) else str(int(v))))
+            elif self._col_is_float[c]:
+                digs = self._float_digs[c]
+                parts.append(s.apply(lambda v, d=digs: "" if pd.isna(v) else f"{float(v):.{d}f}"))
+            else:
+                parts.append(s.fillna("").astype(str))
+        if not parts:
+            return [""] * len(self._df)
+        combined = parts[0]
+        for p in parts[1:]:
+            combined = combined + "\t" + p
+        return combined.tolist()
+
+    def rowCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() else len(self._df)
+
+    def columnCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() else len(self._df.columns)
+
+    def data(self, index, role=Qt.DisplayRole):
+        if not index.isValid():
+            return None
+        r, c = index.row(), index.column()
+        if role in (Qt.DisplayRole, Qt.EditRole):
+            v = self._df.iat[r, c]
+            try:
+                if pd.isna(v):
+                    return ""
+            except (TypeError, ValueError):
+                pass
+            if isinstance(v, (list, tuple, set)):
+                return ", ".join(map(str, v))
+            if self._col_is_int[c]:
+                return str(int(v))
+            if self._col_is_float[c]:
+                return f"{float(v):.{self._float_digs[c]}f}"
+            return str(v)
+        if role == Qt.TextAlignmentRole:
+            if self._col_is_int[c] or self._col_is_float[c]:
+                return int(Qt.AlignRight | Qt.AlignVCenter)
+        return None
+
+    def headerData(self, section, orientation, role=Qt.DisplayRole):
+        if role != Qt.DisplayRole:
+            return None
+        if orientation == Qt.Horizontal:
+            return str(self._df.columns[section])
+        return str(section + 1)
+
+    def flags(self, index):
+        if not index.isValid():
+            return Qt.NoItemFlags
+        return Qt.ItemIsEnabled | Qt.ItemIsSelectable
+
 
 class SListMixin:
 
@@ -408,8 +522,19 @@ class SListMixin:
         *,
         float_decimals_default: int = 3,
         float_decimals_per_col: dict[str, int] | None = None,
+    ) -> DataFrameModel:
+        """Virtual model — Qt only renders visible cells. Fast for large tables."""
+        return DataFrameModel(df, float_decimals_default, float_decimals_per_col)
+
+    @staticmethod
+    def df_to_std_model(
+        df: pd.DataFrame,
+        *,
+        float_decimals_default: int = 3,
+        float_decimals_per_col: dict[str, int] | None = None,
     ) -> QStandardItemModel:
-        # Clean/round first
+        """Eagerly-materialised QStandardItemModel. Use only when the model
+        must be mutated after creation (e.g. add_check_column, insertColumn)."""
         clean = SListMixin.coerce_numeric_df(
             df,
             decimals_default=float_decimals_default,

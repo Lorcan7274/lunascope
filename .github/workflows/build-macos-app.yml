@@ -40,13 +40,17 @@ jobs:
           python -m venv .venv
           source .venv/bin/activate
           pip install --upgrade pip
-          pip install -e .
+          pip install .
           pip install nuitka
 
       - name: Build app
         run: |
           source .venv/bin/activate
           echo Y | pyside6-deploy -c pysidedeploy.spec
+
+      - name: Ad-hoc sign app bundle
+        run: |
+          codesign --deep -s - --force dist/Lunascope.app
 
       - name: Zip app bundle
         run: |
