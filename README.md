@@ -2,7 +2,7 @@
 
 A viewer and frontend for Luna (http://zzz.nyspi.org/luna/)
 
-Requirements: 
+Requirements:
 
  - Python 3.9 - 3.14
 
@@ -15,6 +15,39 @@ Requirements:
    Python versions may build successfully [from source](https://github.com/remnrem/luna-api)
    but are not officially supported.
 
+
+## Standalone Binaries (no Python required)
+
+Pre-built standalone apps for macOS and Windows are available from the
+[Latest Build release](https://github.com/Lorcan7274/lunascope/releases/tag/latest-build)
+— no Python installation needed.
+
+### macOS
+
+1. Download `Lunascope.app.zip` and unzip it.
+2. Move `Lunascope.app` to your **Applications** folder (or anywhere you like).
+3. **First launch only:** macOS will block the app because it is not from the App Store.
+   Right-click (or Control-click) `Lunascope.app` and choose **Open**, then click **Open**
+   in the dialog that appears. You only need to do this once; subsequent double-clicks will
+   work normally.
+
+   If you see *"Lunascope.app" will damage your computer* and no Open option appears,
+   run this once in Terminal to remove the quarantine flag:
+   ```
+   xattr -dr com.apple.quarantine /path/to/Lunascope.app
+   ```
+
+### Windows
+
+1. Download `Lunascope-Windows.zip` and unzip it (right-click → **Extract All**).
+2. Open the extracted `Lunascope.dist` folder and double-click **Lunascope.exe**.
+3. **First launch only:** Windows SmartScreen may show a blue *"Windows protected your PC"*
+   dialog because the app is not code-signed. Click **More info**, then **Run anyway**.
+
+> **Note:** These binaries are unsigned. Your browser or antivirus may warn you on
+> download — this is expected. The source code is fully open and auditable above.
+
+---
 
 ## Installation
 

@@ -140,9 +140,9 @@ class SignalsMixin:
 
         lab = QLabel("Line", holder)
         spin = QDoubleSpinBox(holder)
-        spin.setDecimals(1)
-        spin.setSingleStep(0.5)
-        spin.setRange(0.5, 8.0)
+        spin.setDecimals(0)
+        spin.setSingleStep(1)
+        spin.setRange(1, 8)
         spin.setValue(float(getattr(self, "cfg_line_weight", 1.0)))
         spin.setToolTip("Trace line width")
 
@@ -173,7 +173,9 @@ class SignalsMixin:
         if hasattr(self, "_update_cols"):
             self._update_cols()
 
-        
+        if hasattr(self, "annot_mgr"):
+            self.annot_mgr.refresh_wpx(self.cfg_line_weight)
+
     # --------------------------------------------------------------------------------
     #
     # on attach new EDF --> initiate segsrv_t for channel / annotation drawing 
@@ -1179,7 +1181,7 @@ class SignalsMixin:
             y1 = self.ss.get_annots_yaxes_ends( ann )
             self.annot_curves[aidx].setData( [ x1 , x2 ] , [ ( y0[0] + y1[0] ) / 2  , ( y0[0] + y1[0] ) / 2 ] )
             a0, a1 = _ensure_min_px_width( vb, a0, a1, px=1)  # 1-px minimum
-            self.annot_mgr.update_track( ann , x0 = a0 , x1 = a1 , y0 = y0 , y1 = y1 , reduce = True )
+            self.annot_mgr.update_track( ann , x0 = a0 , x1 = a1 , y0 = y0 , y1 = y1 , reduce = True , wpx = float(getattr(self, 'cfg_line_weight', 1.0)))
             # labels
             yv[idx] = ( y0[0] * 2 + y1[0]  ) / 3.0
             if self.show_labels: 
@@ -1393,7 +1395,7 @@ class SignalsMixin:
             # draw
             self.annot_curves[ aidx ].setData( [ x1 , x2 ] , [ ( y0[0] + y1[0] ) / 2  , ( y0[0] + y1[0] ) / 2 ] ) 
             a0, a1 = _ensure_min_px_width( vb, a0, a1, px=1)  # 1-px minimum
-            self.annot_mgr.update_track( ann , x0 = a0 , x1 = a1 , y0 = y0 , y1 = y1 , reduce = True )
+            self.annot_mgr.update_track( ann , x0 = a0 , x1 = a1 , y0 = y0 , y1 = y1 , reduce = True , wpx = float(getattr(self, 'cfg_line_weight', 1.0)))
 
             # labels
             yv[idx] = ( y0[0] * 2 + y1[0]  ) / 3.0 
@@ -2200,7 +2202,7 @@ class TrackManager:
             eff = self._effective_pen(t["pen"])
             t["item"].setOpts(pen=eff)
 
-    def update_track(self, name, x0, x1, y0, y1, color=None, pen=None, reduce=False ):
+    def update_track(self, name, x0, x1, y0, y1, color=None, pen=None, reduce=False, wpx=1 ):
         """
         Replace the given track with new rectangles spanning [x0,x1] × [y0,y1].
         Arrays must be equal length.
@@ -2229,7 +2231,7 @@ class TrackManager:
         # make line,box effect
         vb = self.plot.getViewBox()
         if reduce:
-            x0_all, x1_all, y0_all, y1_all = build_dual_rect_arrays(vb, x0, x1, y0, y1, hfrac=0.5)
+            x0_all, x1_all, y0_all, y1_all = build_dual_rect_arrays(vb, x0, x1, y0, y1, hfrac=0.5, wpx=wpx)
         else:
             x0_all = x0
             x1_all = x1
@@ -2240,11 +2242,24 @@ class TrackManager:
         eff_pen = self._effective_pen(pen)
         item = pg.BarGraphItem(x0=x0_all, x1=x1_all, y0=y0_all, y1=y1_all, brush=color, pen=eff_pen, name=name)
         self.plot.addItem(item)
-        self.tracks[name] = {"item": item, "color": color, "pen": pen, "visible": True}            
+        self.tracks[name] = {
+            "item": item, "color": color, "pen": pen, "visible": True,
+            "x0": x0, "x1": x1, "y0": y0, "y1": y1, "reduce": reduce,
+        }
 
         # Initialize border state if first time
         if self._borders_on is None:
             self._borders_on = self._want_borders()
+
+    def refresh_wpx(self, wpx):
+        """Rebuild all reduce=True tracks with a new tick-width (wpx)."""
+        vb = self.plot.getViewBox()
+        for name, t in self.tracks.items():
+            if not t["reduce"]:
+                continue
+            x0_all, x1_all, y0_all, y1_all = build_dual_rect_arrays(
+                vb, t["x0"], t["x1"], t["y0"], t["y1"], hfrac=0.5, wpx=wpx)
+            t["item"].setOpts(x0=x0_all, x1=x1_all, y0=y0_all, y1=y1_all)
 
     def toggle(self, name, on=True):
         if name in self.tracks:
@@ -2268,7 +2283,7 @@ class TrackManager:
 
 import numpy as np
 
-def build_dual_rect_arrays(vb, x0, x1, y0, y1, hfrac=0.66, wpx = 1 ):
+def build_dual_rect_arrays(vb, x0, x1, y0, y1, hfrac=0.66, wpx=1):
     """
     Returns x0_all, x1_all, y0_all, y1_all that include:
       - a 1-px wide full-height strip at each left edge
@@ -2284,20 +2299,20 @@ def build_dual_rect_arrays(vb, x0, x1, y0, y1, hfrac=0.66, wpx = 1 ):
     h   = yhi - ylo
     ym  = 0.5 * (yhi + ylo)
 
-    # 1 pixel in data units
+    # n pixels in data units (wpx rounded to integer to avoid sub-pixel blending)
     dx, _ = vb.viewPixelSize()
-    w1 = dx  # exact 1 px
+    w1 = dx * max(1, round(wpx))
 
     # thin strip: [x0, x0+w1] at full height
     x0_thin = x0
-    x1_thin = x0 + w1 * wpx
+    x1_thin = x0 + w1
     y0_thin = ylo
     y1_thin = yhi
 
-    # body: [x0+w1, x1] at 66% height centered
+    # body: [x0+w1, x1] at hfrac height centered
     y0_body = ym - 0.5 * h * hfrac
     y1_body = ym + 0.5 * h * hfrac
-    x0_body = x0 + w1 * wpx
+    x0_body = x0 + w1
     x1_body = x1
 
     # concatenate both sets
