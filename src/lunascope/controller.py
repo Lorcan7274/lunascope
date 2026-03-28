@@ -55,6 +55,7 @@ from .components.spectrogram import SpecMixin
 from .components.actigraphy import ActigraphyMixin
 from .components.soappops import SoapPopsMixin
 from .components.cmaps import CMapsMixin
+from .components.results_io import ResultsIOMixin
 from .gui_help import apply_gui_help, set_render_button_help
 from .session_state import save_session_file, load_session_file
 
@@ -65,7 +66,7 @@ from .session_state import save_session_file, load_session_file
 from PySide6.QtCore import QObject
 
 
-class Controller( QObject, CMapsMixin, 
+class Controller( QObject, CMapsMixin, ResultsIOMixin,
                   SListMixin , MetricsMixin ,
                   HypnoMixin , SoapPopsMixin, 
                   AnalMixin , SignalsMixin, 
@@ -101,6 +102,7 @@ class Controller( QObject, CMapsMixin,
         self._init_actigraphy()
         self._init_soap_pops()
         self._init_masks()
+        self._init_results_io()
         
         # for the tables added above, ensure all are read-only
         for v in self.ui.findChildren(QTableView):
