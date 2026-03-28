@@ -428,8 +428,9 @@ class AnalMixin:
         
         view.setSortingEnabled(False)
         h = view.horizontalHeader()
-        h.setSectionResizeMode(QHeaderView.Interactive)  # user-resizable                                          
-        h.setStretchLastSection(False)                   # no auto-stretch fighting you                            
+        h.setSectionResizeMode(QHeaderView.Interactive)  # user-resizable
+        h.setStretchLastSection(False)                   # no auto-stretch fighting you
+        h.setResizeContentsPrecision(50)                 # sample first 50 rows only
         view.resizeColumnsToContents()
 
         

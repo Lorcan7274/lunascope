@@ -360,7 +360,12 @@ class SListMixin:
             if isinstance(x, str):
                 xs = x.strip()
                 if xs == "" or xs.upper() in miss: return np.nan
-                return xs.replace(",", "")
+                stripped = xs.replace(",", "")
+                try:
+                    float(stripped)
+                    return stripped   # thousands-separator comma — safe to remove
+                except ValueError:
+                    return xs         # real string content — keep commas
             return x
 
         def series_to_numeric(s: pd.Series, name: str) -> pd.Series:

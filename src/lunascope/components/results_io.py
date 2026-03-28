@@ -98,7 +98,7 @@ class ResultsIOMixin:
         for cmd, strata in pairs:
             key = f"{cmd}_{strata}"
             df = self.results.get(key)
-            cols = "\t".join(df.columns.tolist()) if df is not None else ""
+            cols = " | ".join(df.columns.tolist()) if df is not None else ""
             manifest_rows.append({"key": key, "command": cmd, "strata": strata, "columns": cols})
         manifest_df = pd.DataFrame(manifest_rows)
 
@@ -123,33 +123,54 @@ class ResultsIOMixin:
             self.ui,
             "Load Results",
             "",
-            "Results Files (*.pkl *.zip);;Pickle (*.pkl);;Zip of TSVs (*.zip);;All Files (*)",
+            "Results Files (*.pkl *.zip *.db);;Pickle (*.pkl);;Zip of TSVs (*.zip);;Luna DB (*.db);;All Files (*)",
             options=QFileDialog.Option.DontUseNativeDialog,
         )
         if not filename:
             return
 
         lower = filename.lower()
+        project_mode = False
         try:
             if lower.endswith(".pkl"):
                 results, pairs = self._load_results_pkl(filename)
             elif lower.endswith(".zip"):
                 results, pairs = self._load_results_zip(filename)
+            elif lower.endswith(".db"):
+                results, pairs = self._load_results_db(filename)
+                project_mode = True
             else:
                 QMessageBox.critical(
                     self.ui,
                     "Load error",
-                    "Unrecognised file format. Expected .pkl or .zip.",
+                    "Unrecognised file format. Expected .pkl, .zip, or .db.",
                 )
                 return
         except Exception as e:
             QMessageBox.critical(self.ui, "Load error", f"Could not load results:\n{e}")
             return
 
-        self.results = results
+        self.project_mode = project_mode
+        self.results = {
+            k: df.sort_values("ID").reset_index(drop=True) if "ID" in df.columns else df
+            for k, df in results.items()
+        }
         tree_df = pd.DataFrame(pairs, columns=["Command", "Strata"])
         self.set_tree_from_df(tree_df)
         self.ui.dock_outputs.show()
+
+    def _load_results_db(self, path):
+        self.proj.import_db(path)
+        tbls = self.proj.strata()
+        if tbls is None or getattr(tbls, "empty", True):
+            raise ValueError("Database contains no results.")
+        results = {}
+        pairs = []
+        for row in tbls.itertuples(index=False):
+            key = f"{row.Command}_{row.Strata}"
+            results[key] = self.proj.table(row.Command, row.Strata)
+            pairs.append((row.Command, row.Strata))
+        return results, pairs
 
     def _load_results_pkl(self, path):
         with open(path, "rb") as f:
@@ -182,9 +203,6 @@ class ResultsIOMixin:
         return results, [tuple(p) for p in tree]
 
     def _load_results_zip(self, path):
-        from pathlib import Path
-        folder = Path(path).stem  # expected subfolder name
-
         with zipfile.ZipFile(path, "r") as zf:
             names = set(zf.namelist())
 
@@ -199,22 +217,23 @@ class ResultsIOMixin:
                     f"Not a valid results zip: manifest missing columns: {missing}."
                 )
 
+            # build basename -> full zip path, regardless of subfolder name
+            tsv_index = {}
+            for n in names:
+                if n.endswith(".tsv") and n != "_manifest.tsv":
+                    basename = n.rsplit("/", 1)[-1]  # works for both flat and subfoldered
+                    tsv_index[basename] = n
+
             results = {}
             pairs = []
             for _, row in manifest.iterrows():
                 key = row["key"]
-                # accept files in subfolder (new format) or flat (old format)
-                fname_sub = f"{folder}/{key}.tsv"
-                fname_flat = f"{key}.tsv"
-                if fname_sub in names:
-                    fname = fname_sub
-                elif fname_flat in names:
-                    fname = fname_flat
-                else:
+                fname_base = f"{key}.tsv"
+                if fname_base not in tsv_index:
                     raise ValueError(
-                        f"Not a valid results zip: missing data file '{fname_sub}'."
+                        f"Not a valid results zip: missing data file '{fname_base}'."
                     )
-                results[key] = pd.read_csv(io.BytesIO(zf.read(fname)), sep="\t")
+                results[key] = pd.read_csv(io.BytesIO(zf.read(tsv_index[fname_base])), sep="\t")
                 pairs.append((str(row["command"]), str(row["strata"])))
 
         return results, pairs
@@ -224,6 +243,8 @@ class ResultsIOMixin:
 
     def _clear_results(self):
         from PySide6.QtGui import QStandardItemModel
+        self.proj.reinit()
         self.results = {}
+        self.project_mode = False
         self.set_tree_from_df(None)
         self.ui.anal_table.setModel(QStandardItemModel(self))

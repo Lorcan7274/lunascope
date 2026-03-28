@@ -846,16 +846,16 @@
          <number>0</number>
         </property>
         <item>
-         <widget class="QPushButton" name="butt_out_save">
+         <widget class="QPushButton" name="butt_out_load">
           <property name="text">
-           <string>Save</string>
+           <string>Load</string>
           </property>
          </widget>
         </item>
         <item>
-         <widget class="QPushButton" name="butt_out_load">
+         <widget class="QPushButton" name="butt_out_save">
           <property name="text">
-           <string>Load</string>
+           <string>Save</string>
           </property>
          </widget>
         </item>
