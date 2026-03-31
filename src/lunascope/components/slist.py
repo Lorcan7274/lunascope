@@ -101,9 +101,9 @@ class DataFrameModel(QAbstractTableModel):
                 parts.append(s.fillna("").astype(str))
         if not parts:
             return [""] * len(self._df)
-        combined = parts[0]
+        combined = parts[0].astype(object)
         for p in parts[1:]:
-            combined = combined + "\t" + p
+            combined = combined + "\t" + p.astype(object)
         return combined.tolist()
 
     def rowCount(self, parent=QModelIndex()):

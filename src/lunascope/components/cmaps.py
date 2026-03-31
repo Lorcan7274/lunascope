@@ -115,11 +115,10 @@ class CMapsMixin:
             QMessageBox.critical(self.ui, "CMap parse error", str(e))
             return
 
-        # print( self.cfg ) 
-        # get sigmod pals
-        # for now, just the default (rwb)
-
+        # load sigmod palettes: builtins + any [pal] sections from cfg
         self.sigmod_colors[ 'rwb' ] = self.rwb_sigmod_colors
+        for pal_label, colors in self.cfg['pal'].items():
+            self.sigmod_colors[ pal_label ] = colors
         
         #
         # set various cfg vars
@@ -313,14 +312,16 @@ class CMapsMixin:
             if type1 not in [ 'raw' , 'amp' , 'phase' ]:
                 okay = False
 
-            frqs = [ ]
-            if 'f' in mod_spec:
-                frqs = mod_spec['f']
+            # append _pct suffix so C++ uses percentile-based binning
+            if mod_spec.get('bins', 'abs') == 'pct':
+                type1 = type1 + '_pct'
+
+            frqs = mod_spec.get('f')
+            if frqs is not None:
                 if okay is False:
-                    QMessageBox.critical( self.ui, "Sigmod Error", f"Could not attach sigmod load {mod_label}" )                                          
+                    QMessageBox.critical( self.ui, "Sigmod Error", f"Could not attach sigmod load {mod_label}" )
                 else:
                     self.ss.make_sigmod( mod_label , ch1, type1 , self.srs[ch1], 4, frqs[0] , frqs[1] )
-
             else:
                 if okay is False:
                    QMessageBox.critical( self.ui, "Sigmod Error", f"Could not attach sigmod load {mod_label}" )
@@ -553,8 +554,7 @@ class CMapsMixin:
         lw = float(getattr(self, "cfg_line_weight", 1.0))
         for c, col in zip(self.curves, self.colors):
             c.setPen(pg.mkPen(col, width=lw, cosmetic=True))
-        for i, c in enumerate(self.sigmod_curves):
-            col = self.rwb_sigmod_colors[i % len(self.rwb_sigmod_colors)]
+        for c, col in zip(self.sigmod_curves, self.sigmod_curve_colors):
             c.setPen(pg.mkPen(col, width=lw, cosmetic=True))
         for c, col in zip(self.annot_curves, self.acolors):
             c.setPen(pg.mkPen(col, width=lw, cosmetic=True))
@@ -663,8 +663,8 @@ def parse_cmap(text: str):
         fields = tokens[1:]
 
         if current_section == "mod":
-            # [mod] label ch=X type=Y [f=lwr,upr]
-            rec = {"ch": None, "type": None, "f": None}
+            # [mod] label ch=X type=Y [f=lwr,upr] [bins=abs|pct]
+            rec = {"ch": None, "type": None, "f": None, "bins": "abs"}
             for field in fields:
                 if field.startswith("ch="):
                     rec["ch"] = field[3:]
@@ -677,6 +677,13 @@ def parse_cmap(text: str):
                             f"Bad f= in [mod] '{label}' on line {lineno}: {field}"
                         )
                     rec["f"] = (float(vals[0]), float(vals[1]))
+                elif field.startswith("bins="):
+                    v = field[5:]
+                    if v not in ("abs", "pct"):
+                        raise ValueError(
+                            f"bins= in [mod] '{label}' must be 'abs' or 'pct' (line {lineno})"
+                        )
+                    rec["bins"] = v
                 else:
                     raise ValueError(
                         f"Unknown token in [mod] '{label}' on line {lineno}: {field}"

@@ -57,6 +57,7 @@ from .components.soappops import SoapPopsMixin
 from .components.cmaps import CMapsMixin
 from .components.results_io import ResultsIOMixin
 from .components.moonbeam_dock import MoonbeamMixin
+from .components.explorer_dock import ExplorerMixin
 from .gui_help import apply_gui_help, set_render_button_help
 from .session_state import save_session_file, load_session_file
 
@@ -73,7 +74,9 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
                   AnalMixin , SignalsMixin,
                   SettingsMixin, CTreeMixin ,
                   SpecMixin , ActigraphyMixin, MasksMixin,
-                  MoonbeamMixin ):
+                  MoonbeamMixin, ExplorerMixin ):
+
+    sig_results_changed = Signal()   # emitted whenever self.results is repopulated
 
     def __init__(self, ui, proj):
 
@@ -106,6 +109,7 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         self._init_masks()
         self._init_results_io()
         self._init_moonbeam()
+        self._init_explorer()
         
         # for the tables added above, ensure all are read-only
         for v in self.ui.findChildren(QTableView):
@@ -153,14 +157,30 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         self.ui.menuView.addAction(self.ui.dock_annots.toggleViewAction())
         self.ui.menuView.addSeparator()
         self.ui.menuView.addAction(self.ui.dock_spectrogram.toggleViewAction())
-        self.ui.menuView.addAction(self.ui.dock_actigraphy.toggleViewAction())
-        self.ui.menuView.addAction(self.ui.dock_hypno.toggleViewAction())
+        act_hypno      = self.ui.dock_hypno.toggleViewAction()
+        act_actigraphy = self.ui.dock_actigraphy.toggleViewAction()
+        self.ui.menuView.addAction(act_hypno)
+        self.ui.menuView.addAction(act_actigraphy)
+        self._act_hypno_menu      = act_hypno
+        self._act_actigraphy_menu = act_actigraphy
+
+        # Single Ctrl+7 dispatcher – toggles whichever dock is active for the mode
+        act_7 = QAction("Hypno/Actigraphy (Ctrl+7)", self)
+        act_7.setShortcut(QKeySequence("Ctrl+7"))
+        act_7.triggered.connect(self._toggle_hypno_or_actigraphy)
+        self.ui.addAction(act_7)   # attach to window so it fires globally
         self.ui.menuView.addSeparator()
         self.ui.menuView.addAction(self.ui.dock_mask.toggleViewAction())
         self.ui.menuView.addAction(self.ui.dock_console.toggleViewAction())
         self.ui.menuView.addAction(self.ui.dock_outputs.toggleViewAction())
         self.ui.menuView.addSeparator()
-        self.ui.menuView.addAction(self.ui.dock_moonbeam.toggleViewAction())
+        act_moonbeam = self.ui.dock_moonbeam.toggleViewAction()
+        act_moonbeam.setShortcut(QKeySequence("Ctrl+M"))
+        self.ui.menuView.addAction(act_moonbeam)
+        act_annex = self.ui.dock_explorer.toggleViewAction()
+        act_annex.setShortcut(QKeySequence("Ctrl+E"))
+        act_annex.setText("Explorer (Ctrl+E)")
+        self.ui.menuView.addAction(act_annex)
         self.ui.menuView.addSeparator()
         self.ui.menuView.addAction(self.ui.dock_help.toggleViewAction())
 
@@ -306,6 +326,8 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         self.ui.dock_spectrogram.hide()
         self.ui.dock_actigraphy.hide()
         self._detach_actigraphy_dock_from_main_layout()
+        self.ui.dock_explorer.hide()
+        self.ui.dock_explorer.setFloating(True)
         self.ui.dock_spectrogram.widget().setMinimumHeight(240)
         
         # ------------------------------------------------------------
@@ -373,17 +395,30 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
     def unlock_ui(self):
         self.blocker.hide_block()
 
-    def _update_mode_badge(self):
+    def _toggle_hypno_or_actigraphy(self):
         if getattr(self, "multiday_mode", False):
-            self.sb_mode.setText("Study mode: Multiday")
+            dock = self.ui.dock_actigraphy
+        else:
+            dock = self.ui.dock_hypno
+        dock.setVisible(not dock.isVisible())
+
+    def _update_mode_badge(self):
+        multiday = getattr(self, "multiday_mode", False)
+        if multiday:
+            self.sb_mode.setText("Multiple days")
             self.sb_mode.setStyleSheet(
                 "QLabel { color: #f2d48f; background: rgba(88,64,18,0.35); border: 1px solid rgba(222,184,82,0.35); }"
             )
         else:
-            self.sb_mode.setText("Study mode: Standard")
+            self.sb_mode.setText("Single night")
             self.sb_mode.setStyleSheet(
                 "QLabel { color: #b8c4d6; background: rgba(33,44,62,0.28); border: 1px solid rgba(120,140,170,0.2); }"
             )
+        # Gray out whichever Ctrl+7 dock is not relevant for the current mode
+        if hasattr(self, "_act_hypno_menu"):
+            self._act_hypno_menu.setEnabled(not multiday)
+        if hasattr(self, "_act_actigraphy_menu"):
+            self._act_actigraphy_menu.setEnabled(multiday)
 
     # ------------------------------------------------------------
     # clear all, i.e. drop current record
@@ -468,7 +503,8 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         self.curves = [ ]
         self.y0_curves = [ ]
         self.y_curves = [ ] 
-        self.sigmod_curves = [ ] 
+        self.sigmod_curves = [ ]
+        self.sigmod_curve_colors = [ ]
         self.annot_curves = [ ] 
         
         # and update things that need updating

@@ -276,10 +276,11 @@ class AnalMixin:
 
             # save, i.e. as internal results will be overwritten
             # by the HEADERS command run implicit in the updates below
-            self.results = dict()        
+            self.results = dict()
             for row in tbls.itertuples(index=True):
                 v = "_".join( [ row.Command , row.Strata ] )
                 self.results[ v ] = self.p.table( row.Command, row.Strata )
+            self.sig_results_changed.emit()
 
         # we're now finished w/ the internal Luna tables: run this command
         # just in case the user run REPORT hide of some flavor, e.g. to

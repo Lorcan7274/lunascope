@@ -237,6 +237,7 @@ class ResultsIOMixin:
         tree_df = pd.DataFrame(pairs, columns=["Command", "Strata"])
         self.set_tree_from_df(tree_df)
         self.ui.dock_outputs.show()
+        self.sig_results_changed.emit()
 
     def _load_results_db(self, path):
         self.proj.import_db(path)

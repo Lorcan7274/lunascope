@@ -853,12 +853,17 @@ class SignalsMixin:
         # initiate sigmod curves (18 per channel) [ch1 x 18, ch2 x 18 , ... ] 
         #
 
-        for i in range(nmods):
+        self.sigmod_curve_colors = []
+        for ch, mod_spec in self.sigmods.items():
+            pal_label = mod_spec.get('pal', 'rwb')
+            colors = self.sigmod_colors.get(pal_label, self.rwb_sigmod_colors)
             for j in range(18):
-                pen = pg.mkPen( self.rwb_sigmod_colors[j], width=self.cfg_line_weight, cosmetic=True) # fix to RWB for now
+                col = colors[j % len(colors)]
+                pen = pg.mkPen(col, width=self.cfg_line_weight, cosmetic=True)
                 c = pg.PlotCurveItem(pen=pen, connect='finite')
                 pi.addItem(c)
                 self.sigmod_curves.append(c)
+                self.sigmod_curve_colors.append(col)
         
         
         #
