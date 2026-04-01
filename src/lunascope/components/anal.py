@@ -241,9 +241,9 @@ class AnalMixin:
             # turn off any prior REPORT hides (allow that 'problem' flag may be set)
             try: self.p.silent_proc( 'REPORT show-all' )
             except RuntimeError: pass
-            if getattr(self, 'project_mode', False) and getattr(self, '_proj_n', 0) > 0:
-                self._proj_i += 1
-                self._proj_eval_next()
+            if getattr(self, 'project_mode', False):
+                self.project_mode = False
+                self._proj_n = 0
 
     def _buttons( self, status ):
         stage_tools_enabled = status and not getattr(self, 'multiday_mode', False)

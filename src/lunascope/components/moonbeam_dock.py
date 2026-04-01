@@ -29,9 +29,11 @@ import re
 import shutil
 import sys
 import tempfile
+import time
 
 import lunapi as lp
 import pandas as pd
+from lunapi.moonbeam import _load_token as _mb_load_tok, _save_token as _mb_save_tok
 
 from PySide6.QtCore import Qt, QObject, QRegularExpression, QSortFilterProxyModel, QThread, Signal, Slot
 from PySide6.QtGui import QColor, QFont, QStandardItem, QStandardItemModel
@@ -147,7 +149,32 @@ class _MbConnectWorker(QObject):
     @Slot()
     def run(self):
         try:
-            mb = lp.moonbeam(self._token, cdir=self._cdir)
+            token = self._token or _mb_load_tok()
+            if token is None:
+                raise ValueError(
+                    "No NSRR token provided and none cached.\n"
+                    "Paste a token or obtain one at https://sleepdata.org/token"
+                )
+
+            mb = lp.moonbeam.__new__(lp.moonbeam)
+            mb.nsrr_tok = token
+            mb._last_req = 0.0
+            mb.df1 = pd.DataFrame()
+            mb.df2 = None
+            mb.curr_cohort = None
+            mb.curr_subcohort = None
+            mb.curr_id = None
+            mb.curr_edf = None
+            mb.curr_annots = []
+            mb._allowed_cohort_slugs = None
+            mb._mf = {}
+
+            mb._verify_token()
+            _mb_save_tok(token)
+
+            cdir = self._cdir or os.path.join(tempfile.gettempdir(), 'luna-nsrr')
+            mb.set_cache(cdir)
+            mb._load_or_fetch_manifest()
         except Exception as exc:
             # Give a friendlier message for connectivity failures
             msg = str(exc)
@@ -160,13 +187,11 @@ class _MbConnectWorker(QObject):
             self.failure.emit(msg)
             return
 
-        # Silently refresh manifest if it is stale (> 7 days old)
+        # Refresh only when the cached manifest is older than the TTL.
         try:
             p = pathlib.Path(mb.cdir) / '.manifest'
             if p.exists():
-                age_days = (os.path.getmtime(str(p)))
-                import time as _time
-                age_days = (_time.time() - age_days) / 86400
+                age_days = (time.time() - os.path.getmtime(str(p))) / 86400
                 if age_days > self._MANIFEST_MAX_AGE_DAYS:
                     mb.refresh_manifest()   # gracefully no-ops if offline
         except Exception:
@@ -175,10 +200,10 @@ class _MbConnectWorker(QObject):
         self.success.emit(mb)
 
 
-class _MbAccessWorker(QObject):
-    """Fetch token-visible cohort slugs off the UI thread."""
+class _MbUpdateWorker(QObject):
+    """Refresh the manifest and cohort-access metadata off the UI thread."""
 
-    success = Signal(object)
+    success = Signal(object, object)   # (manifest_dict, allowed_cohorts)
     failure = Signal(str)
 
     def __init__(self, mb):
@@ -188,11 +213,12 @@ class _MbAccessWorker(QObject):
     @Slot()
     def run(self):
         try:
+            self._mb.refresh_manifest()
             allowed = self._mb.allowed_cohorts(refresh=True)
         except Exception as exc:
             self.failure.emit(str(exc))
             return
-        self.success.emit(allowed)
+        self.success.emit(getattr(self._mb, "_mf", None), allowed)
 
 
 class _MbDownloadWorker(QObject):
@@ -347,7 +373,7 @@ class MoonbeamMixin:
         self._mb_df2          = None   # current individual manifest DataFrame
         self._mb_thread       = None
         self._mb_connect_worker = None
-        self._mb_access_worker = None
+        self._mb_update_worker = None
         self._mb_dl_worker    = None
         self._mb_pending_cdir = None   # cdir waiting for copy to finish
         self._mb_tree_sized   = False
@@ -401,10 +427,10 @@ class MoonbeamMixin:
         connect_btn.setObjectName("mb_connect_btn")
         connect_btn.setFixedWidth(90)
 
-        update_perms_btn = QPushButton("Update Permissions")
-        update_perms_btn.setObjectName("mb_update_perms_btn")
-        update_perms_btn.setToolTip("Refresh dataset access from NSRR")
-        update_perms_btn.setEnabled(False)
+        update_btn = QPushButton("Update")
+        update_btn.setObjectName("mb_update_btn")
+        update_btn.setToolTip("Refresh studies, permissions, and cached counts")
+        update_btn.setEnabled(False)
 
         status_lbl = QLabel("Token cached — press Connect" if _has_cached else "Not connected")
         status_lbl.setObjectName("mb_status_lbl")
@@ -413,7 +439,7 @@ class MoonbeamMixin:
         tok_layout.addWidget(tok_lbl)
         tok_layout.addWidget(tok_edit)
         tok_layout.addWidget(connect_btn)
-        tok_layout.addWidget(update_perms_btn)
+        tok_layout.addWidget(update_btn)
         tok_layout.addWidget(status_lbl, 1)
         outer.addWidget(tok_frame)
 
@@ -462,13 +488,13 @@ class MoonbeamMixin:
 
         lbl_ncohorts = _stat("Studies: -")
         lbl_ncohorts.setObjectName("mb_lbl_ncohorts")
-        lbl_n = _stat("Available: -", 100)
+        lbl_n = _stat("Individuals: -", 120)
         lbl_n.setObjectName("mb_lbl_n")
-        lbl_naccess = _stat("Access: -", 90)
+        lbl_naccess = _stat("Accessible: -", 110)
         lbl_naccess.setObjectName("mb_lbl_naccess")
-        lbl_ncached = _stat("Cached: -", 90)
+        lbl_ncached = _stat("Downloaded: -", 110)
         lbl_ncached.setObjectName("mb_lbl_ncached")
-        lbl_cdir = QLabel("Cache: -")
+        lbl_cdir = QLabel("Cache Folder: -")
         lbl_cdir.setObjectName("mb_lbl_cdir")
         lbl_cdir.setFrameStyle(QFrame.Panel | QFrame.Sunken)
         lbl_cdir.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -578,11 +604,10 @@ class MoonbeamMixin:
         cancel_btn  = QPushButton("Cancel")
         cancel_btn.setObjectName("mb_cancel_btn")
         cancel_btn.setVisible(False)
-        refresh_btn = QPushButton("Refresh")
-        refresh_btn.setObjectName("mb_refresh_btn")
-        refresh_btn.setToolTip("Refresh cached-file status")
-        pop_slist_btn = QPushButton("Populate S-List")
+        pop_slist_btn = QPushButton("S-List: Cached View")
         pop_slist_btn.setObjectName("mb_pop_slist_btn")
+        pop_sel_slist_btn = QPushButton("S-List: Selected")
+        pop_sel_slist_btn.setObjectName("mb_pop_sel_slist_btn")
 
         progress     = QProgressBar()
         progress.setObjectName("mb_progress")
@@ -598,10 +623,10 @@ class MoonbeamMixin:
         bot_layout.addWidget(dl_sel_btn)
         bot_layout.addWidget(dl_all_btn)
         bot_layout.addWidget(cancel_btn)
-        bot_layout.addWidget(refresh_btn)
         bot_layout.addStretch(1)
         bot_layout.addWidget(progress_lbl)
         bot_layout.addWidget(progress)
+        bot_layout.addWidget(pop_sel_slist_btn)
         bot_layout.addWidget(pop_slist_btn)
         outer.addWidget(bot_frame)
 
@@ -622,7 +647,7 @@ class MoonbeamMixin:
         self.ui.dock_moonbeam    = dock
         self.ui.mb_token_edit    = tok_edit
         self.ui.mb_connect_btn   = connect_btn
-        self.ui.mb_update_perms_btn = update_perms_btn
+        self.ui.mb_update_btn    = update_btn
         self.ui.mb_status_lbl    = status_lbl
         self.ui.mb_tree          = tree
         self.ui.mb_table         = table
@@ -640,22 +665,22 @@ class MoonbeamMixin:
         self.ui.mb_dl_sel_btn    = dl_sel_btn
         self.ui.mb_dl_all_btn    = dl_all_btn
         self.ui.mb_cancel_btn    = cancel_btn
-        self.ui.mb_refresh_btn   = refresh_btn
         self.ui.mb_pop_slist_btn = pop_slist_btn
+        self.ui.mb_pop_sel_slist_btn = pop_sel_slist_btn
         self.ui.mb_progress      = progress
         self.ui.mb_progress_lbl  = progress_lbl
         self.ui.mb_log           = log_txt
 
         # ---- Wire signals -----------------------------------------------
         connect_btn.clicked.connect(self._mb_connect)
-        update_perms_btn.clicked.connect(self._mb_update_permissions)
+        update_btn.clicked.connect(self._mb_update)
         cdir_browse_btn.clicked.connect(self._mb_browse_cache)
         cdir_temp_btn.clicked.connect(self._mb_use_temp_cache)
         tree.clicked.connect(self._mb_on_tree_click)
         dl_sel_btn.clicked.connect(self._mb_download_selected)
         dl_all_btn.clicked.connect(self._mb_download_all)
         cancel_btn.clicked.connect(self._mb_cancel_download)
-        refresh_btn.clicked.connect(self._mb_refresh_cache_status)
+        pop_sel_slist_btn.clicked.connect(self._mb_populate_slist_selected)
         pop_slist_btn.clicked.connect(self._mb_populate_slist)
 
         # ---- Apply dark-panel styling -----------------------------------
@@ -679,8 +704,9 @@ class MoonbeamMixin:
     def _mb_clear_thread(self):
         """Called via finished signal so self._mb_thread is never a stale C++ object."""
         self._mb_thread    = None
-        self._mb_access_worker = None
+        self._mb_update_worker = None
         self._mb_dl_worker = None
+        self._mb_set_action_enabled(self._mb is not None)
 
     def _mb_thread_running(self) -> bool:
         return self._mb_thread is not None and self._mb_thread.isRunning()
@@ -695,15 +721,16 @@ class MoonbeamMixin:
             w = getattr(self.ui, name, None)
             if w:
                 w.setEnabled(enabled)
-        w = getattr(self.ui, "mb_update_perms_btn", None)
+        w = getattr(self.ui, "mb_update_btn", None)
         if w:
             w.setEnabled(enabled and not self._mb_thread_running())
-        # Refresh and S-List work whenever we have manifest data
         has_data = self._mb_mf is not None
-        for name in ("mb_refresh_btn", "mb_pop_slist_btn"):
-            w = getattr(self.ui, name, None)
-            if w:
-                w.setEnabled(has_data)
+        slist_btn = getattr(self.ui, "mb_pop_slist_btn", None)
+        if slist_btn:
+            slist_btn.setEnabled(has_data)
+        sel_slist_btn = getattr(self.ui, "mb_pop_sel_slist_btn", None)
+        if sel_slist_btn:
+            sel_slist_btn.setEnabled(has_data)
 
     # -----------------------------------------------------------------------
     # Offline manifest helpers
@@ -853,17 +880,17 @@ class MoonbeamMixin:
         self.ui.mb_status_lbl.setText(f"Error: {msg[:100]}")
         QMessageBox.critical(self.ui, "Moonbeam – Connection Error", msg)
 
-    def _mb_start_access_refresh(self):
+    def _mb_start_update(self):
         if self._mb is None or self._mb_thread_running():
             return
 
         thread = QThread(self)
-        worker = _MbAccessWorker(self._mb)
+        worker = _MbUpdateWorker(self._mb)
         worker.moveToThread(thread)
 
         thread.started.connect(worker.run)
-        worker.success.connect(self._mb_on_access_success)
-        worker.failure.connect(self._mb_on_access_failure)
+        worker.success.connect(self._mb_on_update_success)
+        worker.failure.connect(self._mb_on_update_failure)
         worker.success.connect(thread.quit)
         worker.failure.connect(thread.quit)
         worker.success.connect(worker.deleteLater)
@@ -872,34 +899,38 @@ class MoonbeamMixin:
         thread.finished.connect(self._mb_clear_thread)
 
         self._mb_thread = thread
-        self._mb_access_worker = worker
+        self._mb_update_worker = worker
         self._mb_set_action_enabled(False)
         self.ui.mb_connect_btn.setEnabled(False)
-        self.ui.mb_status_lbl.setText("Updating permissions…")
+        self.ui.mb_status_lbl.setText("Updating studies…")
         thread.start()
 
-    def _mb_on_access_success(self, allowed):
-        self._mb_accessible_cohorts = {str(x) for x in allowed}
+    def _mb_on_update_success(self, manifest, allowed):
+        if manifest:
+            self._mb_mf = manifest
+        self._mb_accessible_cohorts = {str(x) for x in allowed} if allowed is not None else None
         if self._mb is not None:
             self._mb.df1 = self._mb.cohorts()
         self.ui.mb_status_lbl.setText("Connected")
         self._mb_populate_tree()
+        if self._mb_curr_cohort:
+            self._mb_populate_table(self._mb_curr_cohort, self._mb_curr_subcohort)
         self._mb_set_action_enabled(True)
         self.ui.mb_connect_btn.setEnabled(True)
 
-    def _mb_on_access_failure(self, msg):
+    def _mb_on_update_failure(self, msg):
         self._mb_accessible_cohorts = self._mb_get_accessible_cohorts(
             getattr(self._mb, "df1", None) if self._mb is not None else None
         )
         self.ui.mb_status_lbl.setText("Connected")
-        self.ui.mb_log.append(f"Access refresh failed: {msg}")
+        self.ui.mb_log.append(f"Update failed: {msg}")
         self._mb_set_action_enabled(self._mb is not None)
         self.ui.mb_connect_btn.setEnabled(True)
 
-    def _mb_update_permissions(self):
+    def _mb_update(self):
         if self._mb is None:
             return
-        self._mb_start_access_refresh()
+        self._mb_start_update()
 
     # -----------------------------------------------------------------------
     # Cache directory controls
@@ -1034,7 +1065,7 @@ class MoonbeamMixin:
 
         self._mb_set_action_enabled(self._mb is not None)
         if self._mb is not None:
-            self._mb_refresh_cache_status()
+            self._mb_update()
         elif self._mb_mf is not None:
             self._mb_populate_tree()   # refresh cached counts in new dir
 
@@ -1073,15 +1104,15 @@ class MoonbeamMixin:
         if access_known:
             n_accessible_cohorts = sum(1 for cohort in mf if cohort in accessible)
             self.ui.mb_lbl_ncohorts.setText(
-                f"Studies: {len(mf)} ({n_accessible_cohorts:,} access)"
+                f"Studies: {len(mf)} ({n_accessible_cohorts:,} accessible)"
             )
-            self.ui.mb_lbl_naccess.setText(f"Access: {total_access:,}")
+            self.ui.mb_lbl_naccess.setText(f"Accessible: {total_access:,}")
         else:
             self.ui.mb_lbl_ncohorts.setText(f"Studies: {len(mf)}")
-            self.ui.mb_lbl_naccess.setText("Access: ?")
-        self.ui.mb_lbl_n.setText(f"Available: {total_n:,}")
-        self.ui.mb_lbl_ncached.setText(f"Cached: {total_cached:,}")
-        self.ui.mb_lbl_cdir.setText(f"Cache: {self._mb_cdir}")
+            self.ui.mb_lbl_naccess.setText("Accessible: ?")
+        self.ui.mb_lbl_n.setText(f"Individuals: {total_n:,}")
+        self.ui.mb_lbl_ncached.setText(f"Downloaded: {total_cached:,}")
+        self.ui.mb_lbl_cdir.setText(f"Cache Folder: {self._mb_cdir}")
 
         model = QStandardItemModel()
         model.setHorizontalHeaderLabels(["Study / Subcohort", "Available", "Access", "Cached"])
@@ -1146,9 +1177,9 @@ class MoonbeamMixin:
         if not self._mb_tree_sized:
             tree.resizeColumnToContents(0)
             tree.setColumnWidth(0, min(max(tree.columnWidth(0) + 18, 170), 360))
-            for col in (1, 2, 3):
-                tree.resizeColumnToContents(col)
-                tree.setColumnWidth(col, max(tree.columnWidth(col) + 12, 56))
+            tree.setColumnWidth(1, 74)
+            tree.setColumnWidth(2, 74)
+            tree.setColumnWidth(3, 68)
             total_w = sum(tree.columnWidth(col) for col in range(model.columnCount()))
             total_w += tree.frameWidth() * 2 + 28
             if tree.verticalScrollBar().isVisible():
@@ -1195,7 +1226,7 @@ class MoonbeamMixin:
 
         self._mb_df2 = df2.copy()
 
-        cols  = ["", "ID", "Subcohort", "EDF", "Annot", "Cached"]
+        cols  = ["", "ID", "Subcohort", "Cached", "EDF", "Annot"]
         model = QStandardItemModel(len(df2), len(cols))
         model.setHorizontalHeaderLabels(cols)
 
@@ -1213,27 +1244,27 @@ class MoonbeamMixin:
             model.setItem(r, 0, chk)
             model.setItem(r, 1, _plain_item(iid))
             model.setItem(r, 2, _plain_item(sc))
-            model.setItem(r, 3, _plain_item(os.path.basename(edf)))
-            model.setItem(r, 4, _plain_item(
+            model.setItem(r, 3, _cached_item(is_cached))
+            model.setItem(r, 4, _plain_item(os.path.basename(edf)))
+            model.setItem(r, 5, _plain_item(
                 os.path.basename(annot) if annot not in ('.', '') else '-'
             ))
-            model.setItem(r, 5, _cached_item(is_cached))
 
         tbl = self.ui.mb_table
         self._mb_proxy.setSourceModel(model)
         h = tbl.horizontalHeader()
         h.setSectionResizeMode(0, QHeaderView.Fixed)
-        for c in (1, 2, 3, 4):
+        for c in (1, 2, 4, 5):
             h.setSectionResizeMode(c, QHeaderView.Interactive)
-        h.setSectionResizeMode(5, QHeaderView.Fixed)
+        h.setSectionResizeMode(3, QHeaderView.Fixed)
         h.setStretchLastSection(False)
         tbl.setColumnWidth(0, 28)
         tbl.resizeColumnsToContents()
         tbl.setColumnWidth(0, 28)   # restore after resize
-        tbl.setColumnWidth(5, 58)
+        tbl.setColumnWidth(3, 58)
 
     # -----------------------------------------------------------------------
-    # Refresh cache status (tree + table)
+    # Refresh cache status (offline-only)
     # -----------------------------------------------------------------------
 
     def _mb_refresh_cache_status(self):
@@ -1271,6 +1302,27 @@ class MoonbeamMixin:
         return [src.item(r, 1).text()
                 for r in range(src.rowCount())
                 if src.item(r, 1)]
+
+    def _mb_get_selected_iids(self):
+        if self._mb_df2 is None or self._mb_df2.empty:
+            return []
+        sel = self.ui.mb_table.selectionModel()
+        if sel is None:
+            return []
+        iids = []
+        seen = set()
+        for idx in sel.selectedRows():
+            src_idx = self._mb_proxy.mapToSource(idx)
+            if not src_idx.isValid():
+                continue
+            item = self._mb_src_model().item(src_idx.row(), 1)
+            if item is None:
+                continue
+            iid = item.text()
+            if iid and iid not in seen:
+                seen.add(iid)
+                iids.append(iid)
+        return iids
 
     # -----------------------------------------------------------------------
     # Download: selected
@@ -1416,28 +1468,24 @@ class MoonbeamMixin:
         # Non-fatal; show briefly in status bar
         self.ui.mb_status_lbl.setText(f"Warning: {msg[:100]}")
 
-    # -----------------------------------------------------------------------
-    # Populate S-List from cached individuals in current view
-    # -----------------------------------------------------------------------
-
-    def _mb_populate_slist(self):
+    def _mb_build_slist_rows(self, df):
         if self._mb_mf is None or self._mb_curr_cohort is None:
             QMessageBox.information(
                 self.ui, "Moonbeam", "No cohort selected."
             )
-            return
-        if self._mb_df2 is None or self._mb_df2.empty:
+            return None
+        if df is None or df.empty:
             QMessageBox.information(
                 self.ui, "Moonbeam",
-                "The current cohort view is empty."
+                "The requested set of recordings is empty."
             )
-            return
+            return None
 
         cohort  = self._mb_curr_cohort
         cdir    = pathlib.Path(self._mb_cdir)
         rows    = []
 
-        for _, row in self._mb_df2.iterrows():
+        for _, row in df.iterrows():
             iid   = str(row['ID'])
             edf   = str(row['EDF'])
             annot = str(row.get('Annot', '.'))
@@ -1454,18 +1502,20 @@ class MoonbeamMixin:
 
             rows.append([iid, local_edf, local_annot])
 
+        return rows
+
+    def _mb_load_rows_into_slist(self, rows, label, origin_desc):
         if not rows:
             QMessageBox.information(
                 self.ui, "Moonbeam",
-                "No cached individuals found in the current view.\n"
-                "Download some files first, then click Populate S-List."
+                f"No cached individuals found in {origin_desc}.\n"
+                "Download some files first, then try again."
             )
             return
 
-        label = self._mb_curr_subcohort or cohort
         reply = QMessageBox.question(
             self.ui, "Populate S-List",
-            f"Load {len(rows):,} cached individual(s) from '{label}' "
+            f"Load {len(rows):,} cached individual(s) from {origin_desc} "
             f"into the S-List?\nThis will replace the current S-List.",
             QMessageBox.Yes | QMessageBox.No
         )
@@ -1495,6 +1545,39 @@ class MoonbeamMixin:
             QMessageBox.critical(
                 self.ui, "Moonbeam – S-List Error", str(exc)
             )
+
+    # -----------------------------------------------------------------------
+    # Populate S-List from cached individuals in current view
+    # -----------------------------------------------------------------------
+
+    def _mb_populate_slist(self):
+        rows = self._mb_build_slist_rows(self._mb_df2)
+        if rows is None:
+            return
+        label = self._mb_curr_subcohort or self._mb_curr_cohort
+        self._mb_load_rows_into_slist(rows, label, f"the current view '{label}'")
+
+    def _mb_populate_slist_selected(self):
+        if self._mb_df2 is None or self._mb_df2.empty:
+            QMessageBox.information(
+                self.ui, "Moonbeam",
+                "The current cohort view is empty."
+            )
+            return
+        iids = self._mb_get_selected_iids()
+        if not iids:
+            QMessageBox.information(
+                self.ui, "Moonbeam",
+                "No recordings selected.\n"
+                "Select one or more rows in the table, then try again."
+            )
+            return
+        df = self._mb_df2[self._mb_df2['ID'].astype(str).isin(iids)].copy()
+        rows = self._mb_build_slist_rows(df)
+        if rows is None:
+            return
+        label = self._mb_curr_subcohort or self._mb_curr_cohort
+        self._mb_load_rows_into_slist(rows, label, f"the selected recordings in '{label}'")
 
 
 # ---------------------------------------------------------------------------

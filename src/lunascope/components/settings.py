@@ -50,9 +50,38 @@ class SettingsMixin:
         
         # wiring
 
+        self.ui.txt_cmap.setLineWrapMode(QPlainTextEdit.NoWrap)
         self.ui.butt_load_param.clicked.connect( self._load_param )
         self.ui.butt_save_param.clicked.connect( self._save_param )
         self.ui.butt_reset_param.clicked.connect( self._reset_param )
+        self.ui.tab_settings.currentChanged.connect( self._sync_settings_buttons )
+        self._sync_settings_buttons()
+
+    def _settings_tab_name(self) -> str:
+        idx = self.ui.tab_settings.currentIndex()
+        return self.ui.tab_settings.tabText(idx)
+
+    def _sync_settings_buttons(self, *_args):
+        name = self._settings_tab_name()
+        is_param = name == 'Param'
+        is_cmap = name == 'Config'
+
+        self.ui.butt_load_param.setEnabled(is_param or is_cmap)
+        self.ui.butt_save_param.setEnabled(is_param or is_cmap)
+        self.ui.butt_reset_param.setText("Apply" if is_cmap else "Reset")
+
+    def _apply_current_cmap(self):
+        okay = self._apply_cmaps()
+        if not okay:
+            return
+
+        if not hasattr(self, "p"):
+            return
+
+        if getattr(self, "rendered", False):
+            self._render_signals()
+        else:
+            self._render_signals_simple()
 
     
 
@@ -64,8 +93,7 @@ class SettingsMixin:
         # if this for cmap or param?
         # determine based on the open tab
         
-        idx = self.ui.tab_settings.currentIndex()
-        name = self.ui.tab_settings.tabText(idx)
+        name = self._settings_tab_name()
         is_cmap = name == 'Config'
 
         if is_cmap is False:
@@ -105,8 +133,7 @@ class SettingsMixin:
 
         # if this for cmap or param?
         # determine based on the open tab
-        idx = self.ui.tab_settings.currentIndex()
-        name = self.ui.tab_settings.tabText(idx)
+        name = self._settings_tab_name()
         is_cmap = name == 'Config'
         is_param = name == 'Param'
 
@@ -152,14 +179,11 @@ class SettingsMixin:
 
     def _reset_param(self):
         
-        idx = self.ui.tab_settings.currentIndex()
-        name = self.ui.tab_settings.tabText(idx)
+        name = self._settings_tab_name()
         is_cmap = name == 'Config'
 
         if is_cmap is True:
-            self.ui.txt_cmap.clear()
-            self._clear_cmap()
-            self._apply_cmap()
+            self._apply_current_cmap()
         else:
             self.ui.txt_param.clear()
             self.proj.clear_vars()

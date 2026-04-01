@@ -27,6 +27,7 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel,
     QPushButton, QSizePolicy, QVBoxLayout, QWidget,
+    QFileDialog,
 )
 
 from .explorer_base import BG, FG, GRID, _ExplorerTab
@@ -87,6 +88,8 @@ class PlotterTab(_ExplorerTab):
     def __init__(self, ctrl, parent=None):
         super().__init__(ctrl, parent)
         self._df: pd.DataFrame | None = None
+        self._aux_df: pd.DataFrame | None = None   # uploaded covariate file
+        self._aux_path: str = ""
         self._plot_timer = QTimer(self)
         self._plot_timer.setSingleShot(True)
         self._plot_timer.setInterval(300)
@@ -115,6 +118,21 @@ class PlotterTab(_ExplorerTab):
 
         rl1.addWidget(QLabel("Table:")); rl1.addWidget(combo_table, 1)
         rl1.addWidget(lbl_shape); rl1.addWidget(btn_refresh)
+
+        # ---- row 1b: covariate file -----------------------------------
+        row1b = QWidget(); rl1b = QHBoxLayout(row1b)
+        rl1b.setContentsMargins(0, 0, 0, 0); rl1b.setSpacing(6)
+
+        btn_load_cov  = QPushButton("Load covariates…"); btn_load_cov.setFixedWidth(140)
+        btn_load_cov.setToolTip("Upload a TSV/CSV file with an ID column to merge as covariates")
+        btn_clear_cov = QPushButton("✕"); btn_clear_cov.setFixedWidth(26)
+        btn_clear_cov.setToolTip("Remove loaded covariate file")
+        lbl_cov_file  = QLabel("(none)")
+        lbl_cov_file.setStyleSheet("color:#888; font-size:11px;")
+        lbl_cov_file.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        rl1b.addWidget(QLabel("Covariates:")); rl1b.addWidget(btn_load_cov)
+        rl1b.addWidget(lbl_cov_file, 1); rl1b.addWidget(btn_clear_cov)
 
         # ---- row 2: axes + plot type ----------------------------------
         row2 = QWidget(); rl2 = QHBoxLayout(row2)
@@ -171,8 +189,9 @@ class PlotterTab(_ExplorerTab):
         canvas_host.layout().setContentsMargins(0, 0, 0, 0)
         self._canvas_host = canvas_host
 
-        outer.addWidget(row1); outer.addWidget(row2)
-        outer.addWidget(row3); outer.addWidget(canvas_host, 1)
+        outer.addWidget(row1); outer.addWidget(row1b)
+        outer.addWidget(row2); outer.addWidget(row3)
+        outer.addWidget(canvas_host, 1)
 
         # ---- store refs -----------------------------------------------
         self._root         = root
@@ -187,9 +206,12 @@ class PlotterTab(_ExplorerTab):
         self._chk_log_x    = chk_log_x
         self._chk_log_y    = chk_log_y
         self._lbl_shape    = lbl_shape
+        self._lbl_cov_file = lbl_cov_file
 
         # ---- wire signals ---------------------------------------------
         btn_refresh.clicked.connect(self.refresh_tables)
+        btn_load_cov.clicked.connect(self._load_aux_file)
+        btn_clear_cov.clicked.connect(self._clear_aux_file)
         combo_table.currentIndexChanged.connect(self._on_table_changed)
         btn_export.clicked.connect(self._save_figure)
         for w in (combo_x, combo_y, combo_group1, combo_mode1,
@@ -229,17 +251,27 @@ class PlotterTab(_ExplorerTab):
         self._combo_group2.addItem("(none)", None)
 
         if self._df is not None:
-            cols = list(self._df.columns)
-            self._combo_x.addItems(cols)
-            self._combo_y.addItems(cols)
+            eff_df, aux_cols = self._get_effective_df()
+            aux_set = set(aux_cols)
+            cols = list(eff_df.columns)
             for col in cols:
-                self._combo_group1.addItem(col, col)
-                self._combo_group2.addItem(col, col)
-            self._lbl_shape.setText(f"{len(self._df)} rows × {len(cols)} cols")
-            num_cols = [c for c in cols if pd.api.types.is_numeric_dtype(self._df[c])]
+                label = f"{col} [cov]" if col in aux_set else col
+                self._combo_x.addItem(label, col)
+                self._combo_y.addItem(label, col)
+                self._combo_group1.addItem(label, col)
+                self._combo_group2.addItem(label, col)
+            n_aux = len(aux_cols)
+            shape_txt = f"{len(self._df)} rows × {len(self._df.columns)} cols"
+            if n_aux:
+                shape_txt += f"  +{n_aux} cov"
+            self._lbl_shape.setText(shape_txt)
+            # Default: pick first two numeric cols from main table for X/Y
+            num_cols = [c for c in self._df.columns if pd.api.types.is_numeric_dtype(self._df[c])]
             if num_cols:
-                self._combo_x.setCurrentText(num_cols[0])
-                self._combo_y.setCurrentText(num_cols[min(1, len(num_cols) - 1)])
+                self._combo_x.setCurrentIndex(
+                    self._combo_x.findData(num_cols[0]))
+                self._combo_y.setCurrentIndex(
+                    self._combo_y.findData(num_cols[min(1, len(num_cols) - 1)]))
         else:
             self._lbl_shape.setText("")
 
@@ -250,20 +282,114 @@ class PlotterTab(_ExplorerTab):
         self._schedule_plot()
 
     # ------------------------------------------------------------------
+    # Covariate file
+    # ------------------------------------------------------------------
+
+    def _load_aux_file(self):
+        fn, _ = QFileDialog.getOpenFileName(
+            self._root, "Load Covariate File", "",
+            "Tabular files (*.tsv *.csv *.txt);;All files (*)"
+        )
+        if not fn:
+            return
+        try:
+            sep = "\t" if fn.lower().endswith(".tsv") or fn.lower().endswith(".txt") else ","
+            df = pd.read_csv(fn, sep=sep, dtype=str)
+            # Try comma if TSV parse yielded one column (might actually be CSV)
+            if len(df.columns) == 1:
+                df = pd.read_csv(fn, sep=",", dtype=str)
+            # Normalise NA representations
+            df.replace(["NA", "na", "N/A", "n/a", ".", ""], np.nan, inplace=True)
+            # Require ID column (case-insensitive)
+            id_col = next((c for c in df.columns if c.strip().upper() == "ID"), None)
+            if id_col is None:
+                QtWidgets.QMessageBox.warning(
+                    self._root, "Covariates",
+                    "File must contain a column named 'ID'."
+                )
+                return
+            # Normalise column name to 'ID'
+            if id_col != "ID":
+                df = df.rename(columns={id_col: "ID"})
+            # Coerce numeric columns where possible
+            for col in df.columns:
+                if col == "ID":
+                    continue
+                coerced = pd.to_numeric(df[col], errors="coerce")
+                if coerced.notna().any():
+                    df[col] = coerced
+            self._aux_df   = df
+            self._aux_path = fn
+            import os
+            self._lbl_cov_file.setText(os.path.basename(fn) +
+                                       f"  ({len(df)} rows, {len(df.columns)-1} covariate cols)")
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self._root, "Covariates", f"Could not load file:\n{e}")
+            return
+        # Refresh combos with new columns available
+        self._on_table_changed()
+
+    def _clear_aux_file(self):
+        self._aux_df   = None
+        self._aux_path = ""
+        self._lbl_cov_file.setText("(none)")
+        self._on_table_changed()
+
+    def _get_effective_df(self):
+        """Return (merged_df, aux_col_names).
+
+        If a covariate file is loaded and the main table has an ID column,
+        returns a left-joined DataFrame and the list of covariate column names
+        that were added.  Otherwise returns (self._df, []).
+        """
+        df = self._df
+        if df is None:
+            return None, []
+        if self._aux_df is None:
+            return df, []
+        # Locate ID column in main table (case-insensitive)
+        id_col = next((c for c in df.columns if c.strip().upper() == "ID"), None)
+        if id_col is None:
+            return df, []
+        # Aux columns to add (all except ID)
+        aux_cols = [c for c in self._aux_df.columns if c != "ID"]
+        # For conflict resolution: suffix _cov for cols already in main df
+        existing = set(df.columns)
+        rename_map = {}
+        for c in aux_cols:
+            if c in existing:
+                rename_map[c] = c + "_cov"
+        aux = self._aux_df.rename(columns=rename_map)
+        merged_aux_cols = [rename_map.get(c, c) for c in aux_cols]
+        try:
+            # Coerce both ID columns to stripped strings so int/str mismatches join correctly
+            df_m = df.copy()
+            df_m[id_col] = df_m[id_col].astype(str).str.strip()
+            aux_m = aux.copy()
+            aux_m["ID"] = aux_m["ID"].astype(str).str.strip()
+            merged = pd.merge(df_m, aux_m, left_on=id_col, right_on="ID", how="left")
+            # Drop duplicate ID col if main df id_col != 'ID'
+            if id_col != "ID" and "ID" in merged.columns:
+                merged = merged.drop(columns=["ID"])
+        except Exception:
+            return df, []
+        return merged, merged_aux_cols
+
+    # ------------------------------------------------------------------
     # Plot dispatch
     # ------------------------------------------------------------------
 
     def _schedule_plot(self, *_):
-        if self._df is not None:
+        if self._df is not None or self._aux_df is not None:
             self._plot_timer.start()
 
     def _plot(self):
-        df = self._df
+        df, _ = self._get_effective_df()
         if df is None:
             return
 
-        xcol  = self._combo_x.currentText()
-        ycol  = self._combo_y.currentText()
+        xcol  = self._combo_x.currentData() or self._combo_x.currentText()
+        ycol  = self._combo_y.currentData() or self._combo_y.currentText()
         gcol1 = self._combo_group1.currentData() or None
         gcol2 = self._combo_group2.currentData() or None
         mode1 = self._combo_mode1.currentData() or "overlay"
@@ -316,34 +442,37 @@ class PlotterTab(_ExplorerTab):
                 self._plot_line(ctx, df, xcol, ycol)
             else:
                 self._plot_scatter(ctx, df, xcol, ycol)
-        except Exception as e:
+
+            for ax in fig.axes:
+                if log_x and ptype not in ("hist", "bar", "box"):
+                    ax.set_xscale("log")
+                if log_y and ptype not in ("hist", "bar", "box"):
+                    ax.set_yscale("log")
+                ax.set_xlabel(xcol, color=FG, fontsize=9)
+                if ptype != "hist":
+                    ax.set_ylabel(ycol, color=FG, fontsize=9)
+                ax.tick_params(colors=FG, labelsize=8)
+                for sp in ax.spines.values():
+                    sp.set_edgecolor(GRID)
+
+            tbl_key = self._combo_table.currentText()
+            all_axes = fig.axes
+            if len(all_axes) == 1:
+                all_axes[0].set_title(tbl_key, color=FG, fontsize=9, pad=6)
+            else:
+                fig.suptitle(tbl_key, color=FG, fontsize=9, y=0.99)
+
+            fig.subplots_adjust(left=0.12, right=0.97, top=0.92, bottom=0.12,
+                                hspace=0.42, wspace=0.35)
+            canvas.draw()
+        except Exception:
             fig.clear()
+            fig.patch.set_facecolor(BG)
             ax = fig.add_subplot(111); ax.set_facecolor(BG)
-            ax.text(0.5, 0.5, f"Plot error:\n{e}", color=FG,
+            ax.text(0.5, 0.5, "Selected inputs cannot be plotted", color=FG,
                     ha="center", va="center", fontsize=9, transform=ax.transAxes)
-
-        for ax in fig.axes:
-            if log_x and ptype not in ("hist", "bar", "box"):
-                ax.set_xscale("log")
-            if log_y and ptype not in ("hist", "bar", "box"):
-                ax.set_yscale("log")
-            ax.set_xlabel(xcol, color=FG, fontsize=9)
-            if ptype != "hist":
-                ax.set_ylabel(ycol, color=FG, fontsize=9)
-            ax.tick_params(colors=FG, labelsize=8)
-            for sp in ax.spines.values():
-                sp.set_edgecolor(GRID)
-
-        tbl_key = self._combo_table.currentText()
-        all_axes = fig.axes
-        if len(all_axes) == 1:
-            all_axes[0].set_title(tbl_key, color=FG, fontsize=9, pad=6)
-        else:
-            fig.suptitle(tbl_key, color=FG, fontsize=9, y=0.99)
-
-        fig.subplots_adjust(left=0.12, right=0.97, top=0.92, bottom=0.12,
-                            hspace=0.42, wspace=0.35)
-        canvas.draw()
+            ax.set_axis_off()
+            canvas.draw()
 
     # ------------------------------------------------------------------
     # Context builder

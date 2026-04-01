@@ -122,6 +122,11 @@ class SignalsMixin:
         self._day_lines_pgh = []
         self._day_lines_pg1 = []
 
+        # safe defaults so window events don't crash before first render
+        self.pg1_header_height = 0.05
+        self.pg1_footer_height = 0.025
+        self.pg1_annot_height  = 0
+
     def _init_line_weight_control(self):
         if getattr(self, "_line_weight_widget", None) is not None:
             return
@@ -587,6 +592,11 @@ class SignalsMixin:
         #   rendered and current
         self._set_render_status( True , True)
 
+        # Reinitialize segsrv for each Render so that accumulated C++ state
+        # (particularly sigmods registered via make_sigmod) does not grow
+        # across repeated renders, which causes std::bad_alloc.
+        self.ss = lp.segsrv( self.p )
+
         # ------------------------------------------------------------
         # do rendering on a separate thread
 
@@ -986,12 +996,12 @@ class SignalsMixin:
         elif self.ui.radio_fixedscale.isChecked():
             lwr = self.ui.spin_fixed_min.value()
             upr = self.ui.spin_fixed_max.value()
-            if lwr <= upr:
+            if lwr >= upr:   # degenerate range: fall back to unit defaults
                 lwr = -1
                 upr = +1
             for ch in self.ss_chs:
                 if ch not in ch_set:
-                    self.ss.fix_physical_scale( ch , self.ui.spin_fixed_min.value(), self.ui.spin_fixed_max.value() )
+                    self.ss.fix_physical_scale( ch , lwr, upr )
         else:
             for ch in self.ss_chs:
                 if ch not in ch_set:
@@ -1162,15 +1172,22 @@ class SignalsMixin:
                 # draw
                 self.curves[nchan-idx-1].setData(x, y)
 
-            # labels w/ y-axis scale             
+            # labels w/ y-axis scale
             ylim = self.ss.get_window_phys_range( ch )
             if self.show_labels:
                 tv[idx] = ' ' + ch + ' ' + str(round(ylim[0],3)) + ' : ' + str(round(ylim[1],3)) + ' (' + self.units[ ch ] +')'
-            yv[idx] = self.ss.get_ylabel( idx ) 
+            yv[idx] = self.ss.get_ylabel( idx )
             # next
             idx = idx + 1
 
-                
+        # Clear curve slots for channels that were rendered but are now deselected.
+        # Without this, deselected channels leave ghost traces on screen.
+        for i in range(nchan, len(self.curves)):
+            self.curves[i].setData([], [])
+            self.y0_curves[i].setData([], [])
+        for i in range(sigmod_idx, len(self.sigmod_curves)):
+            self.sigmod_curves[i].setData([], [])
+
         # annots
         aidx = 0
         self.ss.compile_windowed_annots( anns )
