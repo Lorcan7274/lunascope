@@ -31,7 +31,6 @@ def _user_cache_root() -> Path:
 def _configure_runtime_cache_dirs() -> None:
     cache_root = _user_cache_root() / "lunascope"
     mpl_cache = cache_root / "matplotlib"
-
     try:
         mpl_cache.mkdir(parents=True, exist_ok=True)
     except OSError:
@@ -40,6 +39,12 @@ def _configure_runtime_cache_dirs() -> None:
         mpl_cache.mkdir(parents=True, exist_ok=True)
 
     os.environ.setdefault("MPLCONFIGDIR", str(mpl_cache))
+    os.environ.setdefault("XDG_CACHE_HOME", str(cache_root))
+
+    bundle_root = Path(sys.executable).resolve().parent
+    bundled_mpl_data = bundle_root / "matplotlib" / "mpl-data"
+    if bundled_mpl_data.exists():
+        os.environ.setdefault("MATPLOTLIBDATA", str(bundled_mpl_data))
 
     # On Unix, fontconfig typically uses XDG_CACHE_HOME. If it is unset and the
     # default cache location is not writable, Matplotlib can end up rebuilding

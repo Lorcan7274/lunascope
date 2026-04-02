@@ -20,30 +20,23 @@ jobs:
           python-version: '3.12'
           cache: 'pip'
 
-      - name: Cache venv
-        id: cache-venv
-        uses: actions/cache@v4
-        with:
-          path: .venv
-          key: venv-windows-${{ hashFiles('pyproject.toml') }}
-
-      - name: Cache Nuitka
-        uses: actions/cache@v4
-        with:
-          path: ~\AppData\Local\Nuitka\Nuitka\Cache
-          key: nuitka-windows-${{ hashFiles('src/**/*.py', 'pysidedeploy.spec') }}
-          restore-keys: nuitka-windows-
-
       - name: Install dependencies
-        if: steps.cache-venv.outputs.cache-hit != 'true'
         run: |
+          if (Test-Path .venv) { Remove-Item -Recurse -Force .venv }
+          if (Test-Path dist) { Remove-Item -Recurse -Force dist }
+          if (Test-Path build) { Remove-Item -Recurse -Force build }
+          if (Test-Path deployment) { Remove-Item -Recurse -Force deployment }
           python -m venv .venv
           .venv\Scripts\pip install --upgrade pip
           .venv\Scripts\pip install .
-          .venv\Scripts\pip install nuitka
+          .venv\Scripts\pip install nuitka==2.7.11
+
+      - name: Patch Nuitka SciPy config
+        run: |
+          .venv\Scripts\python scripts\patch_nuitka_package_config.py
 
       - name: Build app
-        run: echo Y | .venv\Scripts\pyside6-deploy -c pysidedeploy.spec
+        run: .venv\Scripts\pyside6-deploy -f -c pysidedeploy.spec
 
       - name: List build output
         run: Get-ChildItem -Recurse -Depth 3 deployment, dist -ErrorAction SilentlyContinue

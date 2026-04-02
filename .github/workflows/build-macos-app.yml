@@ -20,33 +20,24 @@ jobs:
           python-version: '3.12'
           cache: 'pip'
 
-      - name: Cache venv
-        id: cache-venv
-        uses: actions/cache@v4
-        with:
-          path: .venv
-          key: venv-macos-${{ hashFiles('pyproject.toml') }}
-
-      - name: Cache Nuitka
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/Nuitka
-          key: nuitka-macos-${{ hashFiles('src/**/*.py', 'pysidedeploy.spec') }}
-          restore-keys: nuitka-macos-
-
       - name: Install dependencies
-        if: steps.cache-venv.outputs.cache-hit != 'true'
         run: |
+          rm -rf .venv dist build
           python -m venv .venv
           source .venv/bin/activate
           pip install --upgrade pip
           pip install .
-          pip install nuitka
+          pip install nuitka==2.7.11
+
+      - name: Patch Nuitka SciPy config
+        run: |
+          source .venv/bin/activate
+          python scripts/patch_nuitka_package_config.py
 
       - name: Build app
         run: |
           source .venv/bin/activate
-          echo Y | pyside6-deploy -c pysidedeploy.spec
+          pyside6-deploy -f -c pysidedeploy.spec
 
       - name: Ad-hoc sign app bundle
         run: |
@@ -54,8 +45,8 @@ jobs:
 
       - name: Zip app bundle
         run: |
-          cd dist
-          zip -r Lunascope.app.zip Lunascope.app
+          rm -f dist/Lunascope.app.zip
+          ditto -c -k --sequesterRsrc --keepParent dist/Lunascope.app dist/Lunascope.app.zip
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

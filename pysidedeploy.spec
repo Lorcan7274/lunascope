@@ -16,7 +16,7 @@ exec_directory = dist
 project_file = 
 
 # application icon
-icon =
+icon = /Users/smp37/lunascope/.venv/lib/python3.12/site-packages/PySide6/scripts/deploy_lib/pyside_icon.icns
 
 [python]
 
@@ -94,3 +94,4 @@ local_libs =
 
 # architecture of deployed platform
 arch = 
+
