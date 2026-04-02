@@ -74,6 +74,16 @@ jobs:
             Copy-Item -Recurse -Force $outputPath $normalizedPath
           }
 
+      - name: Ensure Matplotlib data is bundled
+        run: |
+          $mplDataDir = .venv\Scripts\python -c "import matplotlib; print(matplotlib.get_data_path())"
+          $targetDir = Join-Path (Resolve-Path dist) "Lunascope.dist\matplotlib\mpl-data"
+          $targetParent = Split-Path $targetDir -Parent
+          New-Item -ItemType Directory -Force -Path $targetParent | Out-Null
+          if (Test-Path $targetDir) { Remove-Item -Recurse -Force $targetDir }
+          Copy-Item -Recurse -Force $mplDataDir $targetDir
+          if (-not (Test-Path (Join-Path $targetDir "matplotlibrc"))) { throw "matplotlibrc missing from bundled Matplotlib data" }
+
       - name: List build output
         run: Get-ChildItem -Recurse -Depth 3 deployment, dist -ErrorAction SilentlyContinue
 

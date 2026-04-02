@@ -91,6 +91,20 @@ jobs:
             cp -R "$app_path" dist/Lunascope.app
           fi
 
+      - name: Ensure Matplotlib data is bundled
+        run: |
+          source .venv/bin/activate
+          mpl_data_dir="$(python - <<'PY'
+          import matplotlib
+          print(matplotlib.get_data_path())
+          PY
+          )"
+          target_dir="dist/Lunascope.app/Contents/MacOS/matplotlib/mpl-data"
+          mkdir -p "$(dirname "$target_dir")"
+          rm -rf "$target_dir"
+          cp -R "$mpl_data_dir" "$target_dir"
+          test -f "$target_dir/matplotlibrc"
+
       - name: List build output
         run: |
           find deployment dist -maxdepth 3 -print || true

@@ -357,7 +357,8 @@ class AnnotTab(_ExplorerTab):
             for cls in checked
         }
         if view == "peth":
-            targets = [c for c in checked if c != ref]
+            # include ref_class itself last (auto-PETH / inter-event distribution)
+            targets = [c for c in checked if c != ref] + ([ref] if ref in checked else [])
             data = peri_event_histogram(cohort, ref, targets, window, bin_s,
                                         ref_anchor=ref_anchor, target_mode=tgt_mode)
         elif view == "overlap":
@@ -509,11 +510,17 @@ class AnnotTab(_ExplorerTab):
             ax = axes[r][c_]
             dens = density.get(cls, np.zeros_like(bins))
             col  = colors.get(cls, "#aaaaaa")
-            ax.fill_between(bins, 0, dens, color=col, alpha=0.35, step="mid")
-            ax.step(bins, dens, where="mid", color=col, linewidth=1.2)
+            is_self = (cls == ref_class)
+            fill_alpha = 0.20 if is_self else 0.35
+            ax.fill_between(bins, 0, dens, color=col, alpha=fill_alpha,
+                            step="mid", hatch="////" if is_self else None,
+                            edgecolor=col if is_self else "none")
+            ax.step(bins, dens, where="mid", color=col,
+                    linewidth=1.2, linestyle="--" if is_self else "-")
             ax.axvline(0, color="#ffffff", linewidth=0.7, linestyle="--", alpha=0.5)
             ax.set_xlim(-window, window)
-            self._style_ax(ax, title=cls, xlabel="lag (s)", ylabel=ylabel)
+            title = f"{cls}  (inter-event)" if is_self else cls
+            self._style_ax(ax, title=title, xlabel="lag (s)", ylabel=ylabel)
         for idx in range(n, nrows * ncols):
             r, c_ = divmod(idx, ncols); axes[r][c_].set_visible(False)
         canvas.draw()

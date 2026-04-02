@@ -446,14 +446,24 @@ def peri_event_histogram(
             if tgt_ev.empty:
                 continue
 
+            is_self = (cls == ref_class)
             if target_mode == "span":
                 # Each target interval [ts, te] is active at lag t when
                 # ts - ref <= t <= te - ref.  Accumulate via diff+cumsum.
                 tgt_starts = tgt_ev["Start"].values.astype(float)
                 tgt_stops  = tgt_ev["Stop"].values.astype(float)
-                # All pairwise lag intervals — shape (N_tgt * N_ref,)
-                lag_lo = (tgt_starts[:, np.newaxis] - ref_times[np.newaxis, :]).ravel()
-                lag_hi = (tgt_stops[:, np.newaxis]  - ref_times[np.newaxis, :]).ravel()
+                # All pairwise lag intervals — shape (N_tgt, N_ref)
+                N_tgt, N_ref = len(tgt_starts), len(ref_times)
+                lag_lo_mat = tgt_starts[:, np.newaxis] - ref_times[np.newaxis, :]
+                lag_hi_mat = tgt_stops[:, np.newaxis]  - ref_times[np.newaxis, :]
+                if is_self and N_tgt == N_ref:
+                    # exclude self-pairs (diagonal)
+                    mask = ~np.eye(N_tgt, dtype=bool)
+                    lag_lo = lag_lo_mat[mask]
+                    lag_hi = lag_hi_mat[mask]
+                else:
+                    lag_lo = lag_lo_mat.ravel()
+                    lag_hi = lag_hi_mat.ravel()
                 # Clip to window and convert to bin indices
                 b0 = np.clip(
                     np.searchsorted(edges, lag_lo, side="right") - 1, 0, n_bins)
@@ -468,7 +478,13 @@ def peri_event_histogram(
             else:
                 # "onset": histogram of target start times relative to ref anchor
                 tgt_times = tgt_ev["Start"].values.astype(float)
-                lags = (tgt_times[:, np.newaxis] - ref_times[np.newaxis, :]).ravel()
+                N_tgt, N_ref = len(tgt_times), len(ref_times)
+                lags_mat = tgt_times[:, np.newaxis] - ref_times[np.newaxis, :]
+                if is_self and N_tgt == N_ref:
+                    # exclude self-pairs (diagonal)
+                    lags = lags_mat[~np.eye(N_tgt, dtype=bool)]
+                else:
+                    lags = lags_mat.ravel()
                 in_win = lags[(lags >= edges[0]) & (lags < edges[-1])]
                 if len(in_win):
                     c, _ = np.histogram(in_win, bins=edges)
