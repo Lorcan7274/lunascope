@@ -76,6 +76,23 @@ jobs:
           source .venv/bin/activate
           pyside6-deploy -f -c pysidedeploy.spec
 
+      - name: Normalize app bundle path
+        run: |
+          mkdir -p dist
+          app_path="$(find deployment dist -maxdepth 2 -type d -name '*.app' | head -n 1)"
+          if [ -z "$app_path" ]; then
+            echo "No .app bundle found under deployment/ or dist/"
+            find deployment dist -maxdepth 3 -print || true
+            exit 1
+          fi
+          echo "Using app bundle: $app_path"
+          rm -rf dist/Lunascope.app
+          cp -R "$app_path" dist/Lunascope.app
+
+      - name: List build output
+        run: |
+          find deployment dist -maxdepth 3 -print || true
+
       - name: Ad-hoc sign app bundle
         run: |
           codesign --deep -s - --force dist/Lunascope.app
