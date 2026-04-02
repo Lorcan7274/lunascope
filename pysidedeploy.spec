@@ -68,7 +68,7 @@ macos.permissions =
 mode = standalone
 
 # specify any extra nuitka arguments
-extra_args = --quiet --noinclude-qt-translations --include-package=scipy --include-package=scipy.optimize --include-package=pyparsing --include-package=IPython --include-module=scipy.optimize._cobyla_py --include-module=scipy.optimize._constraints --include-module=scipy.optimize._minimize --include-module=scipy.optimize._optimize --include-module=pyparsing.testing --nofollow-import-to=ipywidgets --nofollow-import-to=ipykernel --nofollow-import-to=jupyter_client --nofollow-import-to=nbconvert --nofollow-import-to=IPython.testing --include-package-data=lunascope --include-package-data=matplotlib --assume-yes-for-downloads --output-filename=Lunascope
+extra_args = --quiet --noinclude-qt-translations --include-package=scipy --include-package=scipy.optimize --include-package=pyparsing --include-package=IPython --include-package=charset_normalizer --include-package=certifi --include-module=scipy.optimize._cobyla_py --include-module=scipy.optimize._constraints --include-module=scipy.optimize._minimize --include-module=scipy.optimize._optimize --include-module=pyparsing.testing --nofollow-import-to=ipywidgets --nofollow-import-to=ipykernel --nofollow-import-to=jupyter_client --nofollow-import-to=nbconvert --nofollow-import-to=IPython.testing --include-package-data=lunascope --include-package-data=matplotlib --assume-yes-for-downloads --output-filename=Lunascope
 
 [buildozer]
 

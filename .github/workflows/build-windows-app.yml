@@ -84,6 +84,13 @@ jobs:
           Copy-Item -Recurse -Force $mplDataDir $targetDir
           if (-not (Test-Path (Join-Path $targetDir "matplotlibrc"))) { throw "matplotlibrc missing from bundled Matplotlib data" }
 
+      - name: Ensure UI file is bundled
+        run: |
+          $targetDir = Join-Path (Resolve-Path dist) "Lunascope.dist\lunascope\ui"
+          New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
+          Copy-Item -Force src\lunascope\ui\main.ui (Join-Path $targetDir "main.ui")
+          if (-not (Test-Path (Join-Path $targetDir "main.ui"))) { throw "main.ui missing from bundled UI data" }
+
       - name: List build output
         run: Get-ChildItem -Recurse -Depth 3 deployment, dist -ErrorAction SilentlyContinue
 

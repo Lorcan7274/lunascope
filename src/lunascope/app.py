@@ -94,20 +94,44 @@ os.environ["OS_ACTIVITY_MODE"] = "disable"
 
 
 def _load_ui():
-    ui_res = files("lunascope.ui").joinpath("main.ui")
-    with as_file(ui_res) as p:
-        f = QFile(str(p))
+    candidate_paths = []
+    try:
+        ui_res = files("lunascope.ui").joinpath("main.ui")
+        with as_file(ui_res) as p:
+            candidate_paths.append(Path(p))
+    except Exception:
+        pass
+
+    bundle_root = Path(sys.executable).resolve().parent
+    candidate_paths.extend(
+        [
+            bundle_root / "lunascope" / "ui" / "main.ui",
+            bundle_root / "Lunascope" / "ui" / "main.ui",
+            Path(__file__).resolve().parent / "ui" / "main.ui",
+        ]
+    )
+
+    seen = set()
+    for path in candidate_paths:
+        path = Path(path)
+        if path in seen or not path.exists():
+            continue
+        seen.add(path)
+        f = QFile(str(path))
         if not f.open(QFile.ReadOnly):
-            raise RuntimeError(f"Cannot open UI file: {p}")
+            continue
         try:
             loader = QUiLoader()
             loader.registerCustomWidget(pg.PlotWidget)
             ui = loader.load(f)
         finally:
             f.close()
-    if ui is None:
-        raise RuntimeError("Failed to load UI")
-    return ui
+        if ui is not None:
+            return ui
+
+    raise RuntimeError(
+        "Cannot open UI file. Tried: " + ", ".join(str(p) for p in candidate_paths)
+    )
 
 
 def _parse_args(argv):

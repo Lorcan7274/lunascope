@@ -105,6 +105,13 @@ jobs:
           cp -R "$mpl_data_dir" "$target_dir"
           test -f "$target_dir/matplotlibrc"
 
+      - name: Ensure UI file is bundled
+        run: |
+          target_dir="dist/Lunascope.app/Contents/MacOS/lunascope/ui"
+          mkdir -p "$target_dir"
+          cp src/lunascope/ui/main.ui "$target_dir/main.ui"
+          test -f "$target_dir/main.ui"
+
       - name: List build output
         run: |
           find deployment dist -maxdepth 3 -print || true
