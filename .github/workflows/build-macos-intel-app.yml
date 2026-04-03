@@ -1,0 +1,74 @@
+name: Build macOS Intel App
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-13
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Cache venv
+        id: cache-venv
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: venv-macos-intel-${{ hashFiles('pyproject.toml') }}
+
+      - name: Cache Nuitka
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/Nuitka
+          key: nuitka-macos-intel-${{ hashFiles('src/**/*.py', 'pysidedeploy.spec') }}
+          restore-keys: nuitka-macos-intel-
+
+      - name: Install dependencies
+        if: steps.cache-venv.outputs.cache-hit != 'true'
+        run: |
+          python -m venv .venv
+          source .venv/bin/activate
+          pip install --upgrade pip
+          pip install -e .
+          pip install nuitka
+
+      - name: Build app
+        run: |
+          source .venv/bin/activate
+          echo Y | pyside6-deploy -c pysidedeploy.spec
+
+      - name: Zip app bundle
+        run: |
+          cd dist
+          zip -r Lunascope-Intel.app.zip Lunascope.app
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Lunascope-macOS-Intel
+          path: dist/Lunascope-Intel.app.zip
+
+      - name: Publish to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view latest-build > /dev/null 2>&1; then
+            gh release upload latest-build --clobber dist/Lunascope-Intel.app.zip
+          else
+            gh release create latest-build \
+              --title "Latest Build" \
+              --prerelease \
+              --notes "Latest automated build. Download the zip and extract to run." \
+              dist/Lunascope-Intel.app.zip
+          fi
