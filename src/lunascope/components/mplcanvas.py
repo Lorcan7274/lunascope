@@ -19,6 +19,8 @@
 #
 #  --------------------------------------------------------------------
 
+from PySide6.QtCore import QSize
+from PySide6.QtWidgets import QSizePolicy
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
@@ -33,5 +35,10 @@ class MplCanvas(FigureCanvas):
         self.ax.set_axis_off()                           # no ticks, spines, grid
         self.ax.grid(False)
         fig.patch.set_facecolor("black")                 # extra safety
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setMinimumSize(320, 240)
         self.draw()
 
+    def sizeHint(self):
+        w, h = self.get_width_height()
+        return QSize(max(320, w), max(240, h))

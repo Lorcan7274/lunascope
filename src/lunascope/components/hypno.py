@@ -66,9 +66,12 @@ class HypnoMixin:
             return
 
         # who has at least some staging available
-        if not self._has_staging():
+        diag = self._stage_validation_diagnostics()
+        if not diag["ok"]:
             if self.ui.radio_assume_staging.isChecked():
-                QMessageBox.critical( self.ui , "Error", "No staging or invalid/overlapping staging\n(uncheck Staging checkbox to turn this message off)" )
+                self._show_staging_message(
+                    diag["message"] + "\n\nUncheck Staging to suppress this warning."
+                )
             return
         
         # make hypnogram

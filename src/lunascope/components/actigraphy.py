@@ -27,6 +27,8 @@ import traceback
 import lunapi as lp
 import numpy as np
 
+from ..helpers import screen_clamp, is_dark_palette
+
 from PySide6 import QtCore, QtWidgets, QtGui
 from PySide6.QtCore import QMetaObject, Qt, Slot
 from PySide6.QtGui import QKeySequence
@@ -220,6 +222,14 @@ class ActigraphyMixin:
 
         self._set_actigraphy_epoch_default(multiday=False)
         self._update_actigraphy_summary()
+        # The canvas frame always gets a dark gradient background.
+        # The text-colour override is only applied on dark-themed systems so that
+        # the control-row labels remain readable on Windows light themes.
+        _color_rule = """
+            QComboBox, QLabel {
+                color: #d7e3f4;
+            }
+        """ if is_dark_palette() else ""
         root.setStyleSheet(
             """
             QFrame#host_actigraphy {
@@ -231,13 +241,11 @@ class ActigraphyMixin:
                     stop:1 rgba(22,32,48,255)
                 );
             }
-            QComboBox, QLabel {
-                color: #d7e3f4;
-            }
             QLabel {
                 font-weight: 500;
             }
             """
+            + _color_rule
         )
         summary.setStyleSheet(
             """
@@ -373,7 +381,7 @@ class ActigraphyMixin:
         if not was_floating:
             dock.setFloating(True)
 
-        target_w, target_h = self._ACTIGRAPHY_FLOAT_SIZE
+        target_w, target_h = screen_clamp(*self._ACTIGRAPHY_FLOAT_SIZE)
         if dock.width() < target_w or dock.height() < target_h:
             dock.resize(target_w, target_h)
 

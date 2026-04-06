@@ -15,6 +15,8 @@ Ctrl+E  →  floating "Explorer" dock with four tabbed panels:
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QDockWidget, QTabWidget
 
+from ..helpers import screen_clamp
+
 
 class ExplorerMixin:
     """Mixin that creates and owns the tabbed Explorer dock."""
@@ -86,7 +88,7 @@ class ExplorerMixin:
         dock = self._explorer_dock
         if not dock.isFloating():
             dock.setFloating(True)
-        w, h = self._EXPLORER_FLOAT_SIZE
+        w, h = screen_clamp(*self._EXPLORER_FLOAT_SIZE)
         if dock.width() < w or dock.height() < h:
             dock.resize(w, h)
         try:

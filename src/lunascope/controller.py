@@ -124,6 +124,7 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         act_proj_eval = QAction("Evaluate (project)", self)
         act_save_session = QAction("Save Session...", self)
         act_load_session = QAction("Load Session...", self)
+        act_download_pops = QAction("Download POPS Resources...", self)
         
         # connect to same slots as buttons
         act_load_slist.triggered.connect(self.open_file)
@@ -134,6 +135,7 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         act_proj_eval.triggered.connect(self._proj_eval)
         act_save_session.triggered.connect(self._save_session_state)
         act_load_session.triggered.connect(self._load_session_state)
+        act_download_pops.triggered.connect(self._download_pops_resources)
 
         self.ui.menuProject.addAction(act_load_slist)
         self.ui.menuProject.addAction(act_build_slist)
@@ -147,6 +149,7 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         self.ui.menuProject.addSeparator()
         self.ui.menuProject.addAction(act_save_session)
         self.ui.menuProject.addAction(act_load_session)
+        self.ui.menuProject.addAction(act_download_pops)
 
         # set up menu items: viewing
         self.ui.menuView.addAction(self.ui.dock_slist.toggleViewAction())
@@ -217,6 +220,7 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
             "project_eval": act_proj_eval,
             "project_save_session": act_save_session,
             "project_load_session": act_load_session,
+            "project_download_pops": act_download_pops,
             "about_help": act_about,
             "palette_spectrum": act_pal_spectrum,
             "palette_white": act_pal_white,
@@ -378,9 +382,27 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
 
 
         # ------------------------------------------------------------
-        # size overall app window
-        
-        self.ui.resize(1200, 800)
+        # size overall app window – cap to available screen space
+
+        screen = QGuiApplication.primaryScreen()
+        if screen is not None:
+            avail = screen.availableGeometry()
+            win_w = min(1200, int(avail.width()  * 0.92))
+            win_h = min(800,  int(avail.height() * 0.92))
+        else:
+            win_w, win_h = 1200, 800
+        self.ui.resize(win_w, win_h)
+
+        # On Windows set a modest monospace font size for the text-edit panels
+        # so they don't appear oversized on lower-resolution / non-HiDPI screens.
+        if sys.platform == "win32":
+            from PySide6.QtGui import QFont
+            mono = QFont("Courier New", 9)
+            for _name in ("txt_param", "txt_cmap", "txt_out", "txt_inp"):
+                _w = getattr(self.ui, _name, None)
+                if _w is not None:
+                    _w.setFont(mono)
+
         apply_gui_help(self.ui, self._help_actions)
         set_render_button_help(self.ui, rendered=False, current=False)
 
@@ -391,6 +413,7 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
 
     def lock_ui(self, msg="Processing...\n\n...please wait"):
         self.blocker.show_block(msg)
+        QGuiApplication.processEvents()
 
     def unlock_ui(self):
         self.blocker.hide_block()

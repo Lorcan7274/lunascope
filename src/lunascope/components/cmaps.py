@@ -149,7 +149,11 @@ class CMapsMixin:
         self.cmap_ylines_idx = { }
         self.cmap_n_ylines = 0
 
-        self.cfg_pops_path = '~/dropbox/pops/'
+        cached_pops_path = None
+        if hasattr(self, "_load_cached_pops_path"):
+            cached_pops_path = self._load_cached_pops_path()
+
+        self.cfg_pops_path = cached_pops_path or '~/dropbox/pops/'
         self.cfg_pops_model = 's2'
 
         self.ui.txt_pops_path.setText( self.cfg_pops_path )
@@ -249,7 +253,10 @@ class CMapsMixin:
 
         if 'pops-path' in self.cfg['par']:
             self.cfg_pops_path = self.cfg['par']['pops-path']
-            self.ui.txt_pops_path.setText( self.cfg_pops_path )
+            if hasattr(self, "_set_pops_path"):
+                self._set_pops_path(self.cfg_pops_path)
+            else:
+                self.ui.txt_pops_path.setText(self.cfg_pops_path)
 	    
         if 'pops-model' in self.cfg['par']:
             self.cfg_pops_model = self.cfg['par']['pops-model']

@@ -414,3 +414,24 @@ class Blocker(QWidget):
         self._dead = True
         self.hide()
         self.deleteLater()
+
+
+# ------------------------------------------------------------
+# Screen-aware sizing helpers
+# ------------------------------------------------------------
+
+def screen_clamp(w: int, h: int, frac: float = 0.85):
+    """Return (w, h) clamped to *frac* × the primary screen's available size."""
+    from PySide6.QtGui import QGuiApplication
+    screen = QGuiApplication.primaryScreen()
+    if screen is None:
+        return w, h
+    avail = screen.availableGeometry()
+    return min(w, int(avail.width() * frac)), min(h, int(avail.height() * frac))
+
+
+def is_dark_palette() -> bool:
+    """Return True when the application palette background is dark."""
+    from PySide6.QtGui import QGuiApplication, QPalette
+    palette = QGuiApplication.palette()
+    return palette.color(QPalette.Window).lightness() < 128

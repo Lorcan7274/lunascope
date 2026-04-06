@@ -1,8 +1,9 @@
 import sys
-import tempfile
 from pathlib import Path
 import os
 import signal
+
+from .runtime_paths import app_cache_root
 
 def _boot_log(message: str) -> None:
     sys.stderr.write(f"[lunascope] {message}\n")
@@ -12,29 +13,13 @@ def _boot_log(message: str) -> None:
 _boot_log("Initiating startup...")
 
 
-def _user_cache_root() -> Path:
-    if sys.platform == "win32":
-        for env_var in ("LOCALAPPDATA", "APPDATA"):
-            value = os.environ.get(env_var)
-            if value:
-                return Path(value)
-    elif sys.platform == "darwin":
-        return Path.home() / "Library" / "Caches"
-    else:
-        xdg_cache = os.environ.get("XDG_CACHE_HOME")
-        if xdg_cache:
-            return Path(xdg_cache)
-        return Path.home() / ".cache"
-    return Path(tempfile.gettempdir()) / "lunascope-cache"
-
-
 def _configure_runtime_cache_dirs() -> None:
-    cache_root = _user_cache_root() / "lunascope"
+    cache_root = app_cache_root()
     mpl_cache = cache_root / "matplotlib"
     try:
         mpl_cache.mkdir(parents=True, exist_ok=True)
     except OSError:
-        cache_root = Path(tempfile.gettempdir()) / "lunascope-cache"
+        cache_root = app_cache_root()
         mpl_cache = cache_root / "matplotlib"
         mpl_cache.mkdir(parents=True, exist_ok=True)
 

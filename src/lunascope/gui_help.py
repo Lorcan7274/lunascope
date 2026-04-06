@@ -89,6 +89,7 @@ WIDGET_HELP: dict[str, str] = {
     "check_pops_ignore_obs": "Ignore observed staging and run POPS in prediction-only mode.",
     "radio_pops_hypnodens": "Toggle POPS hypnodensity rendering mode.",
     "butt_pops": "Run POPS and populate output tables/plots.",
+    "butt_pops_resource": "Download POPS resources and update the POPS folder field.",
 
     # Masks
     "txt_generic_mask": "Manual MASK expression (use exactly one mask input mode).",
@@ -111,6 +112,7 @@ ACTION_HELP: dict[str, str] = {
     "project_eval": "Run the command in project mode across all visible samples.",
     "project_save_session": "Save current window layout and core control values to a session file.",
     "project_load_session": "Load a saved session file and restore layout/control values.",
+    "project_download_pops": "Download the POPS model bundle, point the POPS path field at it, and cache that location.",
     "about_help": "Show Lunascope/Luna version info and documentation link.",
     "palette_spectrum": "Apply spectrum color palette.",
     "palette_white": "Apply white/light palette.",

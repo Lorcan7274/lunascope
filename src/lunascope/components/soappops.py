@@ -19,12 +19,36 @@
 #
 #  --------------------------------------------------------------------
 
-from PySide6.QtWidgets import QVBoxLayout, QMessageBox, QComboBox
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtWidgets import (
+    QApplication,
+    QToolButton,
+    QVBoxLayout,
+    QMessageBox,
+    QComboBox,
+    QLabel,
+    QDialog,
+    QDialogButtonBox,
+    QHBoxLayout,
+    QTextBrowser,
+    QStyle,
+)
+from PySide6.QtCore import QMetaObject, Qt, QTimer, Slot
 from PySide6.QtGui import QStandardItemModel, QStandardItem
+import html
+import json
 import os
+import shutil
+import tempfile
+import urllib.request
+import zipfile
 from pathlib import Path
 import pandas as pd
+
+from ..runtime_paths import app_cache_root, app_state_file
+
+
+POPS_DOWNLOAD_URL = "https://zzz.nyspi.org/dist/luna/pops.zip"
+POPS_STATE_FILE = "pops_location.json"
 
 
 class MultiSelectComboBox(QComboBox):
@@ -101,12 +125,188 @@ def _replace_with_multiselect(combo: QComboBox) -> MultiSelectComboBox:
         
 class SoapPopsMixin:
 
+    def _show_staging_message(self, message: str, *, title: str = "Error") -> None:
+        blocks = []
+        for para in str(message).strip().split("\n\n"):
+            lines = [html.escape(line.strip()) for line in para.splitlines() if line.strip()]
+            if not lines:
+                continue
+            head, tail = lines[0], lines[1:]
+            if tail:
+                tail_html = "".join(f"<div>{line}</div>" for line in tail)
+                blocks.append(
+                    "<div style='margin: 0 0 14px 0;'>"
+                    f"<div style='font-weight: 600; margin-bottom: 4px;'>{head}</div>"
+                    f"<div style='line-height: 1.45;'>{tail_html}</div>"
+                    "</div>"
+                )
+            else:
+                blocks.append(
+                    "<div style='margin: 0 0 14px 0; line-height: 1.45;'>"
+                    f"{head}"
+                    "</div>"
+                )
+
+        dlg = QDialog(self.ui)
+        dlg.setWindowTitle(title)
+        dlg.setModal(True)
+        dlg.resize(920, 680)
+
+        outer = QVBoxLayout(dlg)
+        outer.setContentsMargins(18, 18, 18, 14)
+        outer.setSpacing(14)
+
+        body = QHBoxLayout()
+        body.setSpacing(14)
+
+        icon = QLabel(dlg)
+        pm = dlg.style().standardIcon(QStyle.SP_MessageBoxWarning).pixmap(48, 48)
+        icon.setPixmap(pm)
+        icon.setAlignment(Qt.AlignTop | Qt.AlignHCenter)
+        body.addWidget(icon, 0, Qt.AlignTop)
+
+        viewer = QTextBrowser(dlg)
+        viewer.setOpenExternalLinks(False)
+        viewer.setReadOnly(True)
+        viewer.setFrameShape(QTextBrowser.NoFrame)
+        viewer.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        viewer.document().setDocumentMargin(0)
+        viewer.setStyleSheet("QTextBrowser { background: transparent; border: none; }")
+        viewer.setHtml(
+            "<div style='font-size: 14px; color: palette(text);'>"
+            + "".join(blocks)
+            + "</div>"
+        )
+        body.addWidget(viewer, 1)
+
+        outer.addLayout(body, 1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok, parent=dlg)
+        buttons.accepted.connect(dlg.accept)
+        outer.addWidget(buttons)
+
+        dlg.exec()
+
+    def _default_pops_bundle_dir(self) -> Path:
+        return app_cache_root() / "pops"
+
+    def _pops_state_path(self) -> Path:
+        return app_state_file(POPS_STATE_FILE)
+
+    def _resolve_pops_path(self, value: str | os.PathLike[str]) -> Path:
+        return Path(os.path.expandvars(str(Path(value).expanduser()))).resolve()
+
+    def _find_pops_models_dir(self, root: Path) -> Path | None:
+        if not root.exists():
+            return None
+        if any(root.glob("*.mod")):
+            return root
+
+        matches = []
+        for mod_file in root.rglob("*.mod"):
+            try:
+                matches.append(mod_file.parent.resolve())
+            except OSError:
+                continue
+
+        if not matches:
+            return None
+
+        matches = sorted(set(matches), key=lambda p: (len(p.parts), str(p)))
+        return matches[0]
+
+    def _load_cached_pops_path(self) -> str | None:
+        try:
+            raw = self._pops_state_path().read_text(encoding="utf-8")
+            data = json.loads(raw)
+            path = str(data.get("path", "")).strip()
+            if not path:
+                return None
+            resolved = self._resolve_pops_path(path)
+            cached = self._find_pops_models_dir(resolved)
+            return str(cached or resolved)
+        except Exception:
+            return None
+
+    def _save_cached_pops_path(self, path: str | os.PathLike[str]) -> None:
+        resolved = self._resolve_pops_path(path)
+        state_path = self._pops_state_path()
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(
+            json.dumps({"path": str(resolved)}, indent=2, ensure_ascii=True),
+            encoding="utf-8",
+        )
+
+    def _set_pops_path(self, path: str | os.PathLike[str], *, persist: bool = True) -> str:
+        resolved = self._resolve_pops_path(path)
+        text = str(resolved)
+        self.ui.txt_pops_path.setText(text)
+        if persist:
+            self._save_cached_pops_path(resolved)
+        return text
+
+    def _cache_current_pops_path(self) -> None:
+        text = self.ui.txt_pops_path.text().strip()
+        if not text:
+            return
+        try:
+            self._save_cached_pops_path(text)
+        except Exception:
+            pass
+
+    def _download_pops_resources(self) -> None:
+        bundle_dir = self._default_pops_bundle_dir()
+        archive_path = bundle_dir / "pops.zip"
+        extract_dir = bundle_dir / "resources"
+        staging_dir = Path(tempfile.mkdtemp(prefix="pops-", dir=str(bundle_dir.parent)))
+
+        try:
+            bundle_dir.mkdir(parents=True, exist_ok=True)
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+
+            with urllib.request.urlopen(POPS_DOWNLOAD_URL, timeout=120) as response:
+                with archive_path.open("wb") as fh:
+                    shutil.copyfileobj(response, fh)
+
+            if extract_dir.exists():
+                shutil.rmtree(extract_dir)
+            staging_dir.mkdir(parents=True, exist_ok=True)
+
+            with zipfile.ZipFile(archive_path, "r") as zf:
+                zf.extractall(staging_dir)
+
+            models_dir = self._find_pops_models_dir(staging_dir)
+            if models_dir is None:
+                raise FileNotFoundError("No POPS model files (*.mod) were found in the downloaded archive.")
+
+            shutil.move(str(staging_dir), str(extract_dir))
+            models_dir = self._find_pops_models_dir(extract_dir)
+            if models_dir is None:
+                raise FileNotFoundError("POPS resources were extracted, but no model directory could be resolved.")
+
+            self._set_pops_path(models_dir)
+            QMessageBox.information(
+                self.ui,
+                "POPS Resources",
+                f"Downloaded POPS resources to:\n{models_dir}",
+            )
+        except Exception as e:
+            QMessageBox.critical(
+                self.ui,
+                "POPS Download Error",
+                f"Could not download POPS resources.\n\n{type(e).__name__}: {e}",
+            )
+        finally:
+            QApplication.restoreOverrideCursor()
+            if staging_dir.exists():
+                shutil.rmtree(staging_dir, ignore_errors=True)
+
     def _stage_validation_classes(self):
         if hasattr(self, "_navigator_stage_query_classes"):
             return self._navigator_stage_query_classes()
         return ['N1', 'N2', 'N3', 'R', 'W', 'SP', 'WP', '?', 'L']
 
-    def _stage_validation_df(self):
+    def _stage_validation_raw_df(self):
         try:
             df = self.p.fetch_annots(self._stage_validation_classes(), 30)
         except Exception:
@@ -122,17 +322,330 @@ class SoapPopsMixin:
             return pd.DataFrame()
 
         cols = [c for c in ('Start', 'Stop', 'Class') if c in df.columns]
+        if len(cols) < 3:
+            return pd.DataFrame()
         return df[cols].copy()
 
-    def _stage_validation_has_overlap(self, df):
+    def _stage_validation_df(self):
+        try:
+            self.p.silent_proc('EPOCH align verbose & STAGE')
+        except Exception:
+            return pd.DataFrame()
+
+        try:
+            tbls = self.p.strata()
+        except Exception:
+            return pd.DataFrame()
+
+        if not isinstance(tbls, pd.DataFrame) or tbls.empty or "Command" not in tbls.columns:
+            return pd.DataFrame()
+
+        if not (tbls["Command"] == "STAGE").any():
+            return pd.DataFrame()
+
+        try:
+            df_epoch = self.p.table('EPOCH', 'E')
+            df_stage = self.p.table('STAGE', 'E')
+        except Exception:
+            return pd.DataFrame()
+
+        if not isinstance(df_epoch, pd.DataFrame) or not isinstance(df_stage, pd.DataFrame):
+            return pd.DataFrame()
+
+        need_epoch = {'E', 'START', 'STOP'}
+        need_stage = {'E', 'OSTAGE'}
+        if df_epoch.empty or df_stage.empty or not need_epoch.issubset(df_epoch.columns) or not need_stage.issubset(df_stage.columns):
+            return pd.DataFrame()
+
+        df = pd.merge(
+            df_epoch[['E', 'START', 'STOP']],
+            df_stage[['E', 'OSTAGE']],
+            on='E',
+            how='inner',
+        ).rename(columns={'OSTAGE': 'Class'})
+
+        if hasattr(self, "_filter_navigator_stage_df"):
+            df = self._filter_navigator_stage_df(df, 'Class')
+
+        if df.empty:
+            return pd.DataFrame()
+
+        return df[['START', 'STOP', 'Class']].copy()
+
+    def _stage_validation_format_stage_list(self, values):
+        vals = [str(v) for v in values if str(v)]
+        return ", ".join(vals) if vals else "(none)"
+
+    def _stage_validation_format_secs(self, value):
+        value = float(value)
+        if abs(value - round(value)) < 1e-6:
+            return f"{int(round(value))}s"
+        return f"{value:.3f}s"
+
+    def _stage_validation_overlap_examples(self, df, *, limit=3):
         if df.empty or 'Start' not in df.columns or 'Stop' not in df.columns:
-            return False
+            return {"count": 0, "examples": []}
 
         ordered = df.sort_values(['Start', 'Stop', 'Class'], kind='stable')
-        prev_stop = None
+        active = []
+        overlaps = []
+        total = 0
         for row in ordered.itertuples(index=False):
             start = float(row.Start)
             stop = float(row.Stop)
+            active = [prev for prev in active if float(prev.Stop) > start]
+            for prev in active:
+                total += 1
+                if len(overlaps) < limit:
+                    overlaps.append({
+                        "left_class": str(prev.Class),
+                        "left_start": float(prev.Start),
+                        "left_stop": float(prev.Stop),
+                        "right_class": str(row.Class),
+                        "right_start": start,
+                        "right_stop": stop,
+                    })
+            active.append(row)
+        return {"count": total, "examples": overlaps}
+
+    def _stage_validation_grid_issue(self, df):
+        if df.empty or 'Start' not in df.columns or 'Stop' not in df.columns or 'Class' not in df.columns:
+            return None
+
+        valid = {'N1', 'N2', 'N3', 'R', 'W', 'SP', 'WP'}
+        probe = df.loc[df['Class'].isin(valid), ['Start', 'Stop', 'Class']].copy()
+        if probe.empty:
+            return None
+
+        probe['DUR_SEC'] = (probe['Stop'].astype(float) - probe['Start'].astype(float)).round(3)
+        dur_counts = probe['DUR_SEC'].value_counts().sort_values(ascending=False)
+        epoch_size = float(dur_counts.index[0])
+        if epoch_size <= 0:
+            return None
+
+        ordered = probe.sort_values(['Start', 'Stop', 'Class'], kind='stable').reset_index(drop=True)
+        ordered['NEXT_START'] = ordered['Start'].shift(-1)
+        ordered['GAP_SEC'] = (ordered['NEXT_START'] - ordered['Stop']).round(3)
+        gap_rows = ordered.loc[ordered['GAP_SEC'] > 1e-6, ['Class', 'Start', 'Stop', 'NEXT_START', 'GAP_SEC']]
+
+        probe['PHASE_SEC'] = probe['Start'].astype(float).map(lambda x: round(x % epoch_size, 3))
+        phase_counts = probe['PHASE_SEC'].value_counts().sort_values(ascending=False)
+
+        has_multi_duration = len(dur_counts) > 1
+        has_gaps = not gap_rows.empty
+        has_multi_phase = len(phase_counts) > 1
+        if not (has_multi_duration or has_gaps or has_multi_phase):
+            return None
+
+        duration_examples = []
+        if has_multi_duration:
+            seen_dur = set()
+            for row in probe.sort_values('Start').itertuples(index=False):
+                dur = float(row.DUR_SEC)
+                if dur in seen_dur:
+                    continue
+                seen_dur.add(dur)
+                duration_examples.append({
+                    "duration": dur,
+                    "start": float(row.Start),
+                    "class": str(row.Class),
+                })
+                if len(duration_examples) >= min(3, len(dur_counts)):
+                    break
+
+        gap_examples = []
+        for row in gap_rows.itertuples(index=False):
+            gap_examples.append({
+                "class": str(row.Class),
+                "start": float(row.Start),
+                "stop": float(row.Stop),
+                "next_start": float(row.NEXT_START),
+                "gap": float(row.GAP_SEC),
+            })
+            if len(gap_examples) >= 3:
+                break
+
+        phase_examples = []
+        if has_multi_phase:
+            seen_phase = set()
+            for row in probe.sort_values('Start').itertuples(index=False):
+                phase = float(row.PHASE_SEC)
+                if phase in seen_phase:
+                    continue
+                seen_phase.add(phase)
+                phase_examples.append({
+                    "phase": phase,
+                    "start": float(row.Start),
+                    "class": str(row.Class),
+                })
+                if len(phase_examples) >= min(3, len(phase_counts)):
+                    break
+
+        return {
+            "epoch_size": epoch_size,
+            "durations": dur_counts.index.tolist(),
+            "duration_counts": dur_counts.to_dict(),
+            "duration_examples": duration_examples,
+            "gap_count": int(len(gap_rows)),
+            "gap_examples": gap_examples,
+            "phases": phase_counts.index.tolist(),
+            "phase_counts": phase_counts.to_dict(),
+            "phase_examples": phase_examples,
+        }
+
+    def _stage_validation_diagnostics(self, require_multiple=True):
+        diag = {
+            "ok": False,
+            "code": "unknown",
+            "message": "No valid staging.",
+            "raw_df": pd.DataFrame(),
+            "aligned_df": pd.DataFrame(),
+            "aligned_unique_count": 0,
+        }
+
+        if not hasattr(self, "p"):
+            diag["code"] = "no_instance"
+            diag["message"] = "No instance attached."
+            return diag
+
+        raw_df = self._stage_validation_raw_df()
+        aligned_df = self._stage_validation_df()
+        aligned_unique = self._stage_validation_unique_count(aligned_df)
+
+        diag["raw_df"] = raw_df
+        diag["aligned_df"] = aligned_df
+        diag["aligned_unique_count"] = aligned_unique
+
+        if not aligned_df.empty and not self._stage_validation_has_overlap(aligned_df):
+            if (not require_multiple) or aligned_unique >= 2:
+                diag["ok"] = True
+                diag["code"] = "ok"
+                diag["message"] = "Valid staging is available after `EPOCH align`."
+                return diag
+
+        if raw_df.empty:
+            diag["code"] = "none_present"
+            diag["message"] = (
+                "No stage-like annotations were found.\n\n"
+                "Expected one or more of: N1, N2, N3, R, W, SP, WP."
+            )
+            return diag
+
+        sleep_like = {'N1', 'N2', 'N3', 'R', 'SP'}
+        raw_sleep = sorted(raw_df.loc[raw_df['Class'].isin(sleep_like), 'Class'].unique().tolist())
+        raw_all = sorted(raw_df['Class'].unique().tolist())
+        if not raw_sleep:
+            diag["code"] = "wake_only"
+            diag["message"] = (
+                "Only wake/unknown/light-style staging was found.\n\n"
+                f"Observed classes: {self._stage_validation_format_stage_list(raw_all)}\n"
+                "No sleep-stage labels such as N1/N2/N3/R (or SP) were present."
+            )
+            return diag
+
+        issues = []
+        overlap_info = self._stage_validation_overlap_examples(raw_df)
+        if overlap_info["count"]:
+            diag["code"] = "raw_overlap"
+            lines = [
+                f"Found {overlap_info['count']} true overlap(s) between raw staging annotations; "
+                f"showing first {len(overlap_info['examples'])}:"
+            ]
+            for item in overlap_info["examples"]:
+                lines.append(
+                    f"{item['left_class']} [{item['left_start']:.3f}, {item['left_stop']:.3f}) "
+                    f"overlaps {item['right_class']} [{item['right_start']:.3f}, {item['right_stop']:.3f})"
+                )
+            issues.append("\n".join(lines))
+
+        grid_issue = self._stage_validation_grid_issue(raw_df)
+        if grid_issue:
+            if diag["code"] == "unknown":
+                diag["code"] = "offset_conflict"
+            grid_lines = []
+            if len(grid_issue["durations"]) > 1:
+                durations = ", ".join(self._stage_validation_format_secs(v) for v in grid_issue["durations"])
+                grid_lines.append(
+                    f"Found {len(grid_issue['durations'])} epoch-size families in raw staging: {durations}."
+                )
+                if grid_issue["duration_examples"]:
+                    grid_lines.append(
+                        f"Showing first {len(grid_issue['duration_examples'])} duration example(s):"
+                    )
+                    for item in grid_issue["duration_examples"]:
+                        grid_lines.append(
+                            f"{item['class']} starts at {item['start']:.3f}s with duration "
+                            f"{self._stage_validation_format_secs(item['duration'])}"
+                        )
+            if grid_issue["gap_count"]:
+                grid_lines.append(
+                    f"Found {grid_issue['gap_count']} gap(s) between consecutive raw staging intervals; "
+                    f"showing first {len(grid_issue['gap_examples'])}:"
+                )
+                for item in grid_issue["gap_examples"]:
+                    grid_lines.append(
+                        f"{item['class']} ends at {item['stop']:.3f}s and the next stage starts at "
+                        f"{item['next_start']:.3f}s (gap {self._stage_validation_format_secs(item['gap'])})"
+                    )
+            if len(grid_issue["phases"]) > 1:
+                phases = ", ".join(self._stage_validation_format_secs(v) for v in grid_issue["phases"])
+                grid_lines.append(
+                    "Raw stage starts do not stay on one consistent epoch grid.\n"
+                    f"Using inferred epoch size {self._stage_validation_format_secs(grid_issue['epoch_size'])}, "
+                    f"found {len(grid_issue['phases'])} distinct start-phase families: {phases}."
+                )
+                if grid_issue["phase_examples"]:
+                    grid_lines.append(
+                        f"Showing first {len(grid_issue['phase_examples'])} phase example(s):"
+                    )
+                    for item in grid_issue["phase_examples"]:
+                        grid_lines.append(
+                            f"{item['class']} starts at {item['start']:.3f}s "
+                            f"(phase {self._stage_validation_format_secs(item['phase'])})"
+                        )
+            issues.append("\n".join(grid_lines))
+
+        if aligned_df.empty:
+            if diag["code"] == "unknown":
+                diag["code"] = "align_failed"
+            issues.append("`EPOCH align & STAGE` did not produce usable aligned staging.")
+        elif self._stage_validation_has_overlap(aligned_df):
+            if diag["code"] == "unknown":
+                diag["code"] = "aligned_overlap"
+            issues.append("Aligned staging still contains overlapping epoch spans after `EPOCH align`.")
+
+        if require_multiple and aligned_unique < 2:
+            if 'Class' in aligned_df.columns:
+                found = sorted(
+                    aligned_df.loc[
+                        aligned_df['Class'].isin({'N1', 'N2', 'N3', 'R', 'W', 'SP', 'WP'}),
+                        'Class',
+                    ].unique().tolist()
+                )
+            else:
+                found = []
+            if diag["code"] == "unknown":
+                diag["code"] = "too_few_stages"
+            issues.append(
+                "Aligned staging contains fewer than 2 distinct valid stages.\n"
+                f"Observed after alignment: {self._stage_validation_format_stage_list(found)}"
+            )
+
+        if not issues:
+            issues.append("Staging was present, but LunaScope could not validate it after `EPOCH align`.")
+
+        diag["message"] = "\n\n".join(issues)
+        return diag
+
+    def _stage_validation_has_overlap(self, df):
+        if df.empty or 'START' not in df.columns or 'STOP' not in df.columns:
+            return False
+
+        ordered = df.sort_values(['START', 'STOP', 'Class'], kind='stable')
+        prev_stop = None
+        for row in ordered.itertuples(index=False):
+            start = float(row.START)
+            stop = float(row.STOP)
             if prev_stop is not None and start < prev_stop:
                 return True
             prev_stop = max(prev_stop, stop) if prev_stop is not None else stop
@@ -174,30 +687,15 @@ class SoapPopsMixin:
         layout.addWidget(self.popscanvas)
         return self.popscanvas
 
-
     # valid staging:
     #   - EDF/annotations attached
-    #   - found at least some stage-aliased annotations
-    #   - no overlapping staging annotations
-    #   - no conflicts in epoch-assignment
+    #   - EPOCH align & STAGE succeeds
+    #   - STAGE output is non-empty after navigator filtering
+    #   - aligned epochs do not overlap
+    #   - optional: at least 2 unique valid stages
 
     def _has_staging(self, require_multiple = True ):
-        
-        if not hasattr(self, "p"):
-            return False
-
-        df = self._stage_validation_df()
-        if df.empty:
-            return False
-
-        if self._stage_validation_has_overlap(df):
-            return False
-
-        if require_multiple and self._stage_validation_unique_count(df) < 2:
-            return False
-
-        # if here, we must have good staging
-        return True
+        return self._stage_validation_diagnostics(require_multiple=require_multiple)["ok"]
 
     
     def _init_soap_pops(self):
@@ -210,16 +708,28 @@ class SoapPopsMixin:
             self.ui.host_pops.setLayout(QVBoxLayout())
         self.ui.host_pops.layout().setContentsMargins(0,0,0,0)
 
-        # POPS resources
-        pops_path = self.ui.txt_pops_path.text()
-
         # Replace Designer combo with a checkable multi-select control.
         self.ui.combo_pops = _replace_with_multiselect(self.ui.combo_pops)
+
+        pops_layout = self.ui.butt_pops.parentWidget().layout()
+        if pops_layout is not None and getattr(self.ui, "butt_pops_resource", None) is None:
+            butt_pops_resource = QToolButton(self.ui.butt_pops.parentWidget())
+            butt_pops_resource.setObjectName("butt_pops_resource")
+            butt_pops_resource.setText("Get…")
+            butt_pops_resource.setToolTip("Download POPS resources and set the POPS folder path")
+            butt_pops_resource.setAutoRaise(True)
+            butt_pops_resource.clicked.connect(self._download_pops_resources)
+            pops_layout.addWidget(butt_pops_resource, 1, 4)
+            self.ui.butt_pops_resource = butt_pops_resource
+
+        cached_pops_path = self._load_cached_pops_path()
+        if cached_pops_path:
+            self._set_pops_path(cached_pops_path, persist=False)
         
         # wiring
         self.ui.butt_soap.clicked.connect( self._calc_soap )
         self.ui.butt_pops.clicked.connect( self._calc_pops )
-
+        self.ui.txt_pops_path.editingFinished.connect(self._cache_current_pops_path)
         self.ui.radio_pops_hypnodens.toggled.connect( self._render_pops_hypno )
 
     def _parse_pops_channels(self):
@@ -271,8 +781,9 @@ class SoapPopsMixin:
             return
         
         # requires staging
-        if not self._has_staging():
-            QMessageBox.critical( self.ui , "Error", "No valid stating information:\n overlaps, epoch conflicts, or fewer than 2 valid stages" )
+        diag = self._stage_validation_diagnostics()
+        if not diag["ok"]:
+            self._show_staging_message(diag["message"])
             return
 
         # requires 1+ channel
@@ -281,43 +792,85 @@ class SoapPopsMixin:
             QMessageBox.critical( self.ui , "Error", "No suitable signal for SOAP" )
             return
 
+        if getattr(self, "_busy", False):
+            return
+
         # parameters
         soap_ch = self.ui.combo_soap.currentText()
         soap_pc = self.ui.spin_soap_pc.value()
 
-        # run SOAP
-        try:
-            cmd_str = 'EPOCH align & SOAP sig=' + soap_ch + ' epoch pc=' + str(soap_pc)
-            self.p.eval( cmd_str )
-        except Exception:
-            QMessageBox.critical( self.ui , "Error", "Problem running SOAP" )
-            return
-            
-        # channel details
-        df = self.p.table( 'SOAP' , 'CH' )        
-        df = df[ [ 'K' , 'K3' , 'ACC', 'ACC3' ] ]
+        self._busy = True
+        self._buttons(False)
+        self.sb_progress.setVisible(True)
+        self.sb_progress.setRange(0, 0)
+        self.sb_progress.setFormat("Running…")
+        self.lock_ui()
+        QTimer.singleShot(0, lambda: self._start_soap_worker(soap_ch, soap_pc))
 
-        for c in df.columns:
+    def _start_soap_worker(self, soap_ch, soap_pc):
+        if not getattr(self, "_busy", False):
+            return
+
+        fut = self._exec.submit(self._derive_soap, self.p, soap_ch, soap_pc)
+
+        def _done(_f=fut):
             try:
-                df[c] = pd.to_numeric(df[c])
+                self._last_result = _f.result()
+                QMetaObject.invokeMethod(self, "_soap_done_ok", Qt.QueuedConnection)
+            except Exception as e:
+                self._last_exc = e
+                self._last_tb = f"{type(e).__name__}: {e}"
+                QMetaObject.invokeMethod(self, "_soap_done_err", Qt.QueuedConnection)
+
+        fut.add_done_callback(_done)
+
+    def _derive_soap(self, p, soap_ch, soap_pc):
+        cmd_str = 'EPOCH align & SOAP sig=' + soap_ch + ' epoch pc=' + str(soap_pc)
+        p.eval_lunascope(cmd_str)
+
+        df_ch = p.table('SOAP', 'CH')
+        df_ch = df_ch[['K', 'K3', 'ACC', 'ACC3']].copy()
+
+        for c in df_ch.columns:
+            try:
+                df_ch[c] = pd.to_numeric(df_ch[c])
             except Exception:
                 pass
-            
-        for c in df.select_dtypes(include=['float', 'float64', 'float32']).columns:
-            df[c] = df[c].map(lambda x: f"{x:.2f}" if pd.notnull(x) else "")
 
-        # display...
-        k, k3 = df.loc[0, ['K', 'K3']].astype(float)
-        self.ui.txt_soap_k.setText( f"K = {k:.2f}" )
-        self.ui.txt_soap_k3.setText( f"K3 = {k3:.2f}" )
-        
-        
-        # hypnodensities
-        df = self.p.table( 'SOAP' , 'CH_E' )
-        df = df[ [ 'PRIOR', 'PRED' , 'PP_N1' , 'PP_N2', 'PP_N3', 'PP_R', 'PP_W' , 'DISC' ] ]
-        from .plts import hypno_density
-        hypno_density( df , ax=self.soapcanvas.ax)                                                                                               
-        self.soapcanvas.draw_idle()                                                                                                              
+        df_epoch = p.table('SOAP', 'CH_E')
+        df_epoch = df_epoch[['PRIOR', 'PRED', 'PP_N1', 'PP_N2', 'PP_N3', 'PP_R', 'PP_W', 'DISC']].copy()
+        return df_ch, df_epoch
+
+    @Slot()
+    def _soap_done_ok(self):
+        try:
+            df_ch, df_epoch = self._last_result
+            k, k3 = df_ch.loc[0, ['K', 'K3']].astype(float)
+            self.ui.txt_soap_k.setText(f"K = {k:.2f}")
+            self.ui.txt_soap_k3.setText(f"K3 = {k3:.2f}")
+
+            from .plts import hypno_density
+            hypno_density(df_epoch, ax=self.soapcanvas.ax)
+            self.soapcanvas.draw_idle()
+        finally:
+            self.unlock_ui()
+            self._busy = False
+            self._buttons(True)
+            self.sb_progress.setRange(0, 100)
+            self.sb_progress.setValue(0)
+            self.sb_progress.setVisible(False)
+
+    @Slot()
+    def _soap_done_err(self):
+        try:
+            QMessageBox.critical(self.ui, "Error running SOAP", self._last_tb)
+        finally:
+            self.unlock_ui()
+            self._busy = False
+            self._buttons(True)
+            self.sb_progress.setRange(0, 100)
+            self.sb_progress.setValue(0)
+            self.sb_progress.setVisible(False)
                
     # ------------------------------------------------------------
     # Run POPS
@@ -332,6 +885,9 @@ class SoapPopsMixin:
         count = self.ui.combo_pops.model().rowCount()
         if count == 0:
             QMessageBox.critical( self.ui , "Error", "No suitable signal for POPS" )
+            return
+
+        if getattr(self, "_busy", False):
             return
 
         # parameters (single-channel dropdown or manual comma list)
@@ -356,7 +912,8 @@ class SoapPopsMixin:
         pops_model = self.ui.txt_pops_model.text()
         ignore_obs = self.ui.check_pops_ignore_obs.checkState() == Qt.Checked
         
-        has_staging = self._has_staging()
+        diag = self._stage_validation_diagnostics()
+        has_staging = diag["ok"]
         # requires staging
         if not has_staging:
             ignore_obs = True
@@ -386,44 +943,94 @@ class SoapPopsMixin:
         self.curr_chs = self.ui.tbl_desc_signals.checked()                   
         self.curr_anns = self.ui.tbl_desc_annots.checked()
 
-        
-        # run POPS
-        try:
-            cmd_str = 'EPOCH align & RUN-POPS sig=' + pops_chs
-            cmd_str += ' path=' + pops_path
-            cmd_str += ' model=' + pops_model
-            cmd_str += opts
-                        
-            self.p.eval( cmd_str )
-            
-        except (RuntimeError) as e:
-            QMessageBox.critical(
-                self.ui,
-                "Error running POPS",
-                f"Exception: {type(e).__name__}: {e}"
-            )
+        self._busy = True
+        self._buttons(False)
+        self.sb_progress.setVisible(True)
+        self.sb_progress.setRange(0, 0)
+        self.sb_progress.setFormat("Running…")
+        self.lock_ui()
+        QTimer.singleShot(
+            0,
+            lambda: self._start_pops_worker(
+                pops_chs,
+                pops_path,
+                pops_model,
+                opts,
+                has_staging,
+            ),
+        )
+
+    def _start_pops_worker(self, pops_chs, pops_path, pops_model, opts, has_staging):
+        if not getattr(self, "_busy", False):
             return
 
-        
-        # hypnodensity plot
-        df = self.p.table( 'RUN_POPS' , 'E' )
+        fut = self._exec.submit(
+            self._derive_pops,
+            self.p,
+            pops_chs,
+            pops_path,
+            pops_model,
+            opts,
+            has_staging,
+        )
+
+        def _done(_f=fut):
+            try:
+                self._last_result = _f.result()
+                QMetaObject.invokeMethod(self, "_pops_done_ok", Qt.QueuedConnection)
+            except Exception as e:
+                self._last_exc = e
+                self._last_tb = f"{type(e).__name__}: {e}"
+                QMetaObject.invokeMethod(self, "_pops_done_err", Qt.QueuedConnection)
+
+        fut.add_done_callback(_done)
+
+    def _derive_pops(self, p, pops_chs, pops_path, pops_model, opts, has_staging):
+        cmd_str = 'EPOCH align & RUN-POPS sig=' + pops_chs
+        cmd_str += ' path=' + pops_path
+        cmd_str += ' model=' + pops_model
+        cmd_str += opts
+
+        p.eval_lunascope(cmd_str)
+
+        df = p.table('RUN_POPS', 'E')
         if has_staging:
-            df = df[ [ 'E', 'START', 'PRIOR', 'PRED' , 'PP_N1' , 'PP_N2', 'PP_N3', 'PP_R', 'PP_W'  ] ]
+            df = df[['E', 'START', 'PRIOR', 'PRED', 'PP_N1', 'PP_N2', 'PP_N3', 'PP_R', 'PP_W']].copy()
         else:
-            df = df[ [ 'E', 'START', 'PRED' , 'PP_N1' , 'PP_N2', 'PP_N3', 'PP_R', 'PP_W'  ] ]
+            df = df[['E', 'START', 'PRED', 'PP_N1', 'PP_N2', 'PP_N3', 'PP_R', 'PP_W']].copy()
 
-        self.pops_df = df
+        tbls = p.strata()
+        return df, bool(has_staging), tbls
 
-        self._render_pops_hypno()
+    @Slot()
+    def _pops_done_ok(self):
+        try:
+            df, has_staging, tbls = self._last_result
+            self.pops_df = df
+            self._render_pops_hypno()
+            self._render_tables(tbls)
+            if not has_staging:
+                self._render_hypnogram()
+                self._update_hypnogram()
+        finally:
+            self.unlock_ui()
+            self._busy = False
+            self._buttons(True)
+            self.sb_progress.setRange(0, 100)
+            self.sb_progress.setValue(0)
+            self.sb_progress.setVisible(False)
 
-        # populate main output and update annotations (e.g. N1, N2, ... or pN1, pN2, ...)
-        tbls = self.p.strata()
-        self._render_tables( tbls )
-
-        # if did not have original staging, we will create a new one
-        if not has_staging:
-            self._render_hypnogram()
-            self._update_hypnogram()
+    @Slot()
+    def _pops_done_err(self):
+        try:
+            QMessageBox.critical(self.ui, "Error running POPS", self._last_tb)
+        finally:
+            self.unlock_ui()
+            self._busy = False
+            self._buttons(True)
+            self.sb_progress.setRange(0, 100)
+            self.sb_progress.setValue(0)
+            self.sb_progress.setVisible(False)
 
 
 

@@ -36,6 +36,7 @@ class _ExplorerTab(QtCore.QObject):
         self._root: QtWidgets.QWidget | None = None
         self._canvas = None
         self._canvas_host: QFrame | None = None  # set by subclass
+        self._canvas_scroll: QtWidgets.QScrollArea | None = None
 
     # ------------------------------------------------------------------
     # Tab widget
@@ -77,6 +78,7 @@ class _ExplorerTab(QtCore.QObject):
 
     def _ensure_canvas(self):
         if self._canvas is not None:
+            self._sync_canvas_width()
             return self._canvas
         if self._canvas_host is None:
             return None
@@ -89,10 +91,57 @@ class _ExplorerTab(QtCore.QObject):
             lay = QVBoxLayout()
             lay.setContentsMargins(0, 0, 0, 0)
             self._canvas_host.setLayout(lay)
+        lay.setAlignment(Qt.AlignTop)
         lay.addWidget(self._canvas)
+        self._canvas.installEventFilter(self)
         self._canvas.setContextMenuPolicy(Qt.CustomContextMenu)
         self._canvas.customContextMenuRequested.connect(self._context_menu)
+        self._sync_canvas_width()
         return self._canvas
+
+    def _on_canvas_scroll_destroyed(self, *_):
+        self._canvas_scroll = None
+
+    def _sync_canvas_width(self):
+        if self._canvas_scroll is None or self._canvas_host is None:
+            return
+        try:
+            viewport = self._canvas_scroll.viewport()
+        except RuntimeError:
+            self._canvas_scroll = None
+            return
+        width = max(320, viewport.width())
+        self._canvas_host.setMinimumWidth(width)
+        self._canvas_host.setMaximumWidth(width)
+        if self._canvas is not None:
+            self._canvas.setMinimumWidth(width)
+            self._canvas.setMaximumWidth(width)
+
+    def eventFilter(self, obj, event):
+        if self._canvas_scroll is not None:
+            try:
+                viewport = self._canvas_scroll.viewport()
+            except RuntimeError:
+                self._canvas_scroll = None
+                viewport = None
+            if viewport is not None and obj is viewport:
+                if event.type() in (QtCore.QEvent.Resize, QtCore.QEvent.Show):
+                    self._sync_canvas_width()
+            if self._canvas is not None and obj is self._canvas and event.type() == QtCore.QEvent.Wheel:
+                bar = self._canvas_scroll.verticalScrollBar()
+                if bar is not None:
+                    pixel_delta = event.pixelDelta().y()
+                    if pixel_delta:
+                        delta = pixel_delta
+                    else:
+                        angle_delta = event.angleDelta().y()
+                        steps = angle_delta / 120.0 if angle_delta else 0.0
+                        delta = steps * max(20, bar.singleStep())
+                    if delta:
+                        bar.setValue(int(round(bar.value() - delta)))
+                        event.accept()
+                        return True
+        return super().eventFilter(obj, event)
 
     # ------------------------------------------------------------------
     # Context menu / export

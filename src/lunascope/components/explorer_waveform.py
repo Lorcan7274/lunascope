@@ -19,7 +19,7 @@ from PySide6 import QtCore, QtWidgets
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QFrame, QHBoxLayout, QLabel,
-    QPushButton, QSizePolicy, QVBoxLayout, QWidget,
+    QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
 )
 
 from .explorer_base import BG, FG, GRID, _ExplorerTab
@@ -79,8 +79,9 @@ def _extract_traces(p, ns, annot_class, channels, pre_secs, post_secs, align_to,
     n_events = len(t_aligns)
 
     # ---- common grid ---------------------------------------------------
-    # 200 points over the window (sample-rate independent for the grid)
-    t_grid = np.linspace(-pre_secs, post_secs, 400)
+    # Use a symmetric grid so the event lock always sits at visual x = 0.
+    span_secs = max(float(pre_secs), float(post_secs))
+    t_grid = np.linspace(-span_secs, span_secs, 400)
 
     traces_out: dict[str, list] = {ch: [] for ch in channels}
     sr_out: dict[str, float]    = {}
@@ -132,8 +133,24 @@ def _extract_traces(p, ns, annot_class, channels, pre_secs, post_secs, align_to,
         if not segs:
             continue
         mat = np.vstack(segs)         # shape (n_events, n_grid)
-        m   = np.nanmean(mat, axis=0)
-        se  = np.nanstd(mat, axis=0, ddof=1) / np.sqrt(np.sum(~np.isnan(mat), axis=0))
+        valid = ~np.isnan(mat)
+        counts = np.sum(valid, axis=0)
+
+        sums = np.nansum(mat, axis=0)
+        m = np.full(mat.shape[1], np.nan, dtype=float)
+        valid_cols = counts > 0
+        m[valid_cols] = sums[valid_cols] / counts[valid_cols]
+
+        se = np.full(mat.shape[1], np.nan, dtype=float)
+        se[counts == 1] = 0.0
+        multi_cols = counts > 1
+        if np.any(multi_cols):
+            centered = np.where(valid, mat - m, 0.0)
+            ss = np.sum(centered * centered, axis=0)
+            var = np.full(mat.shape[1], np.nan, dtype=float)
+            var[multi_cols] = ss[multi_cols] / (counts[multi_cols] - 1)
+            se[multi_cols] = np.sqrt(var[multi_cols] / counts[multi_cols])
+
         mean_out[ch]  = m
         ci_lo_out[ch] = m - 1.96 * se
         ci_hi_out[ch] = m + 1.96 * se
@@ -148,7 +165,8 @@ def _extract_traces(p, ns, annot_class, channels, pre_secs, post_secs, align_to,
         "sr":       sr_out,
         "annot_class": annot_class,
         "channels": channels,
-    }
+        "span_secs": span_secs,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -263,13 +281,32 @@ class WaveformTab(_ExplorerTab):
 
         # canvas host
         canvas_host = QFrame()
-        canvas_host.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        canvas_host.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         canvas_host.setFrameShape(QFrame.NoFrame)
         canvas_host.setLayout(QVBoxLayout())
         canvas_host.layout().setContentsMargins(0,0,0,0)
+        canvas_host.layout().setSizeConstraint(QtWidgets.QLayout.SetMinAndMaxSize)
         self._canvas_host = canvas_host
 
-        outer.addWidget(row1); outer.addWidget(row2); outer.addWidget(row3); outer.addWidget(canvas_host, 1)
+        canvas_scroll = QScrollArea()
+        canvas_scroll.setFrameShape(QFrame.NoFrame)
+        canvas_scroll.setWidgetResizable(False)
+        canvas_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        canvas_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        canvas_scroll.setAlignment(Qt.AlignTop)
+        canvas_scroll.setStyleSheet(
+            "QScrollBar:vertical { background:#0d1117; width:12px; margin:0; }"
+            "QScrollBar::handle:vertical { background:#4b5563; min-height:28px; border-radius:6px; }"
+            "QScrollBar::handle:vertical:hover { background:#6b7280; }"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0px; }"
+            "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background:#111827; }"
+        )
+        canvas_scroll.setWidget(canvas_host)
+        self._canvas_scroll = canvas_scroll
+        canvas_scroll.destroyed.connect(self._on_canvas_scroll_destroyed)
+        canvas_scroll.viewport().installEventFilter(self)
+
+        outer.addWidget(row1); outer.addWidget(row2); outer.addWidget(row3); outer.addWidget(canvas_scroll, 1)
 
         # store
         self._root        = root
@@ -294,6 +331,27 @@ class WaveformTab(_ExplorerTab):
         self._save_btn = QPushButton("Export…"); self._save_btn.setFixedWidth(80)
         rl1.addWidget(self._save_btn)
         self._save_btn.clicked.connect(self._save_figure)
+
+    def _set_canvas_height(self, nrows: int | None = None):
+        """Let stacked waveform plots grow vertically and scroll instead of clipping."""
+        canvas = self._ensure_canvas()
+        if canvas is None:
+            return
+        if nrows is None or nrows <= 1:
+            canvas.setMinimumHeight(0)
+            canvas.setMaximumHeight(16777215)
+            if self._canvas_host is not None:
+                self._canvas_host.setMinimumHeight(0)
+                self._canvas_host.setMaximumHeight(16777215)
+            self._sync_canvas_width()
+            return
+        min_height = 120 + (nrows * 260) + ((nrows - 1) * 24)
+        canvas.setMinimumHeight(min_height)
+        canvas.setMaximumHeight(min_height)
+        if self._canvas_host is not None:
+            self._canvas_host.setMinimumHeight(min_height)
+            self._canvas_host.setMaximumHeight(min_height)
+        self._sync_canvas_width()
 
     # ------------------------------------------------------------------
     # Control refresh (call when switching to this tab)
@@ -447,15 +505,18 @@ class WaveformTab(_ExplorerTab):
         n_ev      = result["n_events"]
         ann_cls   = result["annot_class"]
         units     = result.get("units", {})
+        span_secs = float(result.get("span_secs", 0.0))
 
         chs_with_data = [ch for ch in channels if ch in mean_d]
         if not chs_with_data:
+            self._set_canvas_height()
             self._render_empty("No signal data extracted.\n"
                                "Check that channels are loaded and event times are valid.")
             return
 
         n = len(chs_with_data)
         canvas = self._ensure_canvas()
+        self._set_canvas_height(n)
         fig = canvas.figure; fig.clear(); fig.patch.set_facecolor(BG)
 
         axes = fig.subplots(n, 1, squeeze=False)
@@ -487,6 +548,8 @@ class WaveformTab(_ExplorerTab):
             # Event-onset line
             ax.axvline(0, color="#ffffff", lw=0.7, ls="--", alpha=0.55)
             ax.axhline(0, color=GRID, lw=0.4, alpha=0.7)
+            if span_secs > 0:
+                ax.set_xlim(-span_secs, span_secs)
 
             self._style_ax(ax, title=ch, ylabel=units.get(ch, ""))
             if y_min is not None or y_max is not None:

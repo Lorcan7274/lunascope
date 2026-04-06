@@ -35,6 +35,8 @@ import lunapi as lp
 import pandas as pd
 from lunapi.moonbeam import _load_token as _mb_load_tok, _save_token as _mb_save_tok
 
+from ..helpers import screen_clamp, is_dark_palette
+
 from PySide6.QtCore import Qt, QObject, QRegularExpression, QSortFilterProxyModel, QThread, Signal, Slot
 from PySide6.QtGui import QColor, QFont, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
@@ -634,11 +636,12 @@ class MoonbeamMixin:
         dock.setWidget(root)
         self.ui.addDockWidget(Qt.RightDockWidgetArea, dock)
         dock.setFloating(True)
-        dock.resize(*self._MB_FLOAT_SIZE)
+        _mb_w, _mb_h = screen_clamp(*self._MB_FLOAT_SIZE)
+        dock.resize(_mb_w, _mb_h)
         # Position near top-centre of the main window
         parent_geo = self.ui.frameGeometry()
         dock.move(
-            parent_geo.x() + (parent_geo.width()  - self._MB_FLOAT_SIZE[0]) // 2,
+            parent_geo.x() + (parent_geo.width()  - _mb_w) // 2,
             parent_geo.y() + 60,
         )
         dock.hide()
@@ -683,15 +686,16 @@ class MoonbeamMixin:
         pop_sel_slist_btn.clicked.connect(self._mb_populate_slist_selected)
         pop_slist_btn.clicked.connect(self._mb_populate_slist)
 
-        # ---- Apply dark-panel styling -----------------------------------
-        root.setStyleSheet("""
-            QFrame {
-                color: #d7e3f4;
-            }
-            QLabel {
-                color: #d7e3f4;
-            }
-        """)
+        # ---- Apply dark-panel styling (only when OS is using a dark theme) ----
+        if is_dark_palette():
+            root.setStyleSheet("""
+                QFrame {
+                    color: #d7e3f4;
+                }
+                QLabel {
+                    color: #d7e3f4;
+                }
+            """)
 
         self._mb_set_action_enabled(False)
         # Populate from cache immediately — works offline
