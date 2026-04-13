@@ -32,8 +32,22 @@ from concurrent.futures import ThreadPoolExecutor
 from PySide6.QtCore import QMetaObject, Qt, Slot
 
 import pyqtgraph as pg
-from PySide6.QtWidgets import QProgressBar, QMessageBox, QDoubleSpinBox, QLabel, QHBoxLayout, QWidget
-from PySide6.QtCore import QSignalBlocker
+from PySide6.QtWidgets import (
+    QProgressBar, QMessageBox, QDoubleSpinBox, QLabel, QHBoxLayout, QWidget,
+    QVBoxLayout, QGridLayout, QFrame, QSizePolicy,
+)
+from PySide6.QtCore import QSignalBlocker, QEvent, QObject
+
+
+class _BannerResizeFilter(QObject):
+    def __init__(self, callback, parent=None):
+        super().__init__(parent)
+        self._callback = callback
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Resize:
+            self._callback()
+        return False
 
 class SignalsMixin:
 
@@ -144,6 +158,7 @@ class SignalsMixin:
         self._pg1_probe_pinned = False
         self._pg1_probe = MainTraceProbe(self.ui.pg1, self)
         self._pg1_nav_proxy = MainTraceNavProxy(self.ui.pg1, self)
+        self._style_control_banner()
 
     def _init_line_weight_control(self):
         if getattr(self, "_line_weight_widget", None) is not None:
@@ -159,31 +174,372 @@ class SignalsMixin:
         holder = QWidget(parent)
         hlay = QHBoxLayout(holder)
         hlay.setContentsMargins(0, 0, 0, 0)
-        hlay.setSpacing(6)
+        hlay.setSpacing(3)
 
-        lab = QLabel("Line", holder)
+        lab = QLabel("Weight", holder)
         spin = QDoubleSpinBox(holder)
         spin.setDecimals(0)
         spin.setSingleStep(1)
         spin.setRange(1, 8)
         spin.setValue(float(getattr(self, "cfg_line_weight", 1.0)))
         spin.setToolTip("Trace line width")
+        spin.setFixedWidth(34)
 
         hlay.addWidget(lab)
         hlay.addWidget(spin)
+        hlay.addStretch(1)
 
-        idx = -1
-        if hasattr(layout, "indexOf"):
-            idx = layout.indexOf(self.ui.butt_render)
-
-        if idx >= 0 and hasattr(layout, "insertWidget"):
-            layout.insertWidget(idx + 1, holder)
-        else:
-            layout.addWidget(holder)
+        # Place at row 1, col 12 (below Render — col 12 row 0 only in .ui)
+        layout.addWidget(holder, 1, 12)
 
         spin.valueChanged.connect(self._on_line_weight_changed)
         self._line_weight_widget = holder
         self._line_weight_spin = spin
+
+    def _banner_section(self, title: str, object_name: str) -> tuple[QFrame, QVBoxLayout]:
+        frame = QFrame(self.ui.ctrframe)
+        frame.setObjectName(object_name)
+        frame.setFrameShape(QFrame.StyledPanel)
+        frame.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+        lay = QVBoxLayout(frame)
+        lay.setContentsMargins(6, 4, 6, 4)
+        lay.setSpacing(3)
+        lay.setAlignment(Qt.AlignTop)
+        if title:
+            hdr = QLabel(title, frame)
+            hdr.setObjectName("banner_section_title")
+            hdr.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+            hdr.setFixedHeight(14)
+            lay.addWidget(hdr, 0, Qt.AlignTop)
+        return frame, lay
+
+    def _banner_field_row(self, left, right, object_name: str | None = None):
+        row = QWidget(self.ui.ctrframe)
+        if object_name:
+            row.setObjectName(object_name)
+        lay = QHBoxLayout(row)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(3)
+        lay.addWidget(left)
+        if right is not None:
+            lay.addWidget(right)
+        lay.addStretch(1)
+        return row
+
+    def _style_control_banner(self):
+        host = getattr(self.ui, "ctrframe", None)
+        if host is None:
+            return
+        grid = host.layout()
+        if grid is None:
+            return
+
+        if getattr(self, "_banner_root", None) is None:
+            self._banner_root = QWidget(host)
+            self._banner_root.setObjectName("banner_root")
+            root = QVBoxLayout(self._banner_root)
+            root.setContentsMargins(4, 4, 4, 4)
+            root.setSpacing(4)
+
+            top = QHBoxLayout()
+            top.setContentsMargins(0, 0, 0, 0)
+            top.setSpacing(6)
+            self._banner_top_row = QWidget(self._banner_root)
+            self._banner_top_row.setObjectName("banner_top_row")
+            self._banner_top_row.setLayout(top)
+            root.addWidget(self._banner_top_row)
+
+            self._banner_top_layout = top
+            self._banner_root_layout = root
+
+            for widget in (
+                self.ui.lbl_twin,
+                self.ui.lbl_ewin,
+                self.ui.label_jump_width,
+                self.ui.spin_jump_width,
+                self.ui.label_spacing,
+                self.ui.spin_spacing,
+                self.ui.label_scale,
+                self.ui.spin_scale,
+                getattr(self.ui, "label_11", None),
+                getattr(self.ui, "label_12", None),
+                self.ui.spin_fixed_max,
+                self.ui.spin_fixed_min,
+                self.ui.check_labels,
+                self.ui.radio_fixedscale,
+                self.ui.radio_empiric,
+                self.ui.radio_clip,
+                self.ui.butt_render,
+                getattr(self, "_line_weight_widget", None),
+                getattr(self, "_psd_toolbar_holder", None),
+                getattr(self.ui, "sep_info_nav", None),
+                getattr(self.ui, "sep_disp_yaxis", None),
+                getattr(self.ui, "sep_yaxis_render", None),
+            ):
+                if widget is None:
+                    continue
+                grid.removeWidget(widget)
+                if widget not in (
+                    self.ui.lbl_twin,
+                    self.ui.lbl_ewin,
+                    self.ui.label_jump_width,
+                    self.ui.spin_jump_width,
+                    self.ui.label_spacing,
+                    self.ui.spin_spacing,
+                    self.ui.label_scale,
+                    self.ui.spin_scale,
+                    self.ui.spin_fixed_max,
+                    self.ui.spin_fixed_min,
+                    self.ui.check_labels,
+                    self.ui.radio_fixedscale,
+                    self.ui.radio_empiric,
+                    self.ui.radio_clip,
+                    self.ui.butt_render,
+                    getattr(self, "_line_weight_widget", None),
+                    getattr(self, "_psd_toolbar_holder", None),
+                ):
+                    widget.hide()
+
+            for name in ("toolbar_h_spacer",):
+                item = getattr(self.ui, name, None)
+                if item is not None:
+                    try:
+                        grid.removeItem(item)
+                    except Exception:
+                        pass
+
+            grid.addWidget(self._banner_root, 0, 0, 4, 13)
+
+            status_card, status_lay = self._banner_section("Window", "banner_status")
+            status_lay.addWidget(self.ui.lbl_twin)
+            status_lay.addWidget(self.ui.lbl_ewin)
+            status_lay.addWidget(self._banner_field_row(self.ui.label_jump_width, self.ui.spin_jump_width))
+
+            scaling_card, scaling_lay = self._banner_section("Y SCALE", "banner_scaling")
+            self.ui.spin_spacing.setFixedWidth(52)
+            self.ui.spin_scale.setFixedWidth(52)
+            self.ui.spin_fixed_max.setFixedWidth(84)
+            self.ui.spin_fixed_min.setFixedWidth(84)
+            merged_grid = QGridLayout()
+            merged_grid.setContentsMargins(0, 0, 0, 0)
+            merged_grid.setHorizontalSpacing(3)
+            merged_grid.setVerticalSpacing(2)
+            max_lab = QLabel("Max", scaling_card)
+            min_lab = QLabel("Min", scaling_card)
+            merged_grid.addWidget(self.ui.label_spacing, 0, 0)
+            merged_grid.addWidget(self.ui.spin_spacing, 0, 1)
+            merged_grid.addWidget(max_lab, 0, 2)
+            merged_grid.addWidget(self.ui.spin_fixed_max, 0, 3)
+            merged_grid.addWidget(self.ui.label_scale, 1, 0)
+            merged_grid.addWidget(self.ui.spin_scale, 1, 1)
+            merged_grid.addWidget(min_lab, 1, 2)
+            merged_grid.addWidget(self.ui.spin_fixed_min, 1, 3)
+            scaling_lay.addLayout(merged_grid)
+            toggles = QHBoxLayout()
+            toggles.setContentsMargins(0, 0, 0, 0)
+            toggles.setSpacing(10)
+            toggles.addWidget(self.ui.check_labels)
+            toggles.addWidget(self.ui.radio_clip)
+            toggles.addWidget(self.ui.radio_empiric)
+            toggles.addWidget(self.ui.radio_fixedscale)
+            toggles.addStretch(1)
+            scaling_lay.addLayout(toggles)
+
+            action_card, action_lay = self._banner_section("TRACE VIEW", "banner_actions")
+            action_lay.setSpacing(6)
+            self.ui.butt_render.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Preferred)
+            action_lay.addWidget(self.ui.butt_render)
+            if getattr(self, "_line_weight_widget", None) is not None:
+                action_lay.addWidget(self._line_weight_widget)
+
+            # WINDOW left-anchored; stretch pushes the rest (PSD, Y SCALE, TRACE VIEW) right.
+            # PSD is inserted between stretch and Y SCALE when available.
+            top.addWidget(status_card)
+            top.addStretch(1)
+            top.addWidget(scaling_card)
+            top.addWidget(action_card)
+
+            self._banner_status_card = status_card
+            self._banner_scaling_card = scaling_card
+            self._banner_action_card = action_card
+
+            # Always-visible cards keep a hard minimum so the banner never
+            # collapses below a usable size.
+            status_card.setMinimumWidth(210)
+            status_card.setMaximumWidth(210)
+            status_card.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+            action_card.setMinimumWidth(100)
+            action_card.setMaximumWidth(100)
+            action_card.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+            # Optional cards: minimum = 0 so they never prevent the window from
+            # shrinking.  The threshold logic in _apply_banner_mode_inner hides
+            # them before the layout would compress them, so they appear either
+            # at full width or not at all.
+            scaling_card.setMinimumWidth(0)
+            scaling_card.setMaximumWidth(300)
+            scaling_card.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+
+            host.setStyleSheet(
+                """
+                QFrame#ctrframe {
+                    background: #2f2f2f;
+                    border-top: 1px solid rgba(255,255,255,0.08);
+                    border-bottom: 1px solid rgba(0,0,0,0.45);
+                }
+                QWidget#banner_root {
+                    background: transparent;
+                }
+                QFrame#banner_status,
+                QFrame#banner_scaling,
+                QFrame#banner_actions,
+                QFrame#banner_psd {
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 rgba(255,255,255,0.045),
+                        stop:1 rgba(0,0,0,0.08));
+                    border: 1px solid rgba(255,255,255,0.10);
+                    border-radius: 7px;
+                }
+                QLabel#banner_section_title {
+                    color: #b9c6d2;
+                    font-size: 9px;
+                    font-weight: 600;
+                    letter-spacing: 0.04em;
+                    text-transform: uppercase;
+                    padding: 0;
+                    margin: 0;
+                }
+                QFrame#ctrframe QLabel {
+                    font-size: 10px;
+                }
+                QFrame#banner_status QLabel,
+                QFrame#banner_scaling QLabel,
+                QFrame#banner_actions QLabel,
+                QFrame#banner_psd QLabel {
+                    font-size: 10px;
+                }
+                QFrame#banner_status QLabel#lbl_twin,
+                QFrame#banner_status QLabel#lbl_ewin,
+                QFrame#banner_status QLabel#label_jump_width {
+                    font-size: 11px;
+                    font-weight: 600;
+                }
+                """
+            )
+
+            self._banner_resize_filter = _BannerResizeFilter(self._apply_banner_mode, host)
+            host.installEventFilter(self._banner_resize_filter)
+
+        psd_holder = getattr(self, "_psd_toolbar_holder", None)
+        top = self._banner_top_layout
+
+        old_psd_card = getattr(self, "_banner_psd_card", None)
+        if old_psd_card is not None:
+            top.removeWidget(old_psd_card)
+            old_psd_card.hide()
+            old_psd_card.setParent(None)
+            self._banner_psd_card = None
+
+        if psd_holder is not None:
+            psd_card, psd_lay = self._banner_section("PSD", "banner_psd")
+            psd_card.setMinimumWidth(0)
+            psd_card.setMaximumWidth(145)
+            psd_card.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+            psd_lay.addWidget(psd_holder)
+            # Insert PSD before Y SCALE (2nd from end), after the stretch spacer.
+            insert_at = max(0, top.count() - 2)
+            top.insertWidget(insert_at, psd_card)
+            self._banner_psd_card = psd_card
+
+        self._banner_root.updateGeometry()
+        self._apply_banner_mode()
+
+    def _move_banner_widget(self, widget, layout, index: int | None = None):
+        if widget is None or layout is None:
+            return
+        old_parent = widget.parentWidget()
+        if old_parent is not None and old_parent.layout() is not None:
+            old_parent.layout().removeWidget(widget)
+        if index is None:
+            layout.addWidget(widget)
+        else:
+            layout.insertWidget(index, widget)
+
+    def _apply_banner_mode(self):
+        # Re-entrancy guard: widget.show()/setVisible() inside here triggers
+        # child resize events which re-fire the event filter synchronously,
+        # causing infinite recursion.  Drop any re-entrant call immediately.
+        if getattr(self, "_banner_applying", False):
+            return
+        self._banner_applying = True
+        try:
+            self._apply_banner_mode_inner()
+        finally:
+            self._banner_applying = False
+
+    def _apply_banner_mode_inner(self):
+        host = getattr(self.ui, "ctrframe", None)
+        top = getattr(self, "_banner_top_layout", None)
+        if host is None or top is None:
+            return
+
+        self._banner_top_row.show()
+        status  = getattr(self, "_banner_status_card",  None)
+        scaling = getattr(self, "_banner_scaling_card", None)
+        action  = getattr(self, "_banner_action_card",  None)
+        psd     = getattr(self, "_banner_psd_card",     None)
+
+        width = host.width()
+        if width <= 0:
+            # Window not yet shown/sized — start with everything visible so
+            # the layout reports a sensible initial minimum size.
+            for w in (status, scaling, action, psd):
+                if w is not None:
+                    w.show()
+            return
+
+        # Derive thresholds from the cards' own minimum widths so the logic
+        # is content-aware and works across different screen resolutions.
+        # OVERHEAD covers layout margins + inter-card spacing (~40 px).
+        # BAND is a hysteresis dead-band that prevents rapid show/hide toggling
+        # at the boundary (show if width > thresh+BAND, hide if < thresh-BAND).
+        # OVERHEAD: actual inter-card spacing (6 px × 3 gaps) + banner margins (8 px) ≈ 26 px.
+        # BAND: hysteresis dead-band — keeps cards from flickering at the boundary.
+        OVERHEAD = 26
+        BAND     = 8
+        # Use maximumWidth for optional cards (their minimumWidth is 0 so the
+        # layout can shrink freely; maximumWidth holds the intended display width).
+        w_status  = status.minimumWidth()  if status  else 0
+        w_scaling = scaling.maximumWidth() if scaling else 0
+        w_psd     = psd.maximumWidth()     if psd     else 0
+        w_action  = action.minimumWidth()  if action  else 0
+
+        thresh_scaling = w_status + w_scaling + w_action + OVERHEAD
+        thresh_psd     = thresh_scaling + w_psd
+
+        was_scaling = bool(getattr(self, "_banner_scaling_visible", True))
+        was_psd     = bool(getattr(self, "_banner_psd_visible",     True))
+
+        if was_scaling:
+            show_scaling = width >= thresh_scaling - BAND
+        else:
+            show_scaling = width >= thresh_scaling + BAND
+
+        if was_psd:
+            show_psd = width >= thresh_psd - BAND
+        else:
+            show_psd = width >= thresh_psd + BAND
+        show_psd = show_psd and show_scaling and (psd is not None)
+
+        self._banner_scaling_visible = show_scaling
+        self._banner_psd_visible     = show_psd
+
+        for w in (status, action):
+            if w is not None:
+                w.show()
+        if scaling is not None:
+            scaling.setVisible(show_scaling)
+        if psd is not None:
+            psd.setVisible(show_psd)
 
     def _on_line_weight_changed(self, value: float):
         self.cfg_line_weight = float(value)
@@ -212,7 +568,10 @@ class SignalsMixin:
         # initiate segsrv 
         
         self.ss = lp.segsrv( self.p )
-                
+        # reset non-render PSD segsrv so it is repopulated for the new file
+        self._psd_nr_ss  = None
+        self._psd_nr_chs = None
+
         # view 'epoch' is fixed at 30 seconds
         scope_epoch_sec = 30 
 
@@ -631,6 +990,8 @@ class SignalsMixin:
         # (particularly sigmods registered via make_sigmod) does not grow
         # across repeated renders, which causes std::bad_alloc.
         self.ss = lp.segsrv( self.p )
+        if getattr(self, '_psd_visible', False):
+            self.ss.set_psd_mode(True)
 
         # ------------------------------------------------------------
         # do rendering on a separate thread
@@ -716,6 +1077,8 @@ class SignalsMixin:
         self.ss.window( self.last_x1, self.last_x2)
 
         self._update_scaling()
+        if hasattr(self, "_psd_overlay_on_new_data"):
+            self._psd_overlay_on_new_data()
 
         
     def on_window_range(self, lo: float, hi: float):
@@ -767,6 +1130,10 @@ class SignalsMixin:
         else:
             self.ui.lbl_ewin.setText(f"E: {int(lo/30)+1} - {int(hi/30)+1}")
         self._update_pg1()
+        if hasattr(self, "_annotator_on_window_range_changed"):
+            self._annotator_on_window_range_changed(lo, hi)
+        if hasattr(self, "_psd_overlay_on_range_changed"):
+            self._psd_overlay_on_range_changed()
 
 
 
@@ -794,9 +1161,11 @@ class SignalsMixin:
         self._initiate_curves()
 
         # ready view
-        self.ssa.window(0,30)        
+        self.ssa.window(0,30)
         self._update_scaling()
         self._update_pg1_simple()
+        if hasattr(self, "_psd_overlay_on_new_data"):
+            self._psd_overlay_on_new_data()
         
 
 
@@ -1184,19 +1553,6 @@ class SignalsMixin:
             curve_slot = nchan - idx - 1
             curve_color = self.colors[curve_slot] if curve_slot < len(self.colors) else 'gray'
             self._set_y0_curve_pen(idx, curve_color)
-            if self.cfg_show_zero_line:
-                y0 = self.ss.get_scaled_y( ch , 0 )
-                ylim = self.ss.get_window_phys_range( ch )
-                band0 = self.ss.get_scaled_y(ch, ylim[0])
-                band1 = self.ss.get_scaled_y(ch, ylim[1])
-                band_lo = min(band0, band1)
-                band_hi = max(band0, band1)
-                if band_lo <= y0 <= band_hi:
-                    self.y0_curves[idx].setData([ x1, x2 ], [ y0 , y0 ])
-                else:
-                    self.y0_curves[idx].setData([], [])
-            else:
-                self.y0_curves[idx].setData([], [])
                                     
             # y-lines
             if ch in self.cmap_ylines_idx:
@@ -1228,6 +1584,16 @@ class SignalsMixin:
             ylim = self.ss.get_window_phys_range( ch )
             band0 = self.ss.get_scaled_y(ch, ylim[0])
             band1 = self.ss.get_scaled_y(ch, ylim[1])
+            if self.cfg_show_zero_line:
+                y0 = self.ss.get_scaled_y(ch, 0)
+                band_lo = min(band0, band1)
+                band_hi = max(band0, band1)
+                if band_lo <= y0 <= band_hi:
+                    self.y0_curves[idx].setData([x1, x2], [y0, y0])
+                else:
+                    self.y0_curves[idx].setData([], [])
+            else:
+                self.y0_curves[idx].setData([], [])
             self._cache_pg1_channel_band(
                 ch=ch,
                 band_lo=min(band0, band1),
@@ -1237,6 +1603,8 @@ class SignalsMixin:
                 x=x,
                 y_scaled=y,
                 zero_scaled=self.ss.get_scaled_y(ch, 0),
+                color=curve_color,
+                srv=self.ss,
             )
             if self.show_labels:
                 tv[idx] = ' ' + ch + ' ' + str(round(ylim[0],3)) + ' : ' + str(round(ylim[1],3)) + ' (' + self.units[ ch ] +')'
@@ -1308,7 +1676,9 @@ class SignalsMixin:
         self._hide_pg1_probe()
 
         # repaint
-        vb.update()  
+        vb.update()
+        if hasattr(self, "_psd_overlay_on_trace_redraw"):
+            self._psd_overlay_on_trace_redraw()
 
 
     def _durstr( self , x , y ):
@@ -1445,6 +1815,7 @@ class SignalsMixin:
             # filter?
             if ch in self.fmap:
                 y = self.filter_signal( y , ch, ( self.fmap[ch] , self.srs[ ch ] ) )
+            y_phys_filt = y.copy()   # physical units, post-filter — used by PSD overlay
             # need to scale manually: to 0/1, either empirically, or from fixed
             if ch in self.cmap_fixed_min:
                 mn = self.cmap_fixed_min[ch]
@@ -1477,8 +1848,9 @@ class SignalsMixin:
                 phys_hi=float(mx),
                 x=x,
                 y_scaled=y,
-                y_phys=d[:,1],
+                y_phys=y_phys_filt,
                 zero_scaled=(ybase + ((0.0 - mn) / (mx - mn)) * h) if mx > mn else (ybase + 0.5 * h),
+                color=curve_color,
             )
             # labels
             ylim = [ mn , mx ] 
@@ -1560,7 +1932,9 @@ class SignalsMixin:
         self._hide_pg1_probe()
 
         # repaint
-        vb.update()  
+        vb.update()
+        if hasattr(self, "_psd_overlay_on_trace_redraw"):
+            self._psd_overlay_on_trace_redraw()
 
     def _init_pg1_probe_items(self):
         pi = self.ui.pg1.getPlotItem()
@@ -1710,7 +2084,7 @@ class SignalsMixin:
         for line in self._pg1_probe_band_lines:
             line.setPen(pg.mkPen(band_col, width=1, style=QtCore.Qt.DotLine, cosmetic=True))
 
-    def _cache_pg1_channel_band(self, ch, band_lo, band_hi, phys_lo, phys_hi, x=None, y_scaled=None, y_phys=None, zero_scaled=None):
+    def _cache_pg1_channel_band(self, ch, band_lo, band_hi, phys_lo, phys_hi, x=None, y_scaled=None, y_phys=None, zero_scaled=None, color=None, srv=None):
         x_arr = np.asarray(x, dtype=float) if x is not None else np.empty(0, dtype=float)
         y_scaled_arr = np.asarray(y_scaled, dtype=float) if y_scaled is not None else np.empty(0, dtype=float)
         y_phys_arr = np.asarray(y_phys, dtype=float) if y_phys is not None else None
@@ -1744,7 +2118,9 @@ class SignalsMixin:
             "x": x_arr,
             "y_scaled": y_scaled_arr,
             "y_phys": y_phys_arr,
+            "color": color,
             "_peak_cache": None,
+            "srv": srv,
         })
 
     def _toggle_zero_lines(self):
@@ -2768,6 +3144,10 @@ class MainTraceNavProxy(QtCore.QObject):
     def _handle_key(self, ev):
         sel = self._selector()
 
+        if hasattr(self.owner, "_annotator_handle_maintrace_key_press"):
+            if self.owner._annotator_handle_maintrace_key_press(ev):
+                return True
+
         key = ev.key()
         mods = ev.modifiers()
         shift = bool(mods & QtCore.Qt.ShiftModifier)
@@ -2826,6 +3206,12 @@ class MainTraceNavProxy(QtCore.QObject):
             return True
         return False
 
+    def _handle_key_release(self, ev):
+        if hasattr(self.owner, "_annotator_handle_maintrace_key_release"):
+            if self.owner._annotator_handle_maintrace_key_release(ev):
+                return True
+        return False
+
     def _handle_wheel(self, ev):
         sel = self._selector()
         if sel is None:
@@ -2861,6 +3247,11 @@ class MainTraceNavProxy(QtCore.QObject):
 
         if ev.type() == QtCore.QEvent.KeyPress and has_focus:
             if self._handle_key(ev):
+                ev.accept()
+                return True
+
+        if ev.type() == QtCore.QEvent.KeyRelease and has_focus:
+            if self._handle_key_release(ev):
                 ev.accept()
                 return True
 
@@ -3404,11 +3795,12 @@ class XRangeSelector(QtCore.QObject):
             except Exception: pass
             
     # programmatically set range
-    def setRange(self, lo: float, hi: float, emit: bool = True):
+    def setRange(self, lo: float, hi: float, emit: bool = True, grab_focus: bool = False):
         lo, hi = self._enforce_span_limits(lo, hi)
         self._set_region_silent(lo, hi)
         self.region.show()
-        self.wid.setFocus()
+        if grab_focus:
+            self.wid.setFocus()
         if emit:
             self._schedule_emit(lo, hi)
 

@@ -49,6 +49,23 @@ class _ComboDelegate(QStyledItemDelegate):
     def createEditor(self, parent, option, index):
         cb = QComboBox(parent)
         cb.addItems(self.items)
+        cb.setEditable(True)
+        cb.setFrame(False)
+        cb.setMaxVisibleItems(len(self.items))
+        le = cb.lineEdit()
+        if le is not None:
+            le.setReadOnly(True)
+            le.setFrame(False)
+        cb.setStyleSheet(
+            "QComboBox{padding:0 12px 0 1px;margin:0;border:0;background:transparent;}"
+            "QComboBox::drop-down{subcontrol-origin:padding;subcontrol-position:top right;width:11px;border:0;}"
+            "QComboBox::down-arrow{image:none;width:0px;height:0px;"
+            "border-left:4px solid transparent;border-right:4px solid transparent;"
+            "border-top:6px solid #c7c7c7;margin-right:2px;}"
+            "QComboBox::drop-down{background:rgba(255,255,255,0.08);}"
+            "QComboBox QAbstractItemView{selection-background-color:#4a4a4a;}"
+            "QLineEdit{padding:0;margin:0;border:0;background:transparent;}"
+        )
         def _commit_later():
             # defer commit until the editor is fully attached to the view
             QTimer.singleShot(0, lambda: (
@@ -85,7 +102,85 @@ class _ComboDelegate(QStyledItemDelegate):
 
 class MetricsMixin:
 
+    def _apply_compact_dock_styles(self):
+        button_names = ("butt_sig", "butt_annot")
+        for name in button_names:
+            widget = getattr(self.ui, name, None)
+            if widget is None:
+                continue
+            widget.setStyleSheet(
+                "font-size: 10px; min-height: 26px; padding: 2px 4px;"
+            )
+
+        line_edit_names = ("txt_signals", "txt_annots", "txt_events")
+        for name in line_edit_names:
+            widget = getattr(self.ui, name, None)
+            if widget is None:
+                continue
+            widget.setStyleSheet(
+                "font-size: 10px; min-height: 18px; max-height: 18px; padding: 0 4px;"
+            )
+
+        table_names = ("tbl_desc_signals", "tbl_desc_annots", "tbl_desc_events")
+        for name in table_names:
+            view = getattr(self.ui, name, None)
+            if view is None:
+                continue
+            view.setStyleSheet(
+                """
+                QTableView {
+                    font-size: 10px;
+                }
+                QTableView::item {
+                    padding: 0 2px;
+                }
+                QHeaderView::section {
+                    font-size: 9px;
+                    padding: 0 2px;
+                    min-height: 16px;
+                }
+                QComboBox {
+                    font-size: 10px;
+                    padding: 0 1px;
+                    margin: 0;
+                    min-height: 14px;
+                }
+                QComboBox::down-arrow {
+                    image: none;
+                    width: 0px;
+                }
+                QComboBox::drop-down {
+                    width: 10px;
+                    border: 0;
+                }
+                """
+            )
+
+    def _configure_dense_table(
+        self,
+        view: QTableView,
+        *,
+        row_height: int = 18,
+        header_height: int = 16,
+    ):
+        h = view.horizontalHeader()
+        v = view.verticalHeader()
+        h.setMinimumSectionSize(18)
+        h.setFixedHeight(header_height)
+        v.setDefaultSectionSize(row_height)
+        v.setMinimumSectionSize(row_height)
+        v.setVisible(False)
+        view.setShowGrid(False)
+
     def _init_metrics(self):
+        self._apply_compact_dock_styles()
+        self._pending_instance_annots = []
+        self._instances_update_dirty = False
+        self._instances_update_timer = QTimer(self.ui)
+        self._instances_update_timer.setSingleShot(True)
+        self._instances_update_timer.timeout.connect(self._flush_instances_update)
+        if hasattr(self.ui, "dock_annots"):
+            self.ui.dock_annots.visibilityChanged.connect(self._on_instances_dock_visibility_changed)
         
         # signal table
         view = self.ui.tbl_desc_signals
@@ -101,7 +196,7 @@ class MetricsMixin:
         view.setSelectionBehavior(QAbstractItemView.SelectRows)
         view.setSelectionMode(QAbstractItemView.SingleSelection)
         view.horizontalHeader().setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        view.verticalHeader().setVisible(False)
+        self._configure_dense_table(view)
         
         # annots table
 
@@ -117,7 +212,7 @@ class MetricsMixin:
         view.setSelectionBehavior(QAbstractItemView.SelectRows)
         view.setSelectionMode(QAbstractItemView.SingleSelection)
         view.horizontalHeader().setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        view.verticalHeader().setVisible(False)
+        self._configure_dense_table(view)
 
         # wiring
         self.ui.butt_sig.clicked.connect( self._toggle_sigs )
@@ -125,6 +220,8 @@ class MetricsMixin:
 
         
     def _toggle_sigs(self):
+        if not hasattr(self.ui.tbl_desc_signals, "checked_visible"):
+            return
         n = len(self.ui.tbl_desc_signals.checked_visible())
         if n == 0:
             self.ui.tbl_desc_signals.select_all_checks()
@@ -132,6 +229,8 @@ class MetricsMixin:
             self.ui.tbl_desc_signals.select_none_checks()
 
     def _toggle_annots(self):
+        if not hasattr(self.ui.tbl_desc_annots, "checked_visible"):
+            return
         n = len(self.ui.tbl_desc_annots.checked_visible())
         if n == 0:
             self.ui.tbl_desc_annots.select_all_checks()
@@ -230,7 +329,7 @@ class MetricsMixin:
         view.setSelectionBehavior(QAbstractItemView.SelectRows)
         view.setSelectionMode(QAbstractItemView.SingleSelection)
         view.horizontalHeader().setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        view.verticalHeader().setVisible(False)
+        self._configure_dense_table(view)
 
 
         
@@ -277,9 +376,18 @@ class MetricsMixin:
         self.signals_table_proxy.rowsInserted.connect(lambda *a: _open_all())
 
         # widths
-        view.setColumnWidth(PROXY_COL_FILTER, 90)
-        view.setColumnWidth(0, 10)
+        proxy = self.signals_table_proxy
+        view.setColumnWidth(PROXY_COL_FILTER, 76)
+        view.setColumnWidth(0, 24)
+        view.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
         view.horizontalHeader().setSectionResizeMode(PROXY_COL_FILTER, QHeaderView.Fixed)
+        for col_name, width in {"PDIM": 38, "SR": 34}.items():
+            for c in range(proxy.columnCount()):
+                header = str(proxy.headerData(c, Qt.Horizontal) or "")
+                if header == col_name:
+                    view.setColumnWidth(c, width)
+                    view.horizontalHeader().setSectionResizeMode(c, QHeaderView.Fixed)
+                    break
     
         # inside your setup method
         self._signals_proxy = self.signals_table_proxy
@@ -411,7 +519,7 @@ class MetricsMixin:
         view.setSelectionBehavior(QAbstractItemView.SelectRows)
         view.setSelectionMode(QAbstractItemView.SingleSelection)
         view.horizontalHeader().setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        view.verticalHeader().setVisible(False)
+        self._configure_dense_table(view)
 
         # Add checkbox column; index is SOURCE column before insertion
         add_check_column(
@@ -426,6 +534,9 @@ class MetricsMixin:
                 self._schedule_actigraphy_update() if hasattr(self, "_schedule_actigraphy_update") else None
             ),
         )
+        view.setColumnWidth(0, 24)
+        view.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
+        view.resizeColumnsToContents()
 
 
 
@@ -452,47 +563,95 @@ class MetricsMixin:
 
         # update palette
         self.set_palette()
+        if hasattr(self, "_annotator_refresh_classes"):
+            self._annotator_refresh_classes()
 
 
 
     # --------------------------------------------------------------------------------
     # populate annotation instances (updated when annots selected)
 
+    def _mark_instances_dirty(self, anns):
+        self._pending_instance_annots = list(anns or [])
+        self._instances_update_dirty = True
+
     def _update_instances(self, anns):
+        self._pending_instance_annots = list(anns or [])
+        if not getattr(self.ui, "dock_annots", None) or not self.ui.dock_annots.isVisible():
+            self._instances_update_dirty = True
+            return
+        self._instances_update_dirty = False
+        self._instances_update_timer.start(0)
+
+    def _on_instances_dock_visibility_changed(self, visible: bool):
+        if visible and (self._instances_update_dirty or self._pending_instance_annots):
+            self._instances_update_timer.start(0)
+
+    def _flush_instances_update(self):
+        if not getattr(self.ui, "dock_annots", None) or not self.ui.dock_annots.isVisible():
+            self._instances_update_dirty = True
+            return
+        self._instances_update_dirty = False
+        self._rebuild_instances_table(list(self._pending_instance_annots))
+
+    def _rebuild_instances_table(self, anns):
 
         # request w/ hms and duration also (True)
         rows = self.ssa.get_all_annots_with_inst_ids(anns, True)
         df = pd.DataFrame(rows, columns=["class", "inst", "hms", "start", "dur"])
 
-        # Fetch per-event metadata (col 6) via the ANNOTS command.
-        # fetch_fulls_annots strips key names from the meta string so we use
-        # p.table('ANNOTS','ANNOT_INST_T1_T2') instead — its VAL column carries
-        # the full "key=val;key2=val2" string as it appears in the .annot file.
-        # Build (class, start) → VAL lookup from the ANNOTS command output.
+        # Fetch per-event metadata via lunapi's full annotation accessor.
+        # Newer lunapi builds can preserve keys as "k=v;k2=v2" with
+        # add_keys=True, which is much faster than running the ANNOTS command.
+        # Build (class, start, stop) -> Meta from that result.
         # Note: get_all_annots_with_inst_ids returns [class, channel, hms, start, dur]
         # — the second field is the channel, not the instance ID — so we match on
-        # (class, start) only to avoid mismatches between '.' (ANNOTS INST) and
-        # the channel string returned by get_all_annots_with_inst_ids.
+        # timing fields plus class instead of relying on instance/channel text.
         meta_lookup = {}
         try:
-            self.p.silent_proc("ANNOTS")
-            ann_tbl = self.p.table("ANNOTS", "ANNOT_INST_T1_T2")
-            if ann_tbl is not None and not ann_tbl.empty:
-                for row in ann_tbl.itertuples(index=False):
-                    raw = row.VAL if hasattr(row, "VAL") else None
+            full_annots = self.p.fetch_fulls_annots(anns, add_keys=True)
+            if full_annots is not None and not full_annots.empty:
+                for row in full_annots.itertuples(index=False):
+                    raw = row.Meta if hasattr(row, "Meta") else None
                     if raw is None or str(raw) in (".", "", "nan", "None"):
                         val = ""
                     else:
                         val = str(raw).replace(";", "; ")
-                    key = (str(row.ANNOT), round(float(row.START), 3))
+                    key = (
+                        str(row.Class),
+                        round(float(row.Start), 3),
+                        round(float(row.Stop), 3),
+                    )
                     meta_lookup[key] = val
+        except TypeError:
+            try:
+                self.p.silent_proc("ANNOTS")
+                ann_tbl = self.p.table("ANNOTS", "ANNOT_INST_T1_T2")
+                if ann_tbl is not None and not ann_tbl.empty:
+                    for row in ann_tbl.itertuples(index=False):
+                        raw = row.VAL if hasattr(row, "VAL") else None
+                        if raw is None or str(raw) in (".", "", "nan", "None"):
+                            val = ""
+                        else:
+                            val = str(raw).replace(";", "; ")
+                        key = (
+                            str(row.ANNOT),
+                            round(float(row.START), 3),
+                            round(float(row.STOP), 3),
+                        )
+                        meta_lookup[key] = val
+            except Exception:
+                pass
         except Exception:
             pass
 
         def _get_meta(r):
-            return meta_lookup.get((str(r["class"]), round(float(r["start"]), 3)), "")
+            start = round(float(r["start"]), 3)
+            stop = round(float(r["start"]) + float(r["dur"]), 3)
+            return meta_lookup.get((str(r["class"]), start, stop), "")
 
         df["meta"] = df.apply(_get_meta, axis=1)
+        df = df[["class", "hms", "start", "dur", "inst", "meta"]]
         self.events_model = self.df_to_model(df)
 
         view = self.ui.tbl_desc_events
@@ -504,11 +663,18 @@ class MetricsMixin:
         h.setStretchLastSection(True)
         h.setSectionResizeMode(QHeaderView.Interactive)
         
-        view.verticalHeader().setVisible(False)
+        self._configure_dense_table(view)
         view.resizeColumnsToContents()
         view.setSelectionBehavior(QAbstractItemView.SelectRows)
         view.setSelectionMode(QAbstractItemView.SingleSelection)
         view.horizontalHeader().setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        for col_name, width in {"inst": 32, "hms": 58, "start": 44, "dur": 38}.items():
+            for c in range(self.events_table_proxy.columnCount()):
+                header = str(self.events_table_proxy.headerData(c, Qt.Horizontal) or "")
+                if header == col_name:
+                    view.setColumnWidth(c, width)
+                    h.setSectionResizeMode(c, QHeaderView.Interactive)
+                    break
         
         sel = view.selectionModel()
         sel.currentRowChanged.connect(self._on_row_changed)
@@ -552,22 +718,36 @@ class MetricsMixin:
             return
 
         src_row = src_idx.row()
+        headers = [
+            str(self.events_model.headerData(c, Qt.Horizontal) or "")
+            for c in range(self.events_model.columnCount())
+        ]
+        try:
+            start_col = headers.index("start")
+            dur_col = headers.index("dur")
+        except ValueError:
+            return
 
-        # get interval            
-        left_data = self.events_model.data(self.events_model.index(src_row, 3))
-        dur_data = self.events_model.data(self.events_model.index(src_row, 4))
+        # get interval
+        left_data = self.events_model.data(self.events_model.index(src_row, start_col))
+        dur_data = self.events_model.data(self.events_model.index(src_row, dur_col))
         if left_data is None or dur_data is None:
             return
 
-        left = float(left_data)
-        right = left + float(dur_data)
+        try:
+            left = float(left_data)
+            right = left + float(dur_data)
+        except (TypeError, ValueError):
+            return
 
         # expand?
-        left , right = expand_interval( left, right )
+        fixed_w = getattr(self.ui, "spin_jump_width", None)
+        fixed_w = fixed_w.value() if fixed_w is not None else 0.0
+        left , right = expand_interval( left, right, fixed_width=fixed_w )
 
         # set range and this should(?) update the plot
         self.sel.setRange( left , right )
-        
+
         # update plot
         if self.rendered: self.on_window_range( left , right )
         
@@ -578,15 +758,34 @@ class MetricsMixin:
 # helper functions
 
 
-def expand_interval(left, right, *, factor=2.0, point_width=10.0, min_left=0.0):
+def expand_interval(left, right, *, factor=2.0, point_width=10.0,
+                    min_left=0.0, fixed_width=0.0):
     """
     Expand [left, right] to a wider interval centered on it.
-    - factor: final_width = factor * original_width (>=1 recommended)
-    - if left == right: use `point_width`
-    - clamp so left >= min_left by shifting right without changing width
+
+    fixed_width > 0: fixed window of that many seconds centered on the event
+        midpoint.  If the event itself is wider, event width wins (fixed_width
+        acts as a minimum / floor).
+    fixed_width == 0 (default / 'auto'): expand by factor on each side.
+
+    Other params:
+    - point_width: window used when left == right (zero-duration event)
+    - min_left: clamp so L >= min_left, shifting right without changing width
     """
     a, b = sorted((float(left), float(right)))
 
+    if fixed_width > 0:
+        mid = (a + b) / 2.0
+        w   = max(b - a, float(fixed_width))
+        L   = mid - w / 2.0
+        R   = mid + w / 2.0
+        if L < min_left:
+            shift = min_left - L
+            L += shift
+            R += shift
+        return L, R
+
+    # ── auto mode: factor-based ──────────────────────────────────────
     if a == b:
         half = point_width / 2.0
         L = max(min_left, a - half)

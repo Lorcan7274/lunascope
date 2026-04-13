@@ -209,7 +209,7 @@ def add_dock_shortcuts(win, view_menu, toggle_zero=None):
             act.setShortcut("Ctrl+8")
         elif act.text() == "(9) Outputs":
             act.setShortcut("Ctrl+9")
-        elif act.text() == "(-) Masks":
+        elif act.text() == "(-) Masks / Subset":
             act.setShortcut("Ctrl+-")
         elif act.text() == "(/) Commands":
             act.setShortcut("Ctrl+/")

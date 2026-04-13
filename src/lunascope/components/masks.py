@@ -26,9 +26,10 @@ from PySide6.QtWidgets import QMessageBox
 class MasksMixin:
     
     def _init_masks(self):
-        
+
         # wiring
         self.ui.butt_generic_mask.clicked.connect( self._apply_mask )
+        self.ui.butt_drop_subset.clicked.connect( self._drop_signals_annots )
 
     # ------------------------------------------------------------
     # Update list of potential mask annots
@@ -98,5 +99,9 @@ class MasksMixin:
         self._update_pg1()
         
         self.ui.tbl_desc_signals.set_checked_by_labels( self.curr_chs )
-        self.ui.tbl_desc_annots.set_checked_by_labels( self.curr_anns )
-        self._update_instances( self.curr_anns )
+        if hasattr(self.ui.tbl_desc_annots, "set_checked_by_labels_silent"):
+            self.ui.tbl_desc_annots.set_checked_by_labels_silent( self.curr_anns )
+        else:
+            self.ui.tbl_desc_annots.set_checked_by_labels( self.curr_anns )
+        if hasattr(self, "_mark_instances_dirty"):
+            self._mark_instances_dirty( self.curr_anns )

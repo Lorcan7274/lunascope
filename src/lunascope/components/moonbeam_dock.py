@@ -1526,23 +1526,12 @@ class MoonbeamMixin:
             return
 
         try:
-            from PySide6.QtWidgets import (
-                QHeaderView as _QHV,
-                QAbstractItemView as _QAV,
-            )
             self.proj.clear()
             self.proj.eng.set_sample_list(rows)
             df = self.proj.sample_list()
             model = self.df_to_model(df)
             self._proxy.setSourceModel(model)
-            view = self.ui.tbl_slist
-            h = view.horizontalHeader()
-            h.setSectionResizeMode(_QHV.Interactive)
-            h.setStretchLastSection(False)
-            view.resizeColumnsToContents()
-            view.setSelectionBehavior(_QAV.SelectRows)
-            view.setSelectionMode(_QAV.SingleSelection)
-            view.verticalHeader().setVisible(True)
+            self._configure_slist_view()
             self.ui.lbl_slist.setText(f"<moonbeam:{label}>")
         except Exception as exc:
             QMessageBox.critical(

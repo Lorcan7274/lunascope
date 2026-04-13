@@ -289,7 +289,7 @@ def add_check_column(view, channel_col_before_insert, header_text="✔",
         _scheduled = True
         _debounce.start(0)
 
-    def _loop_set(state, xs=None, _src=src, _proxy=proxy, _cc=chan_col_after):
+    def _loop_set(state, xs=None, notify=True, _src=src, _proxy=proxy, _cc=chan_col_after):
         nonlocal _squelch
         _squelch = True
 
@@ -366,7 +366,7 @@ def add_check_column(view, channel_col_before_insert, header_text="✔",
             _src.dataChanged.emit(_src.index(0, 0), _src.index(rc - 1, 0), [Qt.CheckStateRole])
 
         # defer a single logical change until the model/proxy/view are stable
-        if changed_any:
+        if changed_any and notify:
             _schedule_emit()
 
     # bind helpers
@@ -376,6 +376,7 @@ def add_check_column(view, channel_col_before_insert, header_text="✔",
         view.select_all_checks = types.MethodType(lambda self: _loop_set(Qt.Checked), view)
         view.select_none_checks = types.MethodType(lambda self: _loop_set(Qt.Unchecked), view)
         view.set_checked_by_labels = types.MethodType(lambda self, xs: _loop_set(Qt.PartiallyChecked, xs), view)
+        view.set_checked_by_labels_silent = types.MethodType(lambda self, xs: _loop_set(Qt.PartiallyChecked, xs, notify=False), view)
     except AttributeError:
         return {
             "checked": _checked,

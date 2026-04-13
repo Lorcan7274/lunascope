@@ -459,8 +459,12 @@ class AnalMixin:
 
         # reset any prior selections
         self.ui.tbl_desc_signals.set_checked_by_labels( self.curr_chs )
-        self.ui.tbl_desc_annots.set_checked_by_labels( self.curr_anns )
-        self._update_instances( self.curr_anns )
+        if hasattr(self.ui.tbl_desc_annots, "set_checked_by_labels_silent"):
+            self.ui.tbl_desc_annots.set_checked_by_labels_silent( self.curr_anns )
+        else:
+            self.ui.tbl_desc_annots.set_checked_by_labels( self.curr_anns )
+        if hasattr(self, "_mark_instances_dirty"):
+            self._mark_instances_dirty( self.curr_anns )
 
 
     # ------------------------------------------------------------

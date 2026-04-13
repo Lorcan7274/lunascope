@@ -24,9 +24,18 @@ from os import path
 import os
 from pathlib import Path
         
-from PySide6.QtWidgets import QFileDialog, QHeaderView, QAbstractItemView, QMessageBox
-from PySide6.QtCore import Qt, QDir, QRegularExpression, QSortFilterProxyModel, QAbstractTableModel, QModelIndex
-from PySide6.QtGui import QStandardItemModel, QStandardItem
+from PySide6.QtWidgets import (
+    QApplication,
+    QFileDialog,
+    QHeaderView,
+    QAbstractItemView,
+    QMessageBox,
+    QStyledItemDelegate,
+    QStyle,
+    QStyleOptionViewItem,
+)
+from PySide6.QtCore import Qt, QDir, QRegularExpression, QSortFilterProxyModel, QAbstractTableModel, QModelIndex, QSize
+from PySide6.QtGui import QStandardItemModel, QStandardItem, QPalette, QIcon
 
 import pandas as pd
 import numpy as np
@@ -149,6 +158,106 @@ class DataFrameModel(QAbstractTableModel):
         return Qt.ItemIsEnabled | Qt.ItemIsSelectable
 
 
+class SampleListCompactDelegate(QStyledItemDelegate):
+    """Render the sample list as a compact ID-first list with expandable details."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._expanded_keys = set()
+
+    @staticmethod
+    def _clean_detail(value):
+        if value is None:
+            return "<none>"
+        text = str(value).strip()
+        return "<none>" if text in {"", "."} else text
+
+    def _row_key(self, index):
+        model = index.model()
+        values = []
+        for col in range(min(3, model.columnCount())):
+            values.append(str(model.index(index.row(), col).data(Qt.DisplayRole) or ""))
+        return tuple(values)
+
+    def is_expanded(self, index) -> bool:
+        return self._row_key(index) in self._expanded_keys
+
+    def clear_expanded(self):
+        self._expanded_keys.clear()
+
+    def set_expanded_only(self, index):
+        self._expanded_keys.clear()
+        if index.isValid():
+            self._expanded_keys.add(self._row_key(index))
+
+    def toggle_index(self, index):
+        key = self._row_key(index)
+        if key in self._expanded_keys:
+            self._expanded_keys.remove(key)
+        else:
+            self._expanded_keys.add(key)
+
+    def sizeHint(self, option, index):
+        base = super().sizeHint(option, index)
+        if index.column() != 0:
+            return base
+        fm = option.fontMetrics
+        height = fm.height() + 12
+        if self.is_expanded(index):
+            height += (fm.height() + 4) * 2
+        return QSize(base.width(), max(base.height(), height))
+
+    def paint(self, painter, option, index):
+        if index.column() != 0:
+            super().paint(painter, option, index)
+            return
+
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        opt.text = ""
+        opt.icon = QIcon()
+
+        style = opt.widget.style() if opt.widget else QApplication.style()
+        style.drawControl(QStyle.CE_ItemViewItem, opt, painter, opt.widget)
+
+        painter.save()
+
+        text_rect = option.rect.adjusted(10, 6, -10, -6)
+        fm = option.fontMetrics
+        expanded = self.is_expanded(index)
+
+        arrow = "v" if expanded else ">"
+        arrow_w = fm.horizontalAdvance(arrow) + 10
+        arrow_rect = text_rect.adjusted(0, 0, -(text_rect.width() - arrow_w), 0)
+        body_rect = text_rect.adjusted(arrow_w, 0, 0, 0)
+
+        if option.state & QStyle.State_Selected:
+            primary = option.palette.color(QPalette.HighlightedText)
+            secondary = option.palette.color(QPalette.HighlightedText)
+        else:
+            primary = option.palette.color(QPalette.Text)
+            secondary = option.palette.color(QPalette.Text).darker(135)
+
+        painter.setPen(primary)
+        painter.drawText(arrow_rect, Qt.AlignLeft | Qt.AlignTop, arrow)
+
+        id_text = str(index.data(Qt.DisplayRole) or "")
+        id_line = fm.elidedText(id_text, Qt.ElideMiddle, max(40, body_rect.width()))
+        painter.drawText(body_rect, Qt.AlignLeft | Qt.AlignTop, id_line)
+
+        if expanded:
+            edf_text = self._clean_detail(index.siblingAtColumn(1).data(Qt.DisplayRole))
+            annot_text = self._clean_detail(index.siblingAtColumn(2).data(Qt.DisplayRole))
+            detail_rect = body_rect.adjusted(0, fm.height() + 4, 0, 0)
+            painter.setPen(secondary)
+            detail1 = fm.elidedText(f"EDF: {edf_text}", Qt.ElideMiddle, max(40, detail_rect.width()))
+            detail2 = fm.elidedText(f"Annot: {annot_text}", Qt.ElideMiddle, max(40, detail_rect.width()))
+            painter.drawText(detail_rect, Qt.AlignLeft | Qt.AlignTop, detail1)
+            painter.drawText(detail_rect.adjusted(0, fm.height() + 4, 0, 0), Qt.AlignLeft | Qt.AlignTop, detail2)
+
+        painter.restore()
+
+
 class SListMixin:
 
     def _find_matching_annotation_file(self, edf_file: str):
@@ -181,6 +290,15 @@ class SListMixin:
 
         # attach comma-delimited OR filter
         self._proxy = attach_comma_filter( self.ui.tbl_slist , self.ui.flt_slist )
+        self._slist_delegate = SampleListCompactDelegate(self.ui.tbl_slist)
+        self.ui.tbl_slist.setItemDelegateForColumn(0, self._slist_delegate)
+        self.ui.tbl_slist.clicked.connect(self._expand_slist_row)
+        self.ui.tbl_slist.setToolTip("Click a sample row to show its EDF and annotation paths.")
+        self._proxy.modelReset.connect(self._refresh_slist_row_heights)
+        self._proxy.layoutChanged.connect(self._refresh_slist_row_heights)
+        self._proxy.rowsInserted.connect(lambda *_args: self._refresh_slist_row_heights())
+        self._proxy.rowsRemoved.connect(lambda *_args: self._refresh_slist_row_heights())
+        self._configure_slist_view()
         
         # wire buttons
         self.ui.butt_load_slist.clicked.connect(self.open_file)
@@ -189,8 +307,8 @@ class SListMixin:
         self.ui.butt_load_annot.clicked.connect(lambda _checked=False: self.open_annot())
         self.ui.butt_refresh.clicked.connect(self._refresh)
         
-        # wire select ID from slist --> load
-        self.ui.tbl_slist.selectionModel().currentRowChanged.connect( self._attach_inst )
+        # wire select ID from slist --> load + show details
+        self.ui.tbl_slist.selectionModel().currentRowChanged.connect(self._on_slist_current_row_changed)
         
         
 
@@ -219,16 +337,51 @@ class SListMixin:
     def _apply_sample_list_df(self, df, label: str):
         model = self.df_to_model(df)
         self._proxy.setSourceModel(model)
+        self._configure_slist_view()
+        self.ui.lbl_slist.setText(label)
 
+    def _configure_slist_view(self):
         view = self.ui.tbl_slist
         h = view.horizontalHeader()
         h.setSectionResizeMode(QHeaderView.Interactive)
-        h.setStretchLastSection(False)
-        view.resizeColumnsToContents()
         view.setSelectionBehavior(QAbstractItemView.SelectRows)
         view.setSelectionMode(QAbstractItemView.SingleSelection)
         view.verticalHeader().setVisible(True)
-        self.ui.lbl_slist.setText(label)
+        if hasattr(self, "_slist_delegate"):
+            self._slist_delegate.clear_expanded()
+        model = view.model()
+        if model is None:
+            return
+        for col in range(model.columnCount()):
+            view.setColumnHidden(col, col != 0)
+        if model.columnCount() > 0:
+            h.setSectionResizeMode(0, QHeaderView.Stretch)
+            h.setStretchLastSection(True)
+            sel = view.selectionModel()
+            if sel and sel.currentIndex().isValid():
+                self._slist_delegate.set_expanded_only(sel.currentIndex())
+        self._refresh_slist_row_heights()
+
+    def _refresh_slist_row_heights(self):
+        model = self.ui.tbl_slist.model()
+        if model is None:
+            return
+        for row in range(model.rowCount()):
+            self.ui.tbl_slist.resizeRowToContents(row)
+
+    def _expand_slist_row(self, index):
+        if not index.isValid() or not hasattr(self, "_slist_delegate"):
+            return
+        self._slist_delegate.set_expanded_only(index)
+        self.ui.tbl_slist.resizeRowToContents(index.row())
+        self.ui.tbl_slist.viewport().update()
+
+    def _on_slist_current_row_changed(self, current, previous):
+        if current.isValid() and hasattr(self, "_slist_delegate"):
+            self._slist_delegate.set_expanded_only(current)
+            self._refresh_slist_row_heights()
+            self.ui.tbl_slist.viewport().update()
+        self._attach_inst(current, previous)
 
 
     def _build_slist_from_folder(self, folder: str):
@@ -315,19 +468,9 @@ class SListMixin:
             df = self.proj.sample_list()
 
             # assgin to model
-            model = self.df_to_model( df )              
+            model = self.df_to_model( df )
             self._proxy.setSourceModel(model)
-
-            # display options resize
-            view = self.ui.tbl_slist
-#            view.setSortingEnabled(True)
-            h = view.horizontalHeader()
-            h.setSectionResizeMode(QHeaderView.Interactive)  # user-resizable
-            h.setStretchLastSection(False)                   # no auto-stretch fighting you
-            view.resizeColumnsToContents()  
-            view.setSelectionBehavior(QAbstractItemView.SelectRows)
-            view.setSelectionMode(QAbstractItemView.SingleSelection)
-            view.verticalHeader().setVisible(True)
+            self._configure_slist_view()
             # update label to show slist file
             self.ui.lbl_slist.setText( '<internal>' )
 
@@ -367,6 +510,8 @@ class SListMixin:
         
     def open_annot(self,  annot_file = None ):
 
+        interactive = annot_file is None
+
         if annot_file is None:
             annot_file , _ = open_file_name(
                 self.ui,
@@ -378,10 +523,42 @@ class SListMixin:
         # update
         if annot_file != "":
 
+            # If called interactively and an instance is already attached,
+            # offer to append rather than replace.
+            if interactive and hasattr(self, "p"):
+                ans = QMessageBox.question(
+                    self.ui,
+                    "Append or Replace?",
+                    f"An EDF/annotation is already loaded.\n\n"
+                    f"Append this annotation to the current instance, "
+                    f"or replace the current instance?\n\n"
+                    f"{annot_file}",
+                    QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+                    QMessageBox.Yes,
+                )
+                # Yes = Append, No = Replace, Cancel = abort
+                if ans == QMessageBox.Cancel:
+                    return
+                if ans == QMessageBox.Yes:
+                    try:
+                        self.p.attach_annot(annot_file)
+                    except Exception as e:
+                        QMessageBox.critical(
+                            self.ui,
+                            "Error",
+                            f"Could not append annotation:\n{e}",
+                        )
+                        return
+                    # Refresh annotation-related displays
+                    self._update_metrics()
+                    self._render_hypnogram()
+                    self._render_signals_simple()
+                    return
+
             base = path.splitext(path.basename(annot_file))[0]
 
-            row = [ base ,".", annot_file ] 
-            
+            row = [ base ,".", annot_file ]
+
             # specify SL directly
             self.proj.clear()
             self.proj.eng.set_sample_list( [ row ] )
@@ -390,19 +567,9 @@ class SListMixin:
             df = self.proj.sample_list()
 
             # assgin to model
-            model = self.df_to_model( df )              
+            model = self.df_to_model( df )
             self._proxy.setSourceModel(model)
-
-            # display options resize
-            view = self.ui.tbl_slist
-#            view.setSortingEnabled(True)
-            h = view.horizontalHeader()
-            h.setSectionResizeMode(QHeaderView.Interactive)  # user-resizable
-            h.setStretchLastSection(False)                   # no auto-stretch fighting you
-            view.resizeColumnsToContents()  
-            view.setSelectionBehavior(QAbstractItemView.SelectRows)
-            view.setSelectionMode(QAbstractItemView.SingleSelection)
-            view.verticalHeader().setVisible(True)
+            self._configure_slist_view()
             # update label to show slist file
             self.ui.lbl_slist.setText( '<internal>' )
 

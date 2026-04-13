@@ -29,7 +29,7 @@ import os, sys, threading
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 
-from PySide6.QtCore import QModelIndex, QObject, Signal, Qt, QSortFilterProxyModel, QEvent
+from PySide6.QtCore import QModelIndex, QObject, Signal, Qt, QSortFilterProxyModel, QEvent, QTimer
 from PySide6.QtGui import QAction, QStandardItemModel
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QDockWidget, QLabel, QFrame, QSizePolicy, QMessageBox, QLayout
@@ -56,10 +56,14 @@ from .components.spectrogram import SpecMixin
 from .components.actigraphy import ActigraphyMixin
 from .components.soappops import SoapPopsMixin
 from .components.tutorial import TutorialMixin
+from .components.save_edf import SaveEDFMixin
+from .components.drop_signals import DropSignalsMixin
+from .components.psd_overlay import PSDOverlayMixin
 from .components.cmaps import CMapsMixin
 from .components.results_io import ResultsIOMixin
 from .components.moonbeam_dock import MoonbeamMixin
 from .components.explorer_dock import ExplorerMixin
+from .components.annotator import AnnotatorMixin
 from .gui_help import apply_gui_help, set_render_button_help
 from .session_state import save_session_file, load_session_file, save_geometry_file, load_geometry_file
 from .runtime_paths import app_state_file
@@ -77,7 +81,9 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
                   AnalMixin , SignalsMixin,
                   SettingsMixin, CTreeMixin ,
                   SpecMixin , ActigraphyMixin, MasksMixin,
-                  MoonbeamMixin, ExplorerMixin, TutorialMixin ):
+                  MoonbeamMixin, ExplorerMixin, AnnotatorMixin, TutorialMixin,
+                  SaveEDFMixin, DropSignalsMixin,
+                  PSDOverlayMixin ):
 
     sig_results_changed = Signal()   # emitted whenever self.results is repopulated
     sig_proj_eval_stream = Signal(str)
@@ -119,6 +125,8 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         self._init_results_io()
         self._init_moonbeam()
         self._init_explorer()
+        self._init_annotator()
+        self._init_psd_overlay()
         
         # for the tables added above, ensure all are read-only
         for v in self.ui.findChildren(QTableView):
@@ -129,6 +137,8 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         act_build_slist = QAction("Build S-List", self)
         act_load_edf = QAction("Load EDF", self)
         act_load_annot = QAction("Load Annotations", self)
+        act_save_edf = QAction("Export EDF + Annotations…", self)
+        act_drop_signals = QAction("Drop channels / annotations…", self)
         act_refresh = QAction("Refresh", self)
         act_proj_eval = QAction("Evaluate (project)", self)
         act_save_session = QAction("Save Session...", self)
@@ -141,6 +151,8 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         act_build_slist.triggered.connect(self.open_folder)
         act_load_edf.triggered.connect(self.open_edf)
         act_load_annot.triggered.connect(self.open_annot)
+        act_save_edf.triggered.connect(self._save_edf_annots)
+        act_drop_signals.triggered.connect(self._drop_signals_annots)
         act_refresh.triggered.connect(self._refresh)
         act_proj_eval.triggered.connect(self._proj_eval)
         act_save_session.triggered.connect(self._save_session_state)
@@ -154,6 +166,8 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         self.ui.menuProject.addSeparator()
         self.ui.menuProject.addAction(act_load_edf)
         self.ui.menuProject.addAction(act_load_annot)
+        self.ui.menuProject.addAction(act_save_edf)
+        self.ui.menuProject.addAction(act_drop_signals)
         self.ui.menuProject.addSeparator()
         self.ui.menuProject.addAction(act_refresh)
         self.ui.menuProject.addSeparator()
@@ -287,14 +301,16 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         # short keyboard cuts
         add_dock_shortcuts( self.ui, self.ui.menuView, self._toggle_signals_only_or_default )
 
-        # size overall app window – cap to available screen space
+        # size overall app window – cap to available screen space.
+        # 1440 wide allows the banner's PSD panel to show at default on screens
+        # >= 1440 px logical width; it hides naturally on narrower displays.
         screen = QGuiApplication.primaryScreen()
         if screen is not None:
             avail = screen.availableGeometry()
-            win_w = min(1200, int(avail.width()  * 0.92))
-            win_h = min(800,  int(avail.height() * 0.92))
+            win_w = min(1440, int(avail.width()  * 0.92))
+            win_h = min(900,  int(avail.height() * 0.92))
         else:
-            win_w, win_h = 1200, 800
+            win_w, win_h = 1440, 900
         self.ui.resize(win_w, win_h)
 
         # arrange docks: hide some docks
@@ -363,8 +379,11 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         self._detach_actigraphy_dock_from_main_layout()
         self.ui.dock_explorer.hide()
         self.ui.dock_explorer.setFloating(True)
+        self.annotator.hide()
+        self.annotator.setFloating(True)
         self.ui.dock_spectrogram.widget().setMinimumHeight(240)
         self._capture_default_dock_layout()
+        QTimer.singleShot(0, self._set_initial_focus)
         
         # ------------------------------------------------------------
         # set up status bar
@@ -424,6 +443,18 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
 
         apply_gui_help(self.ui, self._help_actions)
         set_render_button_help(self.ui, rendered=False, current=False)
+
+    def _set_initial_focus(self):
+        target = getattr(self.ui, "pg1", None)
+        if target is None:
+            return
+        try:
+            target.setFocus(Qt.OtherFocusReason)
+        except Exception:
+            try:
+                target.setFocus()
+            except Exception:
+                pass
 
 
     # ------------------------------------------------------------
@@ -735,6 +766,17 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         self.ui.label_spacing.setEnabled( self.rendered )
         self.ui.label_scale.setEnabled( self.rendered )
         self.ui.radio_fixedscale.setEnabled( self.rendered )
+
+        # In non-render (epoch) mode the view is fixed at 30 s, so a larger
+        # jump window would just snap back.  Cap the spinbox and clamp value.
+        jump = self.ui.spin_jump_width
+        if self.rendered:
+            jump.setMaximum(3600.0)
+        else:
+            jump.setMaximum(30.0)
+            if jump.value() > 30.0:
+                jump.setValue(30.0)
+
         set_render_button_help(self.ui, rendered=self.rendered, current=self.current)
                         
         
@@ -890,14 +932,7 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
                     model = self.df_to_model(df)
                     self._proxy.setSourceModel(model)
                     self.ui.lbl_slist.setText("<internal>")
-                    view = self.ui.tbl_slist
-                    h = view.horizontalHeader()
-                    h.setSectionResizeMode(QHeaderView.Interactive)
-                    h.setStretchLastSection(False)
-                    view.resizeColumnsToContents()
-                    view.setSelectionBehavior(QAbstractItemView.SelectRows)
-                    view.setSelectionMode(QAbstractItemView.SingleSelection)
-                    view.verticalHeader().setVisible(True)
+                    self._configure_slist_view()
                     if model.rowCount() > 0:
                         row = max(0, min(selected_row, model.rowCount() - 1))
                         self.ui.tbl_slist.setCurrentIndex(model.index(row, 0))
@@ -936,6 +971,7 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
                 and not self.ui.dock_sig.isVisible()
                 and not self.ui.dock_annot.isVisible()
                 and not self.ui.dock_annots.isVisible()
+                and not self.annotator.isVisible()
             )
         except Exception:
             return False
@@ -957,6 +993,7 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         ):
             dock.hide()
         self.ui.dock_explorer.hide()
+        self.annotator.hide()
 
     def _restore_default_dock_layout(self):
         try:
@@ -989,6 +1026,7 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
             self.ui.dock_help,
         ):
             dock.hide()
+        self.annotator.hide()
 
         self.ui.dock_explorer.hide()
         self.ui.dock_explorer.setFloating(True)
