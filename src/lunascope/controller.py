@@ -419,7 +419,6 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         self.sb_progress = QProgressBar()
         self.sb_progress.setRange(0, 100)
         self.sb_progress.setValue(0)
-        self.sb_progress.hide()
 
         sb.addPermanentWidget(self.sb_id ,1)
         sb.addPermanentWidget(vsep(),0)
@@ -451,10 +450,6 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
 
         self.sb_mode.setMinimumWidth(120)
         self._update_mode_badge()
-
-        # wire toolbar Update button
-        self.ui.butt_update.clicked.connect(self._check_for_updates)
-        self.ui.butt_update.setToolTip("Check for updates")
 
         # background version check on startup
         self._updater_worker = _updater.start_background_check(

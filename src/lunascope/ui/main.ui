@@ -403,9 +403,6 @@
         <property name="spacing">
          <number>0</number>
         </property>
-        <property name="columnStretch">
-         <string>1,0,1,0,1,0</string>
-        </property>
         <item row="0" column="0">
          <widget class="QPushButton" name="butt_load_slist">
           <property name="text">
@@ -448,16 +445,6 @@
           </property>
           <property name="checked">
            <bool>true</bool>
-          </property>
-         </widget>
-        </item>
-        <item row="0" column="5">
-         <widget class="QPushButton" name="butt_update">
-          <property name="text">
-           <string>Update</string>
-          </property>
-          <property name="toolTip">
-           <string>Check for updates</string>
           </property>
          </widget>
         </item>
