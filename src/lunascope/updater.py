@@ -11,11 +11,15 @@ from PySide6.QtWidgets import (
 )
 
 _PYPI_URL = "https://pypi.org/pypi/lunascope/json"
+_GITHUB_RELEASES_URL = "https://api.github.com/repos/Lorcan7274/lunascope/releases/latest"
+_GITHUB_RELEASES_PAGE = "https://github.com/Lorcan7274/lunascope/releases/latest"
 _LOCAL_TEST_INDEX = None  # set to a local dir path for offline testing
+
+_IS_FROZEN = getattr(sys, "frozen", False)
 
 
 class _VersionCheckWorker(QThread):
-    """Fetches the latest PyPI version silently in the background."""
+    """Fetches the latest version silently in the background (PyPI for pip, GitHub for executable)."""
     update_available = Signal(str)  # emits latest version string if newer
 
     def __init__(self, current_version: str, parent=None):
@@ -24,7 +28,7 @@ class _VersionCheckWorker(QThread):
 
     def run(self):
         try:
-            latest = _fetch_latest_version()
+            latest = _fetch_latest_version_github() if _IS_FROZEN else _fetch_latest_version_pypi()
             is_newer = (
                 tuple(int(x) for x in latest.split("."))
                 > tuple(int(x) for x in self._current.split("."))
@@ -52,7 +56,7 @@ def _ssl_context():
         return ssl.create_default_context()
 
 
-def _fetch_latest_version() -> str:
+def _fetch_latest_version_pypi() -> str:
     """Return the latest lunascope version string from PyPI (or local test index), or raise."""
     if _LOCAL_TEST_INDEX:
         import glob, os, re
@@ -69,6 +73,18 @@ def _fetch_latest_version() -> str:
     with urllib.request.urlopen(req, timeout=10, context=_ssl_context()) as resp:
         data = json.loads(resp.read().decode())
     return data["info"]["version"]
+
+
+def _fetch_latest_version_github() -> str:
+    """Return the latest lunascope version string from GitHub Releases, or raise."""
+    req = urllib.request.Request(
+        _GITHUB_RELEASES_URL,
+        headers={"User-Agent": "lunascope-updater", "Accept": "application/vnd.github+json"},
+    )
+    with urllib.request.urlopen(req, timeout=10, context=_ssl_context()) as resp:
+        data = json.loads(resp.read().decode())
+    tag = data["tag_name"].lstrip("v")
+    return tag
 
 
 class _PipWorker(QThread):
@@ -171,15 +187,47 @@ class _UpdateDialog(QDialog):
         sys.exit(0)
 
 
+class _ExecUpdateDialog(QDialog):
+    """Shown when running as a frozen executable — directs user to GitHub Releases."""
+    def __init__(self, current: str, latest: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Update Lunascope")
+        self.setMinimumWidth(420)
+
+        layout = QVBoxLayout(self)
+
+        label = QLabel(
+            f"<b>v{latest}</b> is available &nbsp;(you have v{current}).<br><br>"
+            "Download the latest installer from the releases page."
+        )
+        label.setTextFormat(Qt.RichText)
+        label.setWordWrap(True)
+        layout.addWidget(label)
+
+        buttons = QDialogButtonBox()
+        download_btn = buttons.addButton("Open Download Page", QDialogButtonBox.AcceptRole)
+        later_btn = buttons.addButton("Later", QDialogButtonBox.RejectRole)
+        download_btn.clicked.connect(self._open_releases)
+        later_btn.clicked.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _open_releases(self):
+        import webbrowser
+        webbrowser.open(_GITHUB_RELEASES_PAGE)
+        self.accept()
+
+
 def check_and_prompt(current_version: str, parent=None) -> None:
-    """Fetch latest version from PyPI and show update dialog if one is available."""
+    """Fetch latest version and show the appropriate update dialog."""
+    fetch = _fetch_latest_version_github if _IS_FROZEN else _fetch_latest_version_pypi
+    source = "GitHub" if _IS_FROZEN else "PyPI"
     try:
-        latest = _fetch_latest_version()
+        latest = fetch()
     except urllib.error.URLError:
         QMessageBox.warning(
             parent,
             "Update Check Failed",
-            "Could not reach PyPI. Please check your internet connection.",
+            f"Could not reach {source}. Please check your internet connection.",
         )
         return
     except Exception as exc:
@@ -199,5 +247,8 @@ def check_and_prompt(current_version: str, parent=None) -> None:
         )
         return
 
-    dlg = _UpdateDialog(current_version, latest, parent)
+    if _IS_FROZEN:
+        dlg = _ExecUpdateDialog(current_version, latest, parent)
+    else:
+        dlg = _UpdateDialog(current_version, latest, parent)
     dlg.exec()
