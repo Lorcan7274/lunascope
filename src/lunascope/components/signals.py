@@ -729,7 +729,8 @@ class SignalsMixin:
                              click_span=_click_span,
                              min_span=_min_span,
                              step=_step, big_step=_big_step)
-        
+        self.sel.owner = self
+
         self.sel.rangeSelected.connect(self.on_window_range)  
         
 
@@ -925,23 +926,27 @@ class SignalsMixin:
         # --> do not touch the GUI here
         
         # segsrv options
-        throttle1_sr = 100 
+        throttle1_sr = 100
+        self._segsrv_input_throttle_sr = throttle1_sr
         self.ss.input_throttle( throttle1_sr )
         throttle2_np = 10000
         self.ss.throttle( throttle2_np )
 
         # special version that releases the GIL
         self.ss.segsrv.populate_lunascope( chs = self.ss_chs , anns = self.ss_anns )
-        self._apply_backend_filters()
+        self._apply_backend_filters( throttle1_sr )
         self.ss.set_annot_format6( False ) # pyqtgraph, not plotly
         self.ss.set_clip_xaxes( False )
 
         # any sig-mods?
         self._render_cmaps()
 
-    def _apply_backend_filters(self):
+    def _apply_backend_filters(self, input_throttle_sr=None):
         # Apply currently selected channel filters only after segsrv has
         # channel data loaded; applying earlier can leave stale empty buffers.
+        # input_throttle_sr: if segsrv decimated channels via input_throttle(),
+        # pass that SR here so filters are designed at the actual stored SR
+        # rather than the original header SR.
         self.ss.clear_filters()
         for ch_label, fcode in self.fmap.items():
             if fcode == "None" or ch_label not in self.ss_chs:
@@ -957,7 +962,8 @@ class SignalsMixin:
             if len(frqs) != 2:
                 continue
 
-            sr = float(self.srs[ch_label])
+            orig_sr = float(self.srs[ch_label])
+            sr = min(orig_sr, float(input_throttle_sr)) if input_throttle_sr else orig_sr
             if frqs[0] < frqs[1] and frqs[1] <= sr / 2:
                 order = 2
                 sos = butter(order, frqs, btype='band', fs=sr, output='sos')
@@ -1088,6 +1094,8 @@ class SignalsMixin:
 
         
     def on_window_range(self, lo: float, hi: float):
+        if not hasattr(self, "p"):
+            return
         if getattr(self, "_pg1_probe", None) is not None:
             self._pg1_probe.clear_pinned()
 
@@ -1100,6 +1108,8 @@ class SignalsMixin:
         t1 = ""
         t2 = ""        
         if self.rendered is True:
+            if getattr(self, "ss", None) is None:
+                return
             self.ss.window( lo  , hi )
             t1 = self.ss.get_window_left_hms()
             t2 = self.ss.get_window_right_hms()
@@ -1126,6 +1136,8 @@ class SignalsMixin:
                 if getattr(self, "sel", None) is not None:
                     self.sel.setRange(lo, hi, emit=False)
 
+            if getattr(self, "ssa", None) is None:
+                return
             self.ssa.window( lo  , hi )
             t1 = self.ssa.get_window_left_hms()
             t2 = self.ssa.get_window_right_hms()
@@ -1166,8 +1178,8 @@ class SignalsMixin:
         # initiate curves 
         self._initiate_curves()
 
-        # ready view
-        self.ssa.window(0,30)
+        # ready view — preserve current position (defaults 0,30 on first load)
+        self.ssa.window(self.last_x1, self.last_x2)
         self._update_scaling()
         self._update_pg1_simple()
         if hasattr(self, "_psd_overlay_on_new_data"):
@@ -1210,7 +1222,9 @@ class SignalsMixin:
         #
 
         pi = self.ui.pg1.getPlotItem()
-        pi.clear() 
+        pi.clear()
+        if hasattr(self, "_annot_queue_on_curves_reinit"):
+            self._annot_queue_on_curves_reinit()
 
         for curve in self.curves:
             pi.removeItem(curve)
@@ -1685,6 +1699,8 @@ class SignalsMixin:
         vb.update()
         if hasattr(self, "_psd_overlay_on_trace_redraw"):
             self._psd_overlay_on_trace_redraw()
+        if hasattr(self, "_annot_queue_overlay_on_trace_redraw"):
+            self._annot_queue_overlay_on_trace_redraw()
 
 
     def _durstr( self , x , y ):
@@ -1941,6 +1957,8 @@ class SignalsMixin:
         vb.update()
         if hasattr(self, "_psd_overlay_on_trace_redraw"):
             self._psd_overlay_on_trace_redraw()
+        if hasattr(self, "_annot_queue_overlay_on_trace_redraw"):
+            self._annot_queue_overlay_on_trace_redraw()
 
     def _init_pg1_probe_items(self):
         pi = self.ui.pg1.getPlotItem()
@@ -3084,6 +3102,35 @@ class MainTraceProbe(QtCore.QObject):
                     return False
             except RuntimeError:
                 return False
+
+            mods = ev.modifiers()
+            annot_mode = (hasattr(self.owner, "_annotator_mode_active") and
+                          self.owner._annotator_mode_active())
+
+            if annot_mode:
+                # Annotator mode: clicks on an annotation select it.
+                # Clicks on blank space fall through to normal probe activation
+                # so that A/S/P/Z probe keys still work.
+                if hasattr(self.owner, "_annot_hit_test"):
+                    hit = self.owner._annot_hit_test(ev.scenePos(), self.vb)
+                    if hit is not None:
+                        zoom = bool(mods & (QtCore.Qt.ControlModifier |
+                                            QtCore.Qt.ShiftModifier))
+                        self.owner._annot_select_in_dock5(*hit, zoom=zoom)
+                        return True
+                # no annotation hit — fall through to normal probe activation
+
+            # Normal mode ---------------------------------------------------
+            # ctrl+click: select annotation in Dock5 and zoom to it
+            # shift+click: same but leave the display window unchanged
+            if mods & (QtCore.Qt.ControlModifier | QtCore.Qt.ShiftModifier):
+                if hasattr(self.owner, "_annot_hit_test"):
+                    hit = self.owner._annot_hit_test(ev.scenePos(), self.vb)
+                    if hit is not None:
+                        zoom = bool(mods & QtCore.Qt.ControlModifier)
+                        self.owner._annot_select_in_dock5(*hit, zoom=zoom)
+                        return True
+
             try:
                 if self.plot is not None:
                     self.plot.setFocus()

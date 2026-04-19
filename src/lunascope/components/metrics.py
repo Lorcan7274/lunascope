@@ -250,7 +250,13 @@ class MetricsMixin:
         # ------------------------------------------------------------
         # EDF header metrics --> status bar
         
-        self.p.silent_proc( 'EPOCH' )
+        try:
+            self.p.silent_proc( 'EPOCH' )
+        except RuntimeError as e:
+            import sys
+            print(f"[lunascope] note: EPOCH command raised RuntimeError ({e}) — refreshing EDF", file=sys.stderr)
+            self._refresh()
+            return
         df_raw = self.p.table( 'EPOCH' )
         try:
             edf_ne_raw = int( df_raw.iloc[0, df_raw.columns.get_loc('NE')] )
@@ -464,16 +470,20 @@ class MetricsMixin:
                     frqs = self.fmap_frqs[val]
 
                 sr = float(sr)
+                # Use throttled SR when rendered: segsrv stores channels at
+                # min(orig_sr, input_throttle_sr) after populate_lunascope.
+                throttle_sr = getattr(self, '_segsrv_input_throttle_sr', None)
+                eff_sr = min(sr, float(throttle_sr)) if (can_update_backend and throttle_sr) else sr
                 valid_band = (
                     len(frqs) == 2 and
                     frqs[0] < frqs[1] and
                     frqs[0] >= 0 and
-                    frqs[1] <= sr / 2
+                    frqs[1] <= eff_sr / 2
                 )
                 if valid_band:
                     if can_update_backend:
                         order = 2
-                        sos = butter(order, frqs, btype='band', fs=sr, output='sos')
+                        sos = butter(order, frqs, btype='band', fs=eff_sr, output='sos')
                         self.ss.apply_filter(ch_label, sos.reshape(-1))
                 else:
                     self.fmap.pop(ch_label, None)
@@ -605,17 +615,20 @@ class MetricsMixin:
 
     def _rebuild_instances_table(self, anns):
 
-        # request w/ hms and duration also (True)
+        # request w/ hms=True; new API returns 9 cols:
+        # [class, label, hms, start_sec, dur, start_tp, stop_tp, inst_id, ch_str]
         rows = self.ssa.get_all_annots_with_inst_ids(anns, True)
-        df = pd.DataFrame(rows, columns=["class", "inst", "hms", "start", "dur"])
+        df = pd.DataFrame(rows, columns=[
+            "class", "label", "hms", "start", "dur",
+            "start_tp", "stop_tp", "inst_id", "ch_str",
+        ])
+        df["inst"] = df["inst_id"]
+        df["stop"] = (df["start"].astype(float) + df["dur"].astype(float)).round(3)
 
         # Fetch per-event metadata via lunapi's full annotation accessor.
         # Newer lunapi builds can preserve keys as "k=v;k2=v2" with
         # add_keys=True, which is much faster than running the ANNOTS command.
         # Build (class, start, stop) -> Meta from that result.
-        # Note: get_all_annots_with_inst_ids returns [class, channel, hms, start, dur]
-        # — the second field is the channel, not the instance ID — so we match on
-        # timing fields plus class instead of relying on instance/channel text.
         meta_lookup = {}
         try:
             full_annots = self.p.fetch_fulls_annots(anns, add_keys=True)
@@ -656,10 +669,49 @@ class MetricsMixin:
 
         def _get_meta(r):
             start = round(float(r["start"]), 3)
-            stop = round(float(r["start"]) + float(r["dur"]), 3)
+            stop  = round(float(r["stop"]),  3)
             return meta_lookup.get((str(r["class"]), start, stop), "")
 
         df["meta"] = df.apply(_get_meta, axis=1)
+
+        # store identity cols for the annotation editor (keyed by source row)
+        # use int(float(...)) for tp cols: pandas may read uint64 strings as float64
+        # (e.g. "22277570000000" → 22277570000000.0 → str gives "22277570000000.0")
+        self._events_identity = [
+            {
+                "aclass":    str(row["class"]),
+                "inst_id":   str(row["inst_id"]),
+                "start_tp":  str(int(float(row["start_tp"]))),
+                "stop_tp":   str(int(float(row["stop_tp"]))),
+                "ch_str":    str(row["ch_str"]),
+                "start_sec": str(round(float(row["start"]), 3)),
+                "stop_sec":  str(round(float(row["stop"]),  3)),
+                "meta":      str(row["meta"]),
+            }
+            for _, row in df.iterrows()
+        ]
+
+        # prefix class names for queued edits/deletes (visual indicator only;
+        # _events_identity above already holds the clean aclass for navigation)
+        queued_del = getattr(self, "_queued_deletes", set())
+        queued_edit = getattr(self, "_queued_edits", set())
+        if queued_del or queued_edit:
+            def _class_disp(row):
+                key = (
+                    str(row["class"]),
+                    str(int(float(row["start_tp"]))),
+                    str(int(float(row["stop_tp"]))),
+                    str(row["inst_id"]),
+                    str(row["ch_str"]),
+                )
+                if key in queued_del:
+                    return "(X) " + str(row["class"])
+                if key in queued_edit:
+                    return "(E) " + str(row["class"])
+                return str(row["class"])
+            df = df.copy()
+            df["class"] = df.apply(_class_disp, axis=1)
+
         df = df[["class", "hms", "start", "dur", "inst", "meta"]]
         self.events_model = self.df_to_model(df)
 
@@ -755,10 +807,17 @@ class MetricsMixin:
         left , right = expand_interval( left, right, fixed_width=fixed_w )
 
         # set range and this should(?) update the plot
-        self.sel.setRange( left , right )
+        if not getattr(self, "_annot_select_no_zoom", False):
+            self.sel.setRange( left , right )
 
-        # update plot
-        if self.rendered: self.on_window_range( left , right )
+            # update plot
+            if self.rendered: self.on_window_range( left , right )
+
+        # feed annotation editor form
+        identity_list = getattr(self, "_events_identity", None)
+        if identity_list is not None and src_row < len(identity_list):
+            if hasattr(self, "_annot_editor_from_instance"):
+                self._annot_editor_from_instance(identity_list[src_row])
         
 
 

@@ -1,5 +1,26 @@
 
 #  --------------------------------------------------------------------
+#
+#  This file is part of Luna.
+#
+#  LUNA is free software: you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation, either version 3 of the License, or
+#  (at your option) any later version.
+#
+#  Luna is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#  GNU General Public License for more details.
+#
+#  You should have received a copy of the GNU General Public License
+#  along with Luna. If not, see <http:#www.gnu.org/licenses/>.
+#
+#  Please see LICENSE.txt for more details.
+#
+#  --------------------------------------------------------------------
+
+#  --------------------------------------------------------------------
 #  Luna / Lunascope  —  Explorer: Waveform (peri-event traces) tab
 #  --------------------------------------------------------------------
 
@@ -24,12 +45,22 @@ from PySide6.QtWidgets import (
 
 from .explorer_base import BG, FG, GRID, _ExplorerTab
 
+TRACE_SUMMARY_THRESHOLD = 2000
+QUANTILE_SUBSAMPLE_LIMIT = 4000
+
+
+def _apply_transform(mat, transform_mode):
+    if transform_mode == "rectified":
+        return np.abs(mat)
+    return mat
+
 
 # ---------------------------------------------------------------------------
 # Pure computation (background thread)
 # ---------------------------------------------------------------------------
 
-def _extract_traces(p, ns, annot_class, channels, pre_secs, post_secs, align_to, baseline):
+def _extract_traces(p, ns, annot_class, channels, pre_secs, post_secs, align_to, baseline,
+                    transform_mode, summary_mode):
     """
     Extract peri-event signal windows.
 
@@ -41,7 +72,10 @@ def _extract_traces(p, ns, annot_class, channels, pre_secs, post_secs, align_to,
         n_events  – int
         sr        – {ch: float}
     """
-    STAGE_CLASSES_SKIP = {"N1", "N2", "N3", "R", "W", "L", "?"}
+    try:
+        hdr = p.headers()
+    except Exception:
+        hdr = None
 
     # ---- events --------------------------------------------------------
     try:
@@ -78,11 +112,9 @@ def _extract_traces(p, ns, annot_class, channels, pre_secs, post_secs, align_to,
 
     n_events = len(t_aligns)
 
-    # ---- common grid ---------------------------------------------------
-    t_grid = np.linspace(-float(pre_secs), float(post_secs), 400)
-
     traces_out: dict[str, list] = {ch: [] for ch in channels}
     sr_out: dict[str, float]    = {}
+    t_grid_out: dict[str, np.ndarray] = {}
 
     for ch in channels:
         # Fetch full-recording signal for this channel once
@@ -99,32 +131,85 @@ def _extract_traces(p, ns, annot_class, channels, pre_secs, post_secs, align_to,
 
         if len(t_all) < 2:
             continue
-        sr = len(t_all) / float(ns)
+        header_sr = np.nan
+        if hdr is not None and not hdr.empty and "CH" in hdr.columns and "SR" in hdr.columns:
+            row = hdr.loc[hdr["CH"] == ch]
+            if not row.empty:
+                try:
+                    header_sr = float(row["SR"].iloc[0])
+                except Exception:
+                    header_sr = np.nan
+        inferred_sr = (len(t_all) / float(ns)) if ns else np.nan
+        diffs = np.diff(t_all)
+        positive_diffs = diffs[diffs > 0]
+        sample_dt = float(np.median(positive_diffs)) if positive_diffs.size else np.nan
+        effective_sr = (1.0 / sample_dt) if np.isfinite(sample_dt) and sample_dt > 0 else np.nan
+        sr = effective_sr if np.isfinite(effective_sr) else (header_sr if np.isfinite(header_sr) else inferred_sr)
         sr_out[ch] = sr
 
-        for t_ref in t_aligns:
-            t0, t1 = t_ref - pre_secs, t_ref + post_secs
-            mask = (t_all >= t0) & (t_all <= t1)
-            if np.sum(mask) < 5:
+        if not np.isfinite(sr) or sr <= 0:
+            continue
+
+        n_pre = int(round(float(pre_secs) * sr))
+        n_post = int(round(float(post_secs) * sr))
+        offsets = np.arange(-n_pre, n_post + 1, dtype=np.int64)
+        expected_rel = offsets.astype(float) / float(sr)
+        t_grid_out[ch] = expected_rel
+
+        insert_idx = np.searchsorted(t_all, t_aligns, side="left")
+        center_idx = np.clip(insert_idx, 0, len(t_all) - 1)
+        between = (insert_idx > 0) & (insert_idx < len(t_all))
+        if np.any(between):
+            left_idx = insert_idx[between] - 1
+            right_idx = insert_idx[between]
+            choose_left = (
+                np.abs(t_aligns[between] - t_all[left_idx]) <=
+                np.abs(t_all[right_idx] - t_aligns[between])
+            )
+            center_idx[between] = np.where(choose_left, left_idx, right_idx)
+
+        in_bounds = (
+            (center_idx + offsets[0] >= 0) &
+            (center_idx + offsets[-1] < len(t_all))
+        )
+        valid_centers = center_idx[in_bounds]
+
+        kept_chunks = []
+        dropped_gap = 0
+        gap_tol = max(1e-6, abs(sample_dt) * 0.25) if np.isfinite(sample_dt) else 1e-6
+        chunk_size = 2048
+        for start in range(0, len(valid_centers), chunk_size):
+            centers_chunk = valid_centers[start:start + chunk_size]
+            idx_mat = centers_chunk[:, None] + offsets[None, :]
+            segs = np.asarray(v_all[idx_mat], dtype=float)
+            rel = np.asarray(t_all[idx_mat] - t_all[centers_chunk][:, None], dtype=float)
+            uniform = np.all(np.abs(rel - expected_rel[None, :]) <= gap_tol, axis=1)
+            if not np.any(uniform):
+                dropped_gap += int(len(centers_chunk))
                 continue
-            t_seg = t_all[mask] - t_ref
-            v_seg = v_all[mask]
+            segs = segs[uniform]
+            dropped_gap += int(np.count_nonzero(~uniform))
+            if baseline and n_pre > 0 and segs.size:
+                segs = segs - segs[:, :n_pre].mean(axis=1, keepdims=True)
+            segs = _apply_transform(segs, transform_mode)
+            kept_chunks.append(segs)
 
-            # baseline subtract (mean of pre-event window)
-            if baseline and pre_secs > 0:
-                pre_mask = t_seg < 0
-                if np.any(pre_mask):
-                    v_seg = v_seg - float(np.mean(v_seg[pre_mask]))
-
-            # interpolate onto common grid
-            v_interp = np.interp(t_grid, t_seg, v_seg,
-                                 left=np.nan, right=np.nan)
-            traces_out[ch].append(v_interp)
+        if kept_chunks:
+            mat = np.vstack(kept_chunks)
+            traces_out[ch] = [row for row in mat]
 
     # ---- summary stats -------------------------------------------------
     mean_out  = {}
     ci_lo_out = {}
     ci_hi_out = {}
+    std_out = {}
+    var_out = {}
+    median_out = {}
+    q05_out = {}
+    q25_out = {}
+    q75_out = {}
+    q95_out = {}
+    quantile_n_out = {}
 
     for ch in channels:
         segs = traces_out[ch]
@@ -148,17 +233,46 @@ def _extract_traces(p, ns, annot_class, channels, pre_secs, post_secs, align_to,
             var = np.full(mat.shape[1], np.nan, dtype=float)
             var[multi_cols] = ss[multi_cols] / (counts[multi_cols] - 1)
             se[multi_cols] = np.sqrt(var[multi_cols] / counts[multi_cols])
+        else:
+            var = np.full(mat.shape[1], np.nan, dtype=float)
 
         mean_out[ch]  = m
+        std = np.sqrt(var)
+        std_out[ch] = std
+        var_out[ch] = var
         ci_lo_out[ch] = m - 1.96 * se
         ci_hi_out[ch] = m + 1.96 * se
+        if summary_mode == "mean_quantiles":
+            if mat.shape[0] > QUANTILE_SUBSAMPLE_LIMIT:
+                idx = np.linspace(0, mat.shape[0] - 1, QUANTILE_SUBSAMPLE_LIMIT, dtype=int)
+                qmat = mat[idx]
+            else:
+                qmat = mat
+            quantile_n_out[ch] = int(qmat.shape[0])
+            median_out[ch] = np.nanmedian(qmat, axis=0)
+            q05_out[ch] = np.nanpercentile(qmat, 5, axis=0)
+            q25_out[ch] = np.nanpercentile(qmat, 25, axis=0)
+            q75_out[ch] = np.nanpercentile(qmat, 75, axis=0)
+            q95_out[ch] = np.nanpercentile(qmat, 95, axis=0)
+        else:
+            quantile_n_out[ch] = int(mat.shape[0])
 
     return {
         "traces":   traces_out,
-        "t_grid":   t_grid,
+        "t_grid":   t_grid_out,
         "mean":     mean_out,
         "ci_lo":    ci_lo_out,
         "ci_hi":    ci_hi_out,
+        "std":      std_out,
+        "var":      var_out,
+        "median":   median_out,
+        "q05":      q05_out,
+        "q25":      q25_out,
+        "q75":      q75_out,
+        "q95":      q95_out,
+        "quantile_n": quantile_n_out,
+        "transform_mode": transform_mode,
+        "summary_mode": summary_mode,
         "n_events": n_events,
         "sr":       sr_out,
         "annot_class": annot_class,
@@ -206,11 +320,19 @@ class WaveformTab(_ExplorerTab):
         # Multi-select channel combo (reuse soappops widget)
         from .soappops import MultiSelectComboBox
         combo_ch = MultiSelectComboBox()
-        combo_ch.setMinimumWidth(220)
+        combo_ch.setMinimumWidth(140)
+        combo_ch.setMaximumWidth(260)
+        combo_ch.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         combo_ch.setToolTip("EDF channels to extract (select multiple)")
 
-        rl1.addWidget(QLabel("Annotation:")); rl1.addWidget(combo_ann)
-        rl1.addWidget(QLabel("Channels:")); rl1.addWidget(combo_ch, 1)
+        lab_ann = QLabel("Annotation:")
+        lab_ch = QLabel("Channels:")
+        rl1.addWidget(lab_ann)
+        rl1.addWidget(combo_ann)
+        rl1.addSpacing(10)
+        rl1.addWidget(lab_ch)
+        rl1.addWidget(combo_ch)
+        rl1.addStretch(1)
         rl1.addWidget(btn_refresh)
 
         # row 2: window / alignment / baseline / render
@@ -234,12 +356,26 @@ class WaveformTab(_ExplorerTab):
         chk_baseline.setToolTip("Subtract mean of pre-event window from each trace")
         chk_baseline.setChecked(True)
 
+        combo_transform = QComboBox(); combo_transform.setFixedWidth(105)
+        combo_transform.addItem("Raw", "raw")
+        combo_transform.addItem("Rectified", "rectified")
+        combo_transform.setToolTip("Apply a simple per-sample transform before summarizing")
+
+        combo_summary = QComboBox(); combo_summary.setFixedWidth(125)
+        combo_summary.addItem("Mean ± CI", "mean_ci")
+        combo_summary.addItem("Mean ± SD", "mean_sd")
+        combo_summary.addItem("Quantiles", "mean_quantiles")
+        combo_summary.addItem("Variance", "variance")
+        combo_summary.setToolTip("Summary statistic to plot across event-locked traces")
+
         btn_render = QPushButton("Render"); btn_render.setFixedWidth(80)
         btn_render.setToolTip("Extract signal windows and draw traces")
 
         rl2.addWidget(QLabel("Pre:")); rl2.addWidget(spin_pre)
         rl2.addWidget(QLabel("Post:")); rl2.addWidget(spin_post)
         rl2.addWidget(QLabel("Align:")); rl2.addWidget(combo_align)
+        rl2.addWidget(QLabel("Value:")); rl2.addWidget(combo_transform)
+        rl2.addWidget(QLabel("Show:")); rl2.addWidget(combo_summary)
         rl2.addWidget(chk_baseline)
         rl2.addStretch(1); rl2.addWidget(btn_render)
 
@@ -312,6 +448,8 @@ class WaveformTab(_ExplorerTab):
         self._spin_pre    = spin_pre
         self._spin_post   = spin_post
         self._combo_align = combo_align
+        self._combo_transform = combo_transform
+        self._combo_summary = combo_summary
         self._chk_base    = chk_baseline
         self._chk_auto_ymin = chk_auto_ymin
         self._chk_auto_ymax = chk_auto_ymax
@@ -437,11 +575,14 @@ class WaveformTab(_ExplorerTab):
         post     = float(self._spin_post.value())
         align_to = self._combo_align.currentData()
         baseline = self._chk_base.isChecked()
+        transform_mode = self._combo_transform.currentData()
+        summary_mode = self._combo_summary.currentData()
         ns       = float(getattr(self.ctrl, "ns", 0.0))
         self._pending_units = self._get_channel_units(chs)
 
         fut = self.ctrl._exec.submit(
-            _extract_traces, p, ns, ann, chs, pre, post, align_to, baseline)
+            _extract_traces, p, ns, ann, chs, pre, post, align_to, baseline,
+            transform_mode, summary_mode)
         def _done(_f=fut):
             try:
                 self._sig_ok.emit(_f.result())
@@ -496,6 +637,15 @@ class WaveformTab(_ExplorerTab):
         mean_d    = result["mean"]
         ci_lo     = result["ci_lo"]
         ci_hi     = result["ci_hi"]
+        std_d     = result.get("std", {})
+        var_d     = result.get("var", {})
+        median_d  = result.get("median", {})
+        q05_d     = result.get("q05", {})
+        q25_d     = result.get("q25", {})
+        q75_d     = result.get("q75", {})
+        q95_d     = result.get("q95", {})
+        transform_mode = result.get("transform_mode", "raw")
+        summary_mode = result.get("summary_mode", "mean_ci")
         n_ev      = result["n_events"]
         ann_cls   = result["annot_class"]
         units     = result.get("units", {})
@@ -515,7 +665,16 @@ class WaveformTab(_ExplorerTab):
         axes = fig.subplots(n, 1, squeeze=False)
         fig.subplots_adjust(hspace=0.4, left=0.10, right=0.97,
                             top=0.90, bottom=0.10)
-        fig.suptitle(f"Peri-event waveform  |  '{ann_cls}'  ({n_ev} events)",
+        title_bits = [f"'{ann_cls}'", f"({n_ev} events)"]
+        if transform_mode == "rectified":
+            title_bits.append("rectified")
+        if summary_mode == "variance":
+            title_bits.append("variance")
+        elif summary_mode == "mean_sd":
+            title_bits.append("mean ± SD")
+        elif summary_mode == "mean_quantiles":
+            title_bits.append("quantiles")
+        fig.suptitle(f"Peri-event waveform  |  {'  '.join(title_bits)}",
                      color=FG, fontsize=10, y=0.97)
         y_min, y_max, _ = self._get_y_limits()
 
@@ -523,28 +682,61 @@ class WaveformTab(_ExplorerTab):
                   "#ffd166", "#f72585", "#90be6d", "#ff6b6b"]
 
         for ch_idx, ch in enumerate(chs_with_data):
+            ch_t_grid = t_grid.get(ch) if isinstance(t_grid, dict) else t_grid
+            if ch_t_grid is None or len(ch_t_grid) == 0:
+                continue
             ax  = axes[ch_idx][0]
             col = colors[ch_idx % len(colors)]
             ax.set_facecolor(BG)
+            n_traces = len(traces.get(ch, []))
+            summary_only = n_traces > TRACE_SUMMARY_THRESHOLD or summary_mode == "variance"
 
-            # Individual traces (very transparent)
-            for seg in traces.get(ch, []):
-                ax.plot(t_grid, seg, color=col, linewidth=0.4, alpha=0.15)
+            if not summary_only:
+                # Individual traces (very transparent)
+                for seg in traces.get(ch, []):
+                    ax.plot(ch_t_grid, seg, color=col, linewidth=0.4, alpha=0.15)
 
-            # Mean ± CI
-            m   = mean_d[ch]
-            lo  = ci_lo[ch]
-            hi  = ci_hi[ch]
-            ax.fill_between(t_grid, lo, hi, color=col, alpha=0.25)
-            ax.plot(t_grid, m, color=col, linewidth=1.8)
+            if summary_mode == "variance":
+                v = var_d.get(ch)
+                if v is not None:
+                    ax.plot(ch_t_grid, v, color=col, linewidth=2.0, alpha=0.95)
+            elif summary_mode == "mean_quantiles":
+                q05 = q05_d.get(ch)
+                q25 = q25_d.get(ch)
+                q75 = q75_d.get(ch)
+                q95 = q95_d.get(ch)
+                med = median_d.get(ch)
+                if q05 is not None and q95 is not None:
+                    ax.fill_between(ch_t_grid, q05, q95, color=col, alpha=0.12, linewidth=0)
+                if q25 is not None and q75 is not None:
+                    ax.fill_between(ch_t_grid, q25, q75, color=col, alpha=0.24, linewidth=0)
+                if med is not None:
+                    ax.plot(ch_t_grid, med, color=col, linewidth=2.0, alpha=0.95)
+                if summary_only and ch in mean_d:
+                    ax.plot(ch_t_grid, mean_d[ch], color="#ffffff", linewidth=0.8, alpha=0.65)
+            elif summary_mode == "mean_sd":
+                m = mean_d[ch]
+                sd = std_d.get(ch)
+                if sd is not None:
+                    ax.fill_between(ch_t_grid, m - sd, m + sd, color=col, alpha=0.22)
+                ax.plot(ch_t_grid, m, color=col, linewidth=1.8)
+            else:
+                m = mean_d[ch]
+                lo = ci_lo[ch]
+                hi = ci_hi[ch]
+                ax.fill_between(ch_t_grid, lo, hi, color=col, alpha=0.25)
+                ax.plot(ch_t_grid, m, color=col, linewidth=1.8)
 
             # Event-onset line
             ax.axvline(0, color="#ffffff", lw=0.7, ls="--", alpha=0.55)
             ax.axhline(0, color=GRID, lw=0.4, alpha=0.7)
-            if t_grid.size >= 2:
-                ax.set_xlim(float(t_grid[0]), float(t_grid[-1]))
+            if len(ch_t_grid) >= 2:
+                ax.set_xlim(float(ch_t_grid[0]), float(ch_t_grid[-1]))
 
-            self._style_ax(ax, title=ch, ylabel=units.get(ch, ""))
+            ylabel = units.get(ch, "")
+            if summary_mode == "variance" and ylabel:
+                ylabel = f"{ylabel}^2"
+            self._style_ax(ax, title=ch, ylabel=ylabel)
             if y_min is not None or y_max is not None:
                 ax.set_ylim(bottom=y_min, top=y_max)
             if ch_idx < n - 1:

@@ -406,7 +406,7 @@
         <item row="0" column="0">
          <widget class="QPushButton" name="butt_load_slist">
           <property name="text">
-           <string>Load</string>
+           <string>Load SL</string>
           </property>
          </widget>
         </item>
@@ -427,7 +427,7 @@
         <item row="1" column="0">
          <widget class="QPushButton" name="butt_build_slist">
           <property name="text">
-           <string>Build</string>
+           <string>Build SL</string>
           </property>
          </widget>
         </item>
@@ -2152,7 +2152,7 @@
            <property name="frameShadow">
             <enum>QFrame::Shadow::Raised</enum>
            </property>
-           <layout class="QGridLayout" name="gridLayout_6" columnstretch="0,0,0,0,0">
+           <layout class="QGridLayout" name="gridLayout_6" columnstretch="0,1,0,0,0">
             <property name="leftMargin">
              <number>0</number>
             </property>
@@ -2180,6 +2180,12 @@
             </item>
             <item row="1" column="0">
              <widget class="QComboBox" name="combo_pops">
+              <property name="minimumSize">
+               <size>
+                <width>180</width>
+                <height>0</height>
+               </size>
+              </property>
               <property name="currentText">
                <string/>
               </property>
@@ -2190,6 +2196,12 @@
             </item>
             <item row="1" column="1">
              <widget class="QLineEdit" name="txt_pops_path">
+              <property name="minimumSize">
+               <size>
+                <width>360</width>
+                <height>0</height>
+               </size>
+              </property>
               <property name="text">
                <string>~/dropbox/pops/</string>
               </property>
@@ -2197,6 +2209,12 @@
             </item>
             <item row="1" column="2">
              <widget class="QLineEdit" name="txt_pops_model">
+              <property name="maximumSize">
+               <size>
+                <width>160</width>
+                <height>16777215</height>
+               </size>
+              </property>
               <property name="text">
                <string>s2</string>
               </property>

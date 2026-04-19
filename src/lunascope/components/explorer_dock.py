@@ -1,5 +1,26 @@
 
 #  --------------------------------------------------------------------
+#
+#  This file is part of Luna.
+#
+#  LUNA is free software: you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation, either version 3 of the License, or
+#  (at your option) any later version.
+#
+#  Luna is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#  GNU General Public License for more details.
+#
+#  You should have received a copy of the GNU General Public License
+#  along with Luna. If not, see <http:#www.gnu.org/licenses/>.
+#
+#  Please see LICENSE.txt for more details.
+#
+#  --------------------------------------------------------------------
+
+#  --------------------------------------------------------------------
 #  Luna / Lunascope  —  Explorer dock (outer shell)
 #  --------------------------------------------------------------------
 
@@ -32,6 +53,7 @@ class ExplorerMixin:
         from .explorer_annot      import AnnotTab
         from .explorer_hypnoscope import HypnoscopeTab
         from .explorer_waveform   import WaveformTab
+        from .explorer_event_decomp import EventDecompTab
         from .explorer_plotter    import PlotterTab
 
         # ---- dock shell -----------------------------------------------
@@ -57,6 +79,7 @@ class ExplorerMixin:
         self._tab_annot  = AnnotTab(self)
         self._tab_hscope = HypnoscopeTab(self)
         self._tab_wave   = WaveformTab(self)
+        self._tab_event_decomp = EventDecompTab(self)
         self._tab_plot   = PlotterTab(self)
 
         tabs.addTab(self._tab_annot.widget(),  "Annotations")

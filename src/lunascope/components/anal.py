@@ -20,7 +20,7 @@
 #
 #  --------------------------------------------------------------------
 
-import sys, traceback, os, threading, time
+import sys, traceback, threading
 import pandas as pd
 from typing import List, Tuple
 
@@ -47,36 +47,6 @@ def _diag_log(message: str) -> None:
     sys.stderr.write(f"[lunascope] {message}\n")
     sys.stderr.flush()
 
-
-# ---------------------------------------------------------------------------
-# TEMPORARY VERBOSE INSTRUMENTATION — remove when no longer needed
-# ---------------------------------------------------------------------------
-try:
-    import psutil as _psutil
-    _PSUTIL = True
-except ImportError:
-    _PSUTIL = False
-
-def _vlog(tag: str, extra: str = "") -> None:
-    """Timestamped diagnostic log with thread ID and optional memory snapshot."""
-    ts = time.strftime("%H:%M:%S") + f".{int(time.time() * 1000) % 1000:03d}"
-    tid = threading.get_ident()
-    if _PSUTIL:
-        try:
-            proc = _psutil.Process(os.getpid())
-            mem_mb = proc.memory_info().rss / 1_048_576
-            mem_str = f"  mem={mem_mb:.1f}MB"
-        except Exception:
-            mem_str = ""
-    else:
-        mem_str = ""
-    line = f"[VERBOSE {ts}] tid={tid}  {tag}"
-    if extra:
-        line += f"  | {extra}"
-    line += mem_str
-    sys.stderr.write(line + "\n")
-    sys.stderr.flush()
-# ---------------------------------------------------------------------------
 
 
 def _append_selected_extension(filename: str, selected_filter: str, allowed_exts: tuple[str, ...]) -> str:
@@ -218,178 +188,78 @@ class AnalMixin:
         self.sb_progress.setFormat("Running…")
         self.lock_ui()
 
-        # TEMPORARY INSTRUMENTATION
-        _vlog("submit: eval_lunascope", f"cmd={cmd!r:.120}")
-        _t_submit = time.monotonic()
-
         fut = self._exec.submit(self.p.eval_lunascope, cmd)  # returns str
 
-        def done(_f=fut, _t0=_t_submit):
-            # TEMPORARY: this callback runs on the thread-pool thread
-            _vlog("done-callback: entered")
+        def done(_f=fut):
             try:
                 exc = _f.exception()
                 if exc is None:
-                    result = _f.result()  # cheap; already completed
-                    _vlog("done-callback: eval OK",
-                          f"elapsed={time.monotonic()-_t0:.3f}s  result_len={len(result) if result else 0}")
-                    self._last_result = result
-                    _vlog("done-callback: invoking _eval_done_ok on GUI thread")
+                    self._last_result = _f.result()  # cheap; already completed
                     QMetaObject.invokeMethod(self, "_eval_done_ok", Qt.QueuedConnection)
                 else:
-                    _vlog("done-callback: eval raised exception",
-                          f"elapsed={time.monotonic()-_t0:.3f}s  exc={type(exc).__name__}: {exc}")
                     self._last_exc = exc
                     self._last_tb = f"{type(exc).__name__}: {exc}"
                     QMetaObject.invokeMethod(self, "_eval_done_err", Qt.QueuedConnection)
             except Exception as cb_exc:
-                # guard against exceptions in the callback itself
-                _vlog("done-callback: EXCEPTION IN CALLBACK", traceback.format_exc().strip())
                 self._last_exc = cb_exc
                 self._last_tb = f"{type(cb_exc).__name__}: {cb_exc}"
                 QMetaObject.invokeMethod(self, "_eval_done_err", Qt.QueuedConnection)
-            _vlog("done-callback: exiting")
 
         fut.add_done_callback(done)
 
 
     @Slot()
     def _eval_done_ok(self):
-        # TEMPORARY INSTRUMENTATION
-        _vlog("_eval_done_ok: entered (GUI thread)")
-        _t0 = time.monotonic()
         try:
             # --- step 1: write result text to console widget ---
-            _vlog("_eval_done_ok: step 1 — writing output to console",
-                  f"project_mode={getattr(self,'project_mode',False)}")
-            try:
-                if self.project_mode:
-                    out = self.ui.txt_out
-                    out.moveCursor(QTextCursor.End)
-                    out.insertPlainText(self._last_result)
-                else:
-                    self.ui.txt_out.setPlainText(self._last_result)
-                _vlog("_eval_done_ok: step 1 OK")
-            except Exception:
-                _vlog("_eval_done_ok: step 1 FAILED", traceback.format_exc().strip())
-                raise
+            if self.project_mode:
+                out = self.ui.txt_out
+                out.moveCursor(QTextCursor.End)
+                out.insertPlainText(self._last_result)
+            else:
+                self.ui.txt_out.setPlainText(self._last_result)
 
             # --- step 2: fetch strata from luna ---
-            _vlog("_eval_done_ok: step 2 — p.strata()")
-            try:
-                tbls = self.p.strata()
-                _vlog("_eval_done_ok: step 2 OK",
-                      f"strata shape={tbls.shape if hasattr(tbls,'shape') else type(tbls)}  "
-                      f"commands={tbls['Command'].tolist() if hasattr(tbls,'columns') and 'Command' in tbls.columns else '?'}")
-            except Exception:
-                _vlog("_eval_done_ok: step 2 FAILED", traceback.format_exc().strip())
-                raise
+            tbls = self.p.strata()
 
             if self.project_mode:
-                # --- step 3a: project-mode accumulation ---
-                _vlog("_eval_done_ok: step 3a — _accumulate_project_results")
-                try:
-                    self._accumulate_project_results(tbls)
-                    _vlog("_eval_done_ok: step 3a OK")
-                except Exception:
-                    _vlog("_eval_done_ok: step 3a FAILED", traceback.format_exc().strip())
-                    raise
+                self._accumulate_project_results(tbls)
             else:
-                # --- step 3b: render result tables ---
-                _vlog("_eval_done_ok: step 3b — _render_tables")
-                try:
-                    self._render_tables(tbls)
-                    _vlog("_eval_done_ok: step 3b OK")
-                except Exception:
-                    _vlog("_eval_done_ok: step 3b FAILED", traceback.format_exc().strip())
-                    raise
+                self._render_tables(tbls)
 
-                # --- step 4: full hypnogram redraw ---
                 if hasattr(self, "_render_hypnogram"):
-                    _vlog("_eval_done_ok: step 4 — _render_hypnogram")
-                    try:
-                        self._render_hypnogram()
-                        _vlog("_eval_done_ok: step 4 OK")
-                    except Exception:
-                        _vlog("_eval_done_ok: step 4 FAILED", traceback.format_exc().strip())
-                        raise
+                    self._render_hypnogram()
 
-                # --- step 5: hypnogram mask/epoch overlay update ---
                 if hasattr(self, "_update_hypnogram"):
-                    _vlog("_eval_done_ok: step 5 — _update_hypnogram")
-                    try:
-                        self._update_hypnogram()
-                        _vlog("_eval_done_ok: step 5 OK")
-                    except Exception:
-                        _vlog("_eval_done_ok: step 5 FAILED", traceback.format_exc().strip())
-                        raise
-
-            _vlog("_eval_done_ok: all steps completed",
-                  f"total elapsed={time.monotonic()-_t0:.3f}s")
+                    self._update_hypnogram()
 
         except Exception:
             self._last_tb = traceback.format_exc().strip()
             _diag_log("_eval_done_ok: unhandled exception\n" + self._last_tb)
-            _vlog("_eval_done_ok: unhandled exception", self._last_tb)
             try:
                 QMessageBox.critical(self.ui, "Evaluation error", self._last_tb)
             except Exception:
                 pass
 
         finally:
-            # --- step 6: UI unlock / cleanup ---
-            _vlog("_eval_done_ok: step 6 — unlock_ui")
-            try:
-                self.unlock_ui()
-                _vlog("_eval_done_ok: unlock_ui OK")
-            except Exception:
-                _vlog("_eval_done_ok: unlock_ui FAILED", traceback.format_exc().strip())
-
-            _vlog("_eval_done_ok: step 6b — _busy=False, _buttons(True)")
-            try:
-                self._busy = False
-                self._buttons(True)
-                _vlog("_eval_done_ok: step 6b OK")
-            except Exception:
-                _vlog("_eval_done_ok: step 6b FAILED", traceback.format_exc().strip())
-
-            _vlog("_eval_done_ok: step 6c — _set_render_status")
-            try:
-                self._set_render_status(self.rendered, False)
-                _vlog("_eval_done_ok: step 6c OK")
-            except Exception:
-                _vlog("_eval_done_ok: step 6c FAILED", traceback.format_exc().strip())
-
-            _vlog("_eval_done_ok: step 6d — progress bar hide")
-            try:
-                self.sb_progress.setRange(0, 100)
-                self.sb_progress.setValue(0)
-                self.sb_progress.setVisible(False)
-                _vlog("_eval_done_ok: step 6d OK")
-            except Exception:
-                _vlog("_eval_done_ok: step 6d FAILED", traceback.format_exc().strip())
+            self.unlock_ui()
+            self._busy = False
+            self._buttons(True)
+            self._set_render_status(self.rendered, False)
+            self.sb_progress.setRange(0, 100)
+            self.sb_progress.setValue(0)
+            self.sb_progress.setVisible(False)
 
             if getattr(self, 'project_mode', False) and getattr(self, '_proj_n', 0) > 0:
-                _vlog("_eval_done_ok: step 6e — _proj_eval_next")
-                try:
-                    self._proj_i += 1
-                    self._proj_eval_next()
-                    _vlog("_eval_done_ok: step 6e OK")
-                except Exception:
-                    _vlog("_eval_done_ok: step 6e FAILED", traceback.format_exc().strip())
-
-            _vlog("_eval_done_ok: finally block complete")
+                self._proj_i += 1
+                self._proj_eval_next()
             
     @Slot()
     def _eval_done_err(self):
-        # TEMPORARY INSTRUMENTATION
-        _vlog("_eval_done_err: entered (GUI thread)",
-              f"last_tb={getattr(self,'_last_tb','<none>')[:200]}")
         try:
             from PySide6.QtWidgets import QMessageBox
             QMessageBox.critical(self.ui, "Evaluation error", self._last_tb)
         finally:
-            _vlog("_eval_done_err: cleanup")
             self.unlock_ui()
             self._busy = False
             self._buttons(True)
@@ -402,7 +272,6 @@ class AnalMixin:
             if getattr(self, 'project_mode', False):
                 self.project_mode = False
                 self._proj_n = 0
-            _vlog("_eval_done_err: cleanup complete")
 
     def _buttons( self, status ):
         stage_tools_enabled = status and not getattr(self, 'multiday_mode', False)

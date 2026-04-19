@@ -1,3 +1,24 @@
+#  --------------------------------------------------------------------
+#
+#  This file is part of Luna.
+#
+#  LUNA is free software: you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation, either version 3 of the License, or
+#  (at your option) any later version.
+#
+#  Luna is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#  GNU General Public License for more details.
+#
+#  You should have received a copy of the GNU General Public License
+#  along with Luna. If not, see <http:#www.gnu.org/licenses/>.
+#
+#  Please see LICENSE.txt for more details.
+#
+#  --------------------------------------------------------------------
+
 import sys
 from pathlib import Path
 import os
@@ -57,27 +78,6 @@ def _configure_runtime_cache_dirs() -> None:
 
 
 _configure_runtime_cache_dirs()
-
-#  --------------------------------------------------------------------
-#
-#  This file is part of Luna.
-#
-#  LUNA is free software: you can redistribute it and/or modify
-#  it under the terms of the GNU General Public License as published by
-#  the Free Software Foundation, either version 3 of the License, or
-#  (at your option) any later version.
-#
-#  Luna is distributed in the hope that it will be useful,
-#  but WITHOUT ANY WARRANTY; without even the implied warranty of
-#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-#  GNU General Public License for more details.
-#
-#  You should have received a copy of the GNU General Public License
-#  along with Luna. If not, see <http:#www.gnu.org/licenses/>.
-#
-#  Please see LICENSE.txt for more details.
-#
-#  --------------------------------------------------------------------
 
 import argparse
 
@@ -378,7 +378,15 @@ def _install_diagnostics(app: QApplication, ui=None) -> None:
 
     def _log_exception(kind: str, exc_type, exc_value, exc_tb) -> None:
         text = "".join(traceback.format_exception(exc_type, exc_value, exc_tb)).strip()
-        _append_diagnostics_log(f"{kind}:\n{text}")
+        # Full traceback → diagnostics log file only
+        try:
+            with _diagnostics_log_path().open("a", encoding="utf-8") as fh:
+                fh.write(f"[lunascope] {kind}:\n{text}\n")
+        except OSError:
+            pass
+        # Console: one-line summary
+        sys.stderr.write(f"[lunascope] {kind}: {exc_type.__name__}: {exc_value}\n")
+        sys.stderr.flush()
 
     def _sys_excepthook(exc_type, exc_value, exc_tb):
         _log_exception("Unhandled exception", exc_type, exc_value, exc_tb)

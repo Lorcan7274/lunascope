@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (
     QTextBrowser,
     QStyle,
 )
-from PySide6.QtCore import QMetaObject, Qt, QTimer, Slot
+from PySide6.QtCore import QEvent, QMetaObject, Qt, QTimer, Slot
 from PySide6.QtGui import QStandardItemModel, QStandardItem
 import html
 import json
@@ -60,22 +60,59 @@ class MultiSelectComboBox(QComboBox):
         self.setEditable(True)
         self.lineEdit().setReadOnly(True)
         self.lineEdit().setPlaceholderText("Select one or more channels")
-        self.view().pressed.connect(self._on_item_pressed)
-        self._skip_hide_once = False
+        self.view().viewport().installEventFilter(self)
+        self._clicking_item = False  # True during the full event cycle of an item click
+        self._popup_visible = False
 
-    def _on_item_pressed(self, index):
-        item = self.model().itemFromIndex(index)
-        if item is None:
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            if self._popup_visible:
+                self._force_close()
+            else:
+                self.showPopup()
+            event.accept()
             return
-        item.setCheckState(Qt.Unchecked if item.checkState() == Qt.Checked else Qt.Checked)
-        self._skip_hide_once = True
-        # Defer refresh so it wins over combo internals updating current index text.
-        QTimer.singleShot(0, self._refresh_text)
+        super().mousePressEvent(event)
+
+    def showPopup(self):
+        self._popup_visible = True
+        super().showPopup()
+
+    def _force_close(self):
+        self._popup_visible = False
+        super().hidePopup()
+        self._refresh_text()
+
+    def eventFilter(self, obj, event):
+        viewport = self.view().viewport()
+        if obj is viewport and event.type() == QEvent.MouseButtonPress:
+            index = self.view().indexAt(event.pos())
+            if index.isValid():
+                item = self.model().itemFromIndex(index)
+                if item is not None:
+                    item.setCheckState(
+                        Qt.Unchecked if item.checkState() == Qt.Checked else Qt.Checked
+                    )
+                # Hold flag for the entire synchronous event chain that this
+                # press may trigger (Qt can call hidePopup multiple times).
+                # Clear it via a zero-delay timer that fires after all of them.
+                self._clicking_item = True
+                QTimer.singleShot(0, self._end_item_click)
+                event.accept()
+                return True
+        if obj is viewport and event.type() == QEvent.MouseButtonRelease:
+            event.accept()
+            return True
+        return super().eventFilter(obj, event)
+
+    def _end_item_click(self):
+        self._clicking_item = False
+        self._refresh_text()
 
     def hidePopup(self):
-        if self._skip_hide_once:
-            self._skip_hide_once = False
-            return
+        if self._clicking_item:
+            return  # suppress all Qt-internal hide calls during an item click
+        self._popup_visible = False
         super().hidePopup()
         self._refresh_text()
 
@@ -712,6 +749,15 @@ class SoapPopsMixin:
         self.ui.combo_pops = _replace_with_multiselect(self.ui.combo_pops)
 
         pops_layout = self.ui.butt_pops.parentWidget().layout()
+        if pops_layout is not None:
+            pops_layout.setColumnStretch(0, 0)
+            pops_layout.setColumnStretch(1, 1)
+            pops_layout.setColumnStretch(2, 0)
+            pops_layout.setColumnStretch(3, 0)
+            pops_layout.setColumnStretch(4, 0)
+        self.ui.combo_pops.setMinimumWidth(180)
+        self.ui.txt_pops_path.setMinimumWidth(360)
+        self.ui.txt_pops_model.setMaximumWidth(160)
         if pops_layout is not None and getattr(self.ui, "butt_pops_resource", None) is None:
             butt_pops_resource = QToolButton(self.ui.butt_pops.parentWidget())
             butt_pops_resource.setObjectName("butt_pops_resource")
@@ -906,6 +952,25 @@ class SoapPopsMixin:
                 "Invalid POPS channel(s): " + ", ".join(bad),
             )
             return
+
+        # refuse to run if POPS-derived channel names already exist —
+        # RUN-POPS creates {sig}_F and {sig}_F_N and will segfault if present
+        conflicting = [
+            ch for sig in pops_chs_list
+            for ch in (f"{sig}_F", f"{sig}_F_N")
+            if ch in valid_chs
+        ]
+        if conflicting:
+            QMessageBox.critical(
+                self.ui,
+                "Cannot run POPS",
+                "The following channel name(s) conflict with channels that "
+                "RUN-POPS needs to create internally:\n\n"
+                + "  " + ",  ".join(conflicting) + "\n\n"
+                "Please rename or drop these channels first, then run POPS again."
+            )
+            return
+
         pops_chs = ",".join(pops_chs_list)
 
         pops_path = self.ui.txt_pops_path.text()
@@ -964,6 +1029,15 @@ class SoapPopsMixin:
         if not getattr(self, "_busy", False):
             return
 
+        # Release segsrv C++ objects before POPS runs on the background thread.
+        # Both self.ss and self.ssa hold internal slot references into the EDF.
+        # POPS drops/creates channels during cleanup; if stale slot refs exist
+        # in a live segsrv the channel drop segfaults.  Nulling them here lets
+        # CPython's reference-counting free the C++ objects immediately.
+        # _pops_done_ok recreates self.ssa before _render_tables needs it.
+        self.ss  = None
+        self.ssa = None
+
         fut = self._exec.submit(
             self._derive_pops,
             self.p,
@@ -1008,6 +1082,14 @@ class SoapPopsMixin:
             df, has_staging, tbls = self._last_result
             self.pops_df = df
             self._render_pops_hypno()
+            # Recreate a minimal self.ssa before _render_tables, which calls
+            # self.ssa.populate().  _update_metrics() (inside _render_tables)
+            # will do a full rebuild, but we need a valid object first.
+            try:
+                import lunapi as lp
+                self.ssa = lp.segsrv(self.p)
+            except Exception:
+                pass
             self._render_tables(tbls)
             if not has_staging:
                 self._render_hypnogram()

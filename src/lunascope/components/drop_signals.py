@@ -72,17 +72,19 @@ class DropDialog(QDialog):
                  keep_annots, drop_annots, all_annots):
         super().__init__(parent)
         self.setWindowTitle("Drop channels / annotations")
-        self.setMinimumWidth(500)
+        self.setMinimumWidth(520)
 
-        self._all_chs    = all_chs
-        self._all_annots = all_annots
-        self._drop_chs   = drop_chs
-        self._drop_annots = drop_annots
+        self._all_chs         = all_chs
+        self._all_annots      = all_annots
+        # "selected" = checked in dock; "other" = unchecked
+        self._selected_chs    = list(keep_chs)
+        self._other_chs       = list(drop_chs)
+        self._selected_annots = list(keep_annots)
+        self._other_annots    = list(drop_annots)
 
         root = QVBoxLayout(self)
         root.setSpacing(10)
 
-        # ── instruction ──────────────────────────────────────────────
         note = QLabel(
             "Review what will be <b>permanently removed</b> from the "
             "current instance, then confirm below."
@@ -90,59 +92,57 @@ class DropDialog(QDialog):
         note.setWordWrap(True)
         root.addWidget(note)
 
-        # ── Channels summary ──────────────────────────────────────────
-        n_chs   = len(all_chs)
-        n_drop_chs = len(drop_chs)
-        sig_title = f"Channels  —  {_section_title('Drop', n_drop_chs, n_chs)}"
-        sig_grp  = QGroupBox(sig_title)
-        sig_form = QVBoxLayout(sig_grp)
+        # ── Channels ────────────────────────────────────────────────
+        self._sig_grp = QGroupBox()
+        sig_form = QVBoxLayout(self._sig_grp)
 
+        self._sig_keep_lbl = QLabel(); self._sig_keep_lbl.setWordWrap(True)
+        self._sig_drop_lbl = QLabel(); self._sig_drop_lbl.setWordWrap(True)
         keep_row = QHBoxLayout()
         keep_row.addWidget(QLabel("<b>Keep:</b>"), 0)
-        keep_row.addWidget(_bullet_label(keep_chs, "#44bb44"), 1)
+        keep_row.addWidget(self._sig_keep_lbl, 1)
         sig_form.addLayout(keep_row)
-
         drop_row = QHBoxLayout()
         drop_row.addWidget(QLabel("<b>Drop:</b>"), 0)
-        drop_row.addWidget(_bullet_label(drop_chs, "#ee6666"), 1)
+        drop_row.addWidget(self._sig_drop_lbl, 1)
         sig_form.addLayout(drop_row)
 
-        # Checked only if there is something to drop AND the user had
-        # explicitly selected channels to keep (non-empty keep list).
-        # If nothing was selected in the dock, default to unchecked —
-        # the user probably hasn't reviewed this dimension yet.
-        chs_checked = bool(drop_chs) and bool(keep_chs)
-        self._chk_drop_chs = QCheckBox("Drop these channels")
-        self._chk_drop_chs.setChecked(chs_checked)
-        self._chk_drop_chs.setEnabled(bool(drop_chs))
-        sig_form.addWidget(self._chk_drop_chs)
+        bottom_row_chs = QHBoxLayout()
+        self._chk_drop_chs  = QCheckBox("Drop these channels")
+        self._flip_chs      = QCheckBox("Flip  (selected = drop)")
+        self._flip_chs.setStyleSheet("color: #aaaaaa; font-style: italic;")
+        bottom_row_chs.addWidget(self._chk_drop_chs)
+        bottom_row_chs.addStretch()
+        bottom_row_chs.addWidget(self._flip_chs)
+        sig_form.addLayout(bottom_row_chs)
 
-        root.addWidget(sig_grp)
+        root.addWidget(self._sig_grp)
 
-        # ── Annotations summary ───────────────────────────────────────
-        n_annots      = len(all_annots)
-        n_drop_annots = len(drop_annots)
-        ann_title = f"Annotation classes  —  {_section_title('Drop', n_drop_annots, n_annots)}"
-        ann_grp  = QGroupBox(ann_title)
-        ann_form = QVBoxLayout(ann_grp)
+        # ── Annotations ──────────────────────────────────────────────
+        self._ann_grp = QGroupBox()
+        ann_form = QVBoxLayout(self._ann_grp)
 
+        self._ann_keep_lbl = QLabel(); self._ann_keep_lbl.setWordWrap(True)
+        self._ann_drop_lbl = QLabel(); self._ann_drop_lbl.setWordWrap(True)
         keep_row2 = QHBoxLayout()
         keep_row2.addWidget(QLabel("<b>Keep:</b>"), 0)
-        keep_row2.addWidget(_bullet_label(keep_annots, "#44bb44"), 1)
+        keep_row2.addWidget(self._ann_keep_lbl, 1)
         ann_form.addLayout(keep_row2)
-
         drop_row2 = QHBoxLayout()
         drop_row2.addWidget(QLabel("<b>Drop:</b>"), 0)
-        drop_row2.addWidget(_bullet_label(drop_annots, "#ee6666"), 1)
+        drop_row2.addWidget(self._ann_drop_lbl, 1)
         ann_form.addLayout(drop_row2)
 
-        annots_checked = bool(drop_annots) and bool(keep_annots)
+        bottom_row_ann = QHBoxLayout()
         self._chk_drop_annots = QCheckBox("Drop these annotation classes")
-        self._chk_drop_annots.setChecked(annots_checked)
-        self._chk_drop_annots.setEnabled(bool(drop_annots))
-        ann_form.addWidget(self._chk_drop_annots)
+        self._flip_ann        = QCheckBox("Flip  (selected = drop)")
+        self._flip_ann.setStyleSheet("color: #aaaaaa; font-style: italic;")
+        bottom_row_ann.addWidget(self._chk_drop_annots)
+        bottom_row_ann.addStretch()
+        bottom_row_ann.addWidget(self._flip_ann)
+        ann_form.addLayout(bottom_row_ann)
 
-        root.addWidget(ann_grp)
+        root.addWidget(self._ann_grp)
 
         # ── warning ──────────────────────────────────────────────────
         warn = QLabel("This operation cannot be undone within the current session.")
@@ -158,22 +158,65 @@ class DropDialog(QDialog):
         btn_box.rejected.connect(self.reject)
         root.addWidget(btn_box)
 
+        # connect flip toggles and do initial render
+        self._flip_chs.toggled.connect(self._refresh_chs_display)
+        self._flip_ann.toggled.connect(self._refresh_ann_display)
+        self._refresh_chs_display()
+        self._refresh_ann_display()
+
     # ------------------------------------------------------------------
 
-    def _on_accept(self):
-        drop_chs    = self._chk_drop_chs.isChecked()
-        drop_annots = self._chk_drop_annots.isChecked()
+    def _effective_chs(self):
+        """(keep_list, drop_list) respecting the flip toggle."""
+        if self._flip_chs.isChecked():
+            return self._other_chs, self._selected_chs
+        return self._selected_chs, self._other_chs
 
-        if not drop_chs and not drop_annots:
+    def _effective_annots(self):
+        """(keep_list, drop_list) respecting the flip toggle."""
+        if self._flip_ann.isChecked():
+            return self._other_annots, self._selected_annots
+        return self._selected_annots, self._other_annots
+
+    def _refresh_chs_display(self):
+        keep, drop = self._effective_chs()
+        n = len(self._all_chs)
+        self._sig_grp.setTitle(f"Channels  —  {_section_title('Drop', len(drop), n)}")
+        self._sig_keep_lbl.setText(_fmt_names(keep))
+        self._sig_keep_lbl.setStyleSheet("color: #44bb44;")
+        self._sig_drop_lbl.setText(_fmt_names(drop))
+        self._sig_drop_lbl.setStyleSheet("color: #ee6666;")
+        has_drop = bool(drop)
+        self._chk_drop_chs.setEnabled(has_drop)
+        self._chk_drop_chs.setChecked(has_drop and bool(keep))
+
+    def _refresh_ann_display(self):
+        keep, drop = self._effective_annots()
+        n = len(self._all_annots)
+        self._ann_grp.setTitle(f"Annotation classes  —  {_section_title('Drop', len(drop), n)}")
+        self._ann_keep_lbl.setText(_fmt_names(keep))
+        self._ann_keep_lbl.setStyleSheet("color: #44bb44;")
+        self._ann_drop_lbl.setText(_fmt_names(drop))
+        self._ann_drop_lbl.setStyleSheet("color: #ee6666;")
+        has_drop = bool(drop)
+        self._chk_drop_annots.setEnabled(has_drop)
+        self._chk_drop_annots.setChecked(has_drop and bool(keep))
+
+    def _on_accept(self):
+        do_drop_chs    = self._chk_drop_chs.isChecked()
+        do_drop_annots = self._chk_drop_annots.isChecked()
+
+        if not do_drop_chs and not do_drop_annots:
             QMessageBox.information(
                 self, "Nothing to do",
                 "Neither 'Drop channels' nor 'Drop annotation classes' is checked."
             )
             return
 
-        # Block dropping absolutely everything
-        chs_gone    = drop_chs    and len(self._drop_chs)    == len(self._all_chs)
-        annots_gone = drop_annots and len(self._drop_annots) == len(self._all_annots)
+        _, drop_chs    = self._effective_chs()
+        _, drop_annots = self._effective_annots()
+        chs_gone    = do_drop_chs    and len(drop_chs)    == len(self._all_chs)
+        annots_gone = do_drop_annots and len(drop_annots) == len(self._all_annots)
         if chs_gone and annots_gone:
             QMessageBox.critical(
                 self, "Cannot drop everything",
@@ -189,6 +232,14 @@ class DropDialog(QDialog):
 
     def drop_annots(self):
         return self._chk_drop_annots.isChecked()
+
+    def get_keep_chs(self):
+        keep, _ = self._effective_chs()
+        return keep
+
+    def get_drop_annots_list(self):
+        _, drop = self._effective_annots()
+        return drop
 
 
 # ------------------------------------------------------------
@@ -253,20 +304,23 @@ class DropSignalsMixin:
         # ── build and run Luna commands ──
         errors = []
 
-        if dlg.drop_channels() and drop_chs:
-            # SIGNALS keep=ch1,ch2,... is cleaner than a drop list
-            cmd = "SIGNALS keep=" + ",".join(keep_chs)
-            try:
-                self.p.eval(cmd)
-            except Exception as e:
-                errors.append(f"{cmd}\n  → {e}")
+        if dlg.drop_channels():
+            effective_keep = dlg.get_keep_chs()
+            if effective_keep:
+                cmd = "SIGNALS keep=" + ",".join(effective_keep)
+                try:
+                    self.p.eval(cmd)
+                except Exception as e:
+                    errors.append(f"{cmd}\n  → {e}")
 
-        if dlg.drop_annots() and drop_annots:
-            cmd = "DROP-ANNOTS annot=" + ",".join(drop_annots)
-            try:
-                self.p.eval(cmd)
-            except Exception as e:
-                errors.append(f"{cmd}\n  → {e}")
+        if dlg.drop_annots():
+            effective_drop_annots = dlg.get_drop_annots_list()
+            if effective_drop_annots:
+                cmd = "DROP-ANNOTS annot=" + ",".join(effective_drop_annots)
+                try:
+                    self.p.eval(cmd)
+                except Exception as e:
+                    errors.append(f"{cmd}\n  → {e}")
 
         if errors:
             QMessageBox.critical(
@@ -277,5 +331,7 @@ class DropSignalsMixin:
 
         # ── refresh UI ──
         self._update_metrics()
+        if hasattr(self, "_update_soap_list"):
+            self._update_soap_list()
         self._render_hypnogram()
         self._render_signals_simple()

@@ -212,6 +212,10 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         act_annex.setShortcut(QKeySequence("Ctrl+E"))
         act_annex.setText("Explorer (Ctrl+E)")
         self.ui.menuView.addAction(act_annex)
+        act_annotator = self.annotator.toggleViewAction()
+        act_annotator.setShortcut(QKeySequence("Ctrl+Shift+A"))
+        act_annotator.setText("Annotator (Ctrl+Shift+A)")
+        self.ui.menuView.addAction(act_annotator)
         self.ui.menuView.addSeparator()
         self.ui.menuView.addAction(self.ui.dock_help.toggleViewAction())
 
@@ -304,14 +308,21 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         # size overall app window – cap to available screen space.
         # 1440 wide allows the banner's PSD panel to show at default on screens
         # >= 1440 px logical width; it hides naturally on narrower displays.
+        # On smaller screens (available height < 900 px) start maximized so the
+        # status bar is always visible; restoreGeometry() from a saved session
+        # will override this if the user has set a different preference.
         screen = QGuiApplication.primaryScreen()
         if screen is not None:
             avail = screen.availableGeometry()
             win_w = min(1440, int(avail.width()  * 0.92))
             win_h = min(900,  int(avail.height() * 0.92))
+            small_screen = avail.height() < 900
         else:
             win_w, win_h = 1440, 900
+            small_screen = False
         self.ui.resize(win_w, win_h)
+        if small_screen:
+            self.ui.showMaximized()
 
         # arrange docks: hide some docks
         self.ui.dock_help.hide()
