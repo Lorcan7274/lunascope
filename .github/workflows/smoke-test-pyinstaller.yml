@@ -1,0 +1,281 @@
+name: Smoke Test App (PyInstaller)
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["Build App (PyInstaller)"]
+    types: [completed]
+
+jobs:
+  smoke-test:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15-intel
+            platform: macOS-Intel
+            os: mac
+            asset: Lunascope-macOS-Intel.dmg
+          - runner: macos-latest
+            platform: macOS-Silicon
+            os: mac
+            asset: Lunascope-macOS-Silicon.dmg
+          - runner: windows-latest
+            platform: Windows
+            os: windows
+            asset: Lunascope-Windows-Setup.exe
+
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      # ── Download ─────────────────────────────────────────────────────────────
+
+      - name: Download release asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          gh release download latest-build \
+            --pattern "${{ matrix.asset }}" \
+            --repo "${{ github.repository }}"
+
+      # ── macOS checks ─────────────────────────────────────────────────────────
+
+      - name: Verify DMG integrity (macOS)
+        if: matrix.os == 'mac'
+        run: hdiutil verify "${{ matrix.asset }}"
+
+      - name: Mount DMG and inspect contents (macOS)
+        if: matrix.os == 'mac'
+        run: |
+          hdiutil attach "${{ matrix.asset }}" -mountpoint /Volumes/LunascopeSmoke -nobrowse -quiet
+          echo "── DMG contents ──"
+          ls -la /Volumes/LunascopeSmoke/
+
+          if [ ! -d "/Volumes/LunascopeSmoke/Lunascope.app" ]; then
+            echo "FAIL: Lunascope.app not found in DMG"
+            hdiutil detach /Volumes/LunascopeSmoke -quiet
+            exit 1
+          fi
+          if [ ! -L "/Volumes/LunascopeSmoke/Applications" ]; then
+            echo "FAIL: Applications symlink missing from DMG"
+            hdiutil detach /Volumes/LunascopeSmoke -quiet
+            exit 1
+          fi
+          echo "PASS: DMG structure is correct"
+
+      - name: Copy app from DMG (macOS)
+        if: matrix.os == 'mac'
+        run: |
+          cp -R /Volumes/LunascopeSmoke/Lunascope.app ./Lunascope.app
+          hdiutil detach /Volumes/LunascopeSmoke -quiet
+
+      - name: Check binary architecture (macOS)
+        if: matrix.os == 'mac'
+        run: |
+          BINARY="./Lunascope.app/Contents/MacOS/Lunascope"
+          echo "── file ──"
+          file "$BINARY"
+          echo "── lipo ──"
+          lipo -info "$BINARY"
+
+          ARCH=$(lipo -archs "$BINARY")
+          RUNNER_ARCH="${{ runner.arch }}"
+          if [[ "$RUNNER_ARCH" == "X64" && "$ARCH" != *"x86_64"* ]]; then
+            echo "FAIL: expected x86_64 binary on Intel runner, got: $ARCH"
+            exit 1
+          fi
+          if [[ "$RUNNER_ARCH" == "ARM64" && "$ARCH" != *"arm64"* ]]; then
+            echo "FAIL: expected arm64 binary on Silicon runner, got: $ARCH"
+            exit 1
+          fi
+          echo "PASS: architecture matches runner ($ARCH)"
+
+      - name: Validate app bundle structure (macOS)
+        if: matrix.os == 'mac'
+        run: |
+          APP="./Lunascope.app"
+          checks=(
+            "$APP/Contents/MacOS/Lunascope"
+            "$APP/Contents/Info.plist"
+          )
+          for path in "${checks[@]}"; do
+            if [ ! -e "$path" ]; then
+              echo "FAIL: missing $path"
+              exit 1
+            fi
+          done
+
+          # Check lunascope UI file was bundled
+          UI_FILE=$(find "$APP" -path "*/lunascope/ui/main.ui" 2>/dev/null | head -1)
+          if [ -z "$UI_FILE" ]; then
+            echo "FAIL: lunascope/ui/main.ui not found in bundle"
+            exit 1
+          fi
+
+          # Check matplotlib data was bundled
+          MPL_RC=$(find "$APP" -name "matplotlibrc" 2>/dev/null | head -1)
+          if [ -z "$MPL_RC" ]; then
+            echo "FAIL: matplotlibrc not found in bundle (matplotlib data missing)"
+            exit 1
+          fi
+
+          echo "PASS: app bundle structure is valid"
+
+      - name: Verify code signature (macOS)
+        if: matrix.os == 'mac'
+        run: |
+          codesign --verify --deep --strict ./Lunascope.app && echo "PASS: code signature valid" || echo "WARN: code signature check failed (ad-hoc sign only)"
+
+      - name: Smoke test launch (macOS)
+        if: matrix.os == 'mac'
+        run: |
+          BINARY="./Lunascope.app/Contents/MacOS/Lunascope"
+          LOGFILE="lunascope-smoke.log"
+
+          "$BINARY" > "$LOGFILE" 2>&1 &
+          PID=$!
+          echo "Launched PID=$PID"
+
+          # Poll for startup messages or crash within 30s
+          DEADLINE=$((SECONDS + 30))
+          STARTED=false
+          while [ $SECONDS -lt $DEADLINE ]; do
+            if ! kill -0 $PID 2>/dev/null; then
+              echo "── stderr output ──"
+              cat "$LOGFILE"
+              echo "FAIL: process exited before startup completed"
+              exit 1
+            fi
+            if grep -q "Showing main window" "$LOGFILE" 2>/dev/null; then
+              STARTED=true
+              break
+            fi
+            sleep 1
+          done
+
+          echo "── startup log ──"
+          cat "$LOGFILE"
+
+          if [ "$STARTED" = false ]; then
+            echo "WARN: did not see 'Showing main window' in 30s — checking process is still alive"
+          fi
+
+          # Keep process alive check for another 10s
+          sleep 10
+          if kill -0 $PID 2>/dev/null; then
+            kill $PID
+            echo "PASS: binary ran for full duration without crashing"
+          else
+            wait $PID
+            EXIT=$?
+            echo "── stderr output ──"
+            cat "$LOGFILE"
+            echo "FAIL: binary crashed with exit code $EXIT"
+            exit 1
+          fi
+
+      - name: Check for crash reports (macOS)
+        if: matrix.os == 'mac'
+        run: |
+          CRASH_DIR="$HOME/Library/Logs/DiagnosticReports"
+          if [ -d "$CRASH_DIR" ]; then
+            CRASHES=$(find "$CRASH_DIR" -name "Lunascope*" -newer "${{ matrix.asset }}" 2>/dev/null)
+            if [ -n "$CRASHES" ]; then
+              echo "WARN: crash report(s) found:"
+              echo "$CRASHES"
+              for f in $CRASHES; do head -40 "$f"; done
+            else
+              echo "PASS: no crash reports found"
+            fi
+          fi
+
+      # ── Windows checks ───────────────────────────────────────────────────────
+
+      - name: Run installer silently (Windows)
+        if: matrix.os == 'windows'
+        run: |
+          Start-Process -FilePath ".\Lunascope-Windows-Setup.exe" `
+            -ArgumentList "/VERYSILENT", "/NORESTART", "/SUPPRESSMSGBOXES" `
+            -Wait
+          Write-Host "PASS: installer completed"
+
+      - name: Validate installed files (Windows)
+        if: matrix.os == 'windows'
+        run: |
+          $installDir = "$env:ProgramFiles\Lunascope"
+          if (-not (Test-Path $installDir)) {
+            $installDir = "${env:ProgramFiles(x86)}\Lunascope"
+          }
+          Write-Host "Install dir: $installDir"
+
+          $required = @(
+            "Lunascope.exe"
+          )
+          foreach ($f in $required) {
+            $path = Join-Path $installDir $f
+            if (-not (Test-Path $path)) {
+              throw "FAIL: missing $path"
+            }
+          }
+
+          # Check lunascope UI file was bundled
+          $uiFile = Get-ChildItem -Path $installDir -Filter "main.ui" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $uiFile) { throw "FAIL: lunascope/ui/main.ui not found in install" }
+
+          # Check matplotlib data was bundled
+          $mplRc = Get-ChildItem -Path $installDir -Filter "matplotlibrc" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $mplRc) { throw "FAIL: matplotlibrc not found (matplotlib data missing)" }
+
+          Write-Host "PASS: installed file structure is valid"
+          Write-Host "Install contents:"
+          Get-ChildItem $installDir -Depth 1
+
+      - name: Smoke test launch (Windows)
+        if: matrix.os == 'windows'
+        run: |
+          $installDir = "$env:ProgramFiles\Lunascope"
+          if (-not (Test-Path $installDir)) {
+            $installDir = "${env:ProgramFiles(x86)}\Lunascope"
+          }
+          $exe = Join-Path $installDir "Lunascope.exe"
+          $logFile = "lunascope-smoke.log"
+
+          $proc = Start-Process -FilePath $exe `
+            -RedirectStandardError $logFile `
+            -PassThru
+
+          Write-Host "Launched PID=$($proc.Id)"
+
+          # Poll for startup message or crash within 30s
+          $deadline = (Get-Date).AddSeconds(30)
+          $started = $false
+          while ((Get-Date) -lt $deadline) {
+            if ($proc.HasExited) {
+              Write-Host "── stderr output ──"
+              if (Test-Path $logFile) { Get-Content $logFile }
+              throw "FAIL: process exited before startup completed (exit code $($proc.ExitCode))"
+            }
+            if ((Test-Path $logFile) -and (Select-String -Path $logFile -Pattern "Showing main window" -Quiet)) {
+              $started = $true
+              break
+            }
+            Start-Sleep -Seconds 1
+          }
+
+          Write-Host "── startup log ──"
+          if (Test-Path $logFile) { Get-Content $logFile }
+
+          if (-not $started) {
+            Write-Host "WARN: did not see 'Showing main window' in 30s — checking process is still alive"
+          }
+
+          # Keep alive check for another 10s
+          Start-Sleep -Seconds 10
+          if (-not $proc.HasExited) {
+            $proc.Kill()
+            Write-Host "PASS: binary ran for full duration without crashing"
+          } else {
+            throw "FAIL: binary crashed with exit code $($proc.ExitCode)"
+          }

@@ -34,10 +34,11 @@ from PySide6.QtGui import QAction, QStandardItemModel
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QDockWidget, QLabel, QFrame, QSizePolicy, QMessageBox, QLayout
 from PySide6.QtWidgets import QMainWindow, QProgressBar, QTableView, QAbstractItemView
-from PySide6.QtWidgets import QFileDialog
+from PySide6.QtWidgets import QFileDialog, QPushButton
 from PySide6.QtWidgets import QSplitter, QVBoxLayout, QWidget
 from PySide6.QtGui import QKeySequence, QGuiApplication
 from .file_dialogs import open_file_name, save_file_name
+from . import updater as _updater
 
 import pyqtgraph as pg
 
@@ -221,8 +222,10 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
 
         # set up menu: about
         act_about = QAction("Help", self)
+        act_about.triggered.connect(self.show_about)
 
-        act_about.triggered.connect( self.show_about )
+        act_check_update = QAction("Check for Updates…", self)
+        act_check_update.triggered.connect(self._check_for_updates)
         
         # palette menu
         act_pal_spectrum = QAction("Spectrum", self)
@@ -276,7 +279,9 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         self.ui.menuPalettes.addAction(act_pal_bespoke)
         
         # about menu
-        self.ui.menuAbout.addAction(act_about)   
+        self.ui.menuAbout.addAction(act_about)
+        self.ui.menuAbout.addSeparator()
+        self.ui.menuAbout.addAction(act_check_update)
 
         # window title
         self.ui.setWindowTitle(f"Lunascope v{__version__}")
@@ -439,8 +444,28 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         sb.addPermanentWidget(self.sb_progress,1)
         sb.addPermanentWidget(vsep(),0)
 
+        # version label + update badge (right side)
+        self._sb_version = mk_section(f"v{__version__}")
+        self._sb_version.setStyleSheet("color: #888888;")
+        sb.addPermanentWidget(self._sb_version, 0)
+
+        self._sb_update_badge = QPushButton("↑ Update available")
+        self._sb_update_badge.setFlat(True)
+        self._sb_update_badge.setStyleSheet(
+            "color: #4FC3F7; font-weight: bold; border: none; padding: 0 4px;"
+        )
+        self._sb_update_badge.setToolTip("A new version of Lunascope is available — click to update")
+        self._sb_update_badge.clicked.connect(self._check_for_updates)
+        self._sb_update_badge.hide()
+        sb.addPermanentWidget(self._sb_update_badge, 0)
+
         self.sb_mode.setMinimumWidth(120)
         self._update_mode_badge()
+
+        # background version check on startup
+        self._updater_worker = _updater.start_background_check(
+            __version__, self._on_update_available
+        )
 
         # On Windows set a modest monospace font size for the text-edit panels
         # so they don't appear oversized on lower-resolution / non-HiDPI screens.
@@ -817,6 +842,15 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
             lbl.setOpenExternalLinks(True)
 
         box.exec()
+
+    def _on_update_available(self, latest: str):
+        self._sb_update_badge.setToolTip(
+            f"Lunascope v{latest} is available — click to update"
+        )
+        self._sb_update_badge.show()
+
+    def _check_for_updates(self):
+        _updater.check_and_prompt(__version__, parent=self.ui)
 
     def _save_session_state(self):
         filename, _ = save_file_name(

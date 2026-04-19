@@ -1,0 +1,231 @@
+name: Build App (PyInstaller)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15-intel
+            platform: macOS-Intel
+            os: mac
+          - runner: macos-latest
+            platform: macOS-Silicon
+            os: mac
+          - runner: windows-latest
+            platform: Windows
+            os: windows
+
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies (macOS)
+        if: matrix.os == 'mac'
+        run: |
+          rm -rf .venv dist build
+          python -m venv .venv
+          source .venv/bin/activate
+          pip install --upgrade pip
+          pip install .
+          pip install pyinstaller
+
+      - name: Install dependencies (Windows)
+        if: matrix.os == 'windows'
+        run: |
+          if (Test-Path .venv) { Remove-Item -Recurse -Force .venv }
+          if (Test-Path dist)  { Remove-Item -Recurse -Force dist }
+          if (Test-Path build) { Remove-Item -Recurse -Force build }
+          python -m venv .venv
+          .venv\Scripts\pip install --upgrade pip
+          .venv\Scripts\pip install .
+          .venv\Scripts\pip install pyinstaller
+
+      - name: Create runtime hook (macOS)
+        if: matrix.os == 'mac'
+        run: |
+          cat > hook_stdout.py << 'EOF'
+          import sys, os
+          if sys.stdout is None:
+              sys.stdout = open(os.devnull, 'w')
+          if sys.stderr is None:
+              sys.stderr = open(os.devnull, 'w')
+          EOF
+
+      - name: Create runtime hook (Windows)
+        if: matrix.os == 'windows'
+        run: |
+          @"
+          import sys, os
+          if sys.stdout is None:
+              sys.stdout = open(os.devnull, 'w')
+          if sys.stderr is None:
+              sys.stderr = open(os.devnull, 'w')
+          "@ | Out-File -FilePath hook_stdout.py -Encoding utf8
+
+      - name: Build app (macOS)
+        if: matrix.os == 'mac'
+        run: |
+          source .venv/bin/activate
+          pyinstaller launch.py \
+            --name Lunascope \
+            --windowed \
+            --noconfirm \
+            --runtime-hook=hook_stdout.py \
+            --hidden-import=scipy \
+            --hidden-import=scipy.optimize \
+            --hidden-import=scipy.optimize._cobyla_py \
+            --hidden-import=scipy.optimize._constraints \
+            --hidden-import=scipy.optimize._minimize \
+            --hidden-import=scipy.optimize._optimize \
+            --hidden-import=pyparsing \
+            --hidden-import=pyparsing.testing \
+            --hidden-import=IPython \
+            --hidden-import=charset_normalizer \
+            --hidden-import=certifi \
+            --collect-data=lunascope \
+            --collect-data=matplotlib \
+            --exclude-module=ipywidgets \
+            --exclude-module=ipykernel \
+            --exclude-module=jupyter_client \
+            --exclude-module=nbconvert
+
+      - name: Build app (Windows)
+        if: matrix.os == 'windows'
+        run: |
+          .venv\Scripts\pyinstaller launch.py `
+            --name Lunascope `
+            --windowed `
+            --noconfirm `
+            --runtime-hook=hook_stdout.py `
+            --hidden-import=scipy `
+            --hidden-import=scipy.optimize `
+            --hidden-import=scipy.optimize._cobyla_py `
+            --hidden-import=scipy.optimize._constraints `
+            --hidden-import=scipy.optimize._minimize `
+            --hidden-import=scipy.optimize._optimize `
+            --hidden-import=pyparsing `
+            --hidden-import=pyparsing.testing `
+            --hidden-import=IPython `
+            --hidden-import=charset_normalizer `
+            --hidden-import=certifi `
+            --collect-data=lunascope `
+            --collect-data=matplotlib `
+            --exclude-module=ipywidgets `
+            --exclude-module=ipykernel `
+            --exclude-module=jupyter_client `
+            --exclude-module=nbconvert
+
+      - name: Check binary architecture (macOS)
+        if: matrix.os == 'mac'
+        run: |
+          file dist/Lunascope.app/Contents/MacOS/Lunascope
+          lipo -info dist/Lunascope.app/Contents/MacOS/Lunascope
+
+      - name: Sign app bundle (macOS)
+        if: matrix.os == 'mac'
+        run: |
+          codesign --deep -s - --force dist/Lunascope.app
+
+      - name: Create DMG (macOS)
+        if: matrix.os == 'mac'
+        run: |
+          mkdir -p dmg-staging
+          cp -R dist/Lunascope.app dmg-staging/
+          ln -s /Applications dmg-staging/Applications
+          hdiutil create \
+            -volname "Lunascope" \
+            -srcfolder dmg-staging \
+            -ov -format UDZO \
+            dist/Lunascope-${{ matrix.platform }}.dmg
+
+      - name: Create Inno Setup installer (Windows)
+        if: matrix.os == 'windows'
+        run: |
+          $version = python -c "import importlib.metadata; print(importlib.metadata.version('lunascope'))" 2>$null
+          if (-not $version) { $version = "0.0.0" }
+          $iss = @"
+          [Setup]
+          AppName=Lunascope
+          AppVersion=$version
+          DefaultDirName={autopf}\Lunascope
+          DefaultGroupName=Lunascope
+          OutputDir=installer
+          OutputBaseFilename=Lunascope-Windows-Setup
+          Compression=lzma
+          SolidCompression=yes
+
+          [Files]
+          Source: "dist\Lunascope\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
+
+          [Icons]
+          Name: "{group}\Lunascope"; Filename: "{app}\Lunascope.exe"
+          Name: "{commondesktop}\Lunascope"; Filename: "{app}\Lunascope.exe"
+
+          [Run]
+          Filename: "{app}\Lunascope.exe"; Description: "Launch Lunascope"; Flags: nowait postinstall skipifsilent
+          "@
+          New-Item -ItemType Directory -Force -Path installer | Out-Null
+          $iss | Out-File -FilePath lunascope.iss -Encoding utf8
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" lunascope.iss
+
+      - name: Upload artifact (macOS)
+        if: matrix.os == 'mac'
+        uses: actions/upload-artifact@v5
+        with:
+          name: Lunascope-${{ matrix.platform }}
+          path: dist/Lunascope-${{ matrix.platform }}.dmg
+
+      - name: Upload artifact (Windows)
+        if: matrix.os == 'windows'
+        uses: actions/upload-artifact@v5
+        with:
+          name: Lunascope-${{ matrix.platform }}
+          path: installer\Lunascope-Windows-Setup.exe
+
+      - name: Publish to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            asset="installer/Lunascope-Windows-Setup.exe"
+          else
+            asset="dist/Lunascope-${{ matrix.platform }}.dmg"
+          fi
+          if gh release view latest-build > /dev/null 2>&1; then
+            gh release upload latest-build --clobber "$asset"
+          else
+            gh release create latest-build \
+              --title "Latest Build" \
+              --prerelease \
+              --notes "Latest automated build." \
+              "$asset"
+          fi
+
+  trigger-smoke-test:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger smoke test workflow
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run smoke-test-pyinstaller.yml \
+            --repo "${{ github.repository }}" \
+            --ref "${{ github.ref_name }}"
