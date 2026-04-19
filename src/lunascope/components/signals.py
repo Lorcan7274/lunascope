@@ -50,6 +50,34 @@ class _BannerResizeFilter(QObject):
         return False
 
 class SignalsMixin:
+    def _annotator_interval_capture_active(self):
+        return bool(
+            hasattr(self, "annotator")
+            and self.annotator is not None
+            and self.annotator.isVisible()
+            and self.annotator.check_enabled.isChecked()
+            and self.annotator.current_mode() == "interval"
+        )
+
+    def _init_pg1_annot_selector(self):
+        if getattr(self, "annot_sel", None) is not None:
+            try:
+                self.annot_sel.dispose()
+            except Exception:
+                pass
+            self.annot_sel = None
+
+        self.annot_sel = XRangeSelector(
+            self.ui.pg1,
+            bounds=(0, self.ns),
+            integer=False,
+            click_span=30.0,
+            min_span=0.01,
+            step=1,
+            big_step=10,
+            active_predicate=self._annotator_interval_capture_active,
+        )
+        self.annot_sel.owner = self
 
     def _navigator_stage_query_classes(self):
         # Include both detailed staging and generic sleep/wake aliases.
@@ -732,7 +760,6 @@ class SignalsMixin:
         self.sel.owner = self
 
         self.sel.rangeSelected.connect(self.on_window_range)  
-        
 
         # clock ticks at top
         self.tb0 = TextBatch( vb, QtGui.QFont("Arial", 12), color=(180,255,255), mode='device')
@@ -1117,7 +1144,8 @@ class SignalsMixin:
             # In non-render mode with signals selected, cap window to avoid overload.
             chs = self.ui.tbl_desc_signals.checked()
             max_simple_span = 3600.0 if getattr(self, 'multiday_mode', False) else 30.0
-            if len(chs) != 0 and (hi - lo) > max_simple_span:
+            annotator_interval_active = self._annotator_interval_capture_active()
+            if (not annotator_interval_active) and len(chs) != 0 and (hi - lo) > max_simple_span:
                 prev_lo = getattr(self, "last_x1", None)
                 prev_hi = getattr(self, "last_x2", None)
                 prev_span = None if (prev_lo is None or prev_hi is None) else (prev_hi - prev_lo)
@@ -1362,6 +1390,7 @@ class SignalsMixin:
 
         self._pg1_channel_cache = []
         self._init_pg1_probe_items()
+        self._init_pg1_annot_selector()
         self._update_pg1_probe_styles()
         
 
@@ -3106,12 +3135,31 @@ class MainTraceProbe(QtCore.QObject):
             mods = ev.modifiers()
             annot_mode = (hasattr(self.owner, "_annotator_mode_active") and
                           self.owner._annotator_mode_active())
+            annot_interval_mode = bool(
+                hasattr(self.owner, "annotator")
+                and self.owner.annotator is not None
+                and self.owner.annotator.current_mode() == "interval"
+            )
+            annot_interval_capture = bool(
+                annot_interval_mode
+                and hasattr(self.owner, "annotator")
+                and self.owner.annotator is not None
+                and self.owner.annotator.isVisible()
+                and self.owner.annotator.check_enabled.isChecked()
+            )
+
+            # Interval capture must own plain left-drag on the trace.
+            # Do not activate probe while annotator interval capture is active.
+            if annot_interval_capture:
+                return False
 
             if annot_mode:
                 # Annotator mode: clicks on an annotation select it.
                 # Clicks on blank space fall through to normal probe activation
                 # so that A/S/P/Z probe keys still work.
-                if hasattr(self.owner, "_annot_hit_test"):
+                # In interval capture mode we prioritize drag-to-select, so plain
+                # left-clicks should not be consumed by annotation selection.
+                if (not annot_interval_mode) and hasattr(self.owner, "_annot_hit_test"):
                     hit = self.owner._annot_hit_test(ev.scenePos(), self.vb)
                     if hit is not None:
                         zoom = bool(mods & (QtCore.Qt.ControlModifier |
@@ -3324,7 +3372,8 @@ class XRangeSelector(QtCore.QObject):
     def __init__(self, plot, bounds=None, integer=False,
                  click_span=30.0, min_span=1.0,
                  line_width=6, step=1, big_step=10, step_px=3, big_step_px=15,
-                 drag_thresh_px=6, edge_tol_px=10, thin_px=16):
+                 drag_thresh_px=6, edge_tol_px=10, thin_px=16,
+                 active_predicate=None):
         super().__init__(plot)
 
         # resolve plot + focus widget
@@ -3347,6 +3396,7 @@ class XRangeSelector(QtCore.QObject):
         self.drag_thresh_px = int(drag_thresh_px)
         self.edge_tol_px    = int(edge_tol_px)
         self.thin_px        = int(thin_px)   # width ≤ thin_px ⇒ move-only anywhere inside
+        self._active_predicate = active_predicate
 
         # state
         self._setting_region = False
@@ -3358,6 +3408,7 @@ class XRangeSelector(QtCore.QObject):
         self._moved = False
         self._press_scene = None
         self._anchor_x = None
+        self._point_x = None
         self._move_width = None
         self._move_offset = 0.0
         self._disposed = False
@@ -3373,19 +3424,28 @@ class XRangeSelector(QtCore.QObject):
         if self.bounds is not None:
             self.region.setBounds(self.bounds)
         try:
-            self.region.setBrush(pg.mkBrush(0,120,255,40))
-            self.region.setHoverBrush(pg.mkBrush(0,120,255,80))
+            self.region.setBrush(pg.mkBrush(0, 170, 255, 70))
+            self.region.setHoverBrush(pg.mkBrush(0, 170, 255, 110))
         except Exception:
             pass
         for ln in getattr(self.region, "lines", []):
             try:
-                ln.setPen(pg.mkPen(width=line_width))
-                ln.setHoverPen(pg.mkPen(width=line_width+4))
+                ln.setPen(pg.mkPen((0, 220, 255, 240), width=line_width))
+                ln.setHoverPen(pg.mkPen((255, 255, 255, 255), width=line_width+4))
                 ln.setCursor(QtCore.Qt.SizeHorCursor)
             except Exception:
                 pass
-        self.region.setZValue(10); self.region.hide()
+        self.region.setZValue(220); self.region.hide()
         self.pi.addItem(self.region)
+
+        self.point_line = pg.InfiniteLine(
+            angle=90,
+            movable=False,
+            pen=pg.mkPen((255, 220, 0, 255), width=3, style=QtCore.Qt.DashLine),
+        )
+        self.point_line.setZValue(230)
+        self.point_line.hide()
+        self.pi.addItem(self.point_line)
 
         # signals
         self.region.sigRegionChanged.connect(self._on_region_changed)
@@ -3397,6 +3457,14 @@ class XRangeSelector(QtCore.QObject):
         # keyboard + scene filter
         self._mk_shortcuts()
         self.pi.scene().installEventFilter(self)
+
+    def _interaction_enabled(self):
+        if not callable(self._active_predicate):
+            return True
+        try:
+            return bool(self._active_predicate())
+        except Exception:
+            return False
 
     # ---------- shortcuts ----------
     def _mk_shortcuts(self):
@@ -3420,6 +3488,8 @@ class XRangeSelector(QtCore.QObject):
 
         # ---- added: mouse wheel zoom ----
         def _wheel(ev):
+            if not self._interaction_enabled():
+                return
             dy = ev.angleDelta().y()
             if dy > 0:
                 self._zoom(0.8)     # zoom in
@@ -3488,14 +3558,31 @@ class XRangeSelector(QtCore.QObject):
     def _inside_region_scene(self, scene_pos):
         if not self.region.isVisible():
             return False
+        try:
+            rect = self.region.boundingRect()
+        except Exception:
+            return False
+        if rect is None:
+            return False
         p = self.region.mapFromScene(scene_pos)
-        return self.region.boundingRect().contains(p)
+        return rect.contains(p)
     
     def _max_span(self):
         if self.bounds is not None:
             return max(0.0, float(self.bounds[1] - self.bounds[0]))
         xmin, xmax = self.vb.viewRange()[0]
         return max(0.0, float(xmax - xmin))
+
+    def _annotator_interval_capture_active(self):
+        owner = getattr(self, "owner", None)
+        annotator = getattr(owner, "annotator", None)
+        return bool(
+            owner is not None
+            and annotator is not None
+            and annotator.isVisible()
+            and annotator.check_enabled.isChecked()
+            and annotator.current_mode() == "interval"
+        )
 
     def _integer_zoom_ladder(self, max_w: float):
         # Fine control at short windows, then progressively coarser steps.
@@ -3551,6 +3638,36 @@ class XRangeSelector(QtCore.QObject):
         self.region.setRegion((lo, hi))
         del blockers
         self._setting_region = False
+        if abs(float(hi) - float(lo)) > 1e-9:
+            self._point_x = None
+            self._hide_point_marker()
+
+    def _show_point_marker(self, x):
+        try:
+            self.point_line.setPos(float(x))
+            self.point_line.show()
+        except Exception:
+            pass
+
+    def _hide_point_marker(self):
+        try:
+            self.point_line.hide()
+        except Exception:
+            pass
+
+    def clear_visuals(self):
+        self._dragging_bg = False
+        self._dragging_move = False
+        self._moved = False
+        self._press_scene = None
+        self._anchor_x = None
+        self._point_x = None
+        self._pending = None
+        self._hide_point_marker()
+        try:
+            self.region.hide()
+        except Exception:
+            pass
 
     def _ensure_region_visible(self, span=None):
         if self.region.isVisible():
@@ -3563,6 +3680,7 @@ class XRangeSelector(QtCore.QObject):
         lo, hi = self._enforce_span_limits(lo, hi)
         self._set_region_silent(lo, hi)
         self.region.show()
+        self._hide_point_marker()
         self.wid.setFocus()
         self._schedule_emit(lo, hi)
 
@@ -3615,6 +3733,17 @@ class XRangeSelector(QtCore.QObject):
                 pass
             self.region = None
 
+        if getattr(self, "point_line", None) is not None:
+            try:
+                self.pi.removeItem(self.point_line)
+            except Exception:
+                pass
+            try:
+                self.point_line.deleteLater()
+            except Exception:
+                pass
+            self.point_line = None
+
         sc_list = getattr(self, "_sc", None)
         if sc_list is not None:
             for sc in sc_list:
@@ -3648,6 +3777,8 @@ class XRangeSelector(QtCore.QObject):
     def eventFilter(self, obj, ev):
         if obj is not self.pi.scene():
             return False
+        if not self._interaction_enabled():
+            return False
         if self._region_active:
             return False  # let LRI handle its own drags/resizes
 
@@ -3666,8 +3797,13 @@ class XRangeSelector(QtCore.QObject):
             inside = False
             if self.region.isVisible():
                 # scene-space hit test for robustness
-                r = self.region.mapRectToScene(self.region.boundingRect())
-                inside = r.contains(ev.scenePos())
+                try:
+                    rect = self.region.boundingRect()
+                except Exception:
+                    rect = None
+                if rect is not None:
+                    r = self.region.mapRectToScene(rect)
+                    inside = r.contains(ev.scenePos())
             
             if inside:
                 # shrink to one epoch centered at click
@@ -3690,6 +3826,7 @@ class XRangeSelector(QtCore.QObject):
             if not self._in_vb(ev.scenePos()):
                 return False
             x = self.vb.mapSceneToView(ev.scenePos()).x()
+            interval_capture = self._annotator_interval_capture_active()
 
             if self.region.isVisible():
                 lo, hi = self.region.getRegion()
@@ -3714,7 +3851,15 @@ class XRangeSelector(QtCore.QObject):
             self._dragging_bg = True; self._moved = False
             self._press_scene = ev.scenePos()
             self._anchor_x = self._snap(x)
-            return False
+            self._point_x = None
+            if interval_capture:
+                # Make the dragged interval visible immediately instead of
+                # falling back to click-span behavior on release.
+                self._set_region_silent(self._anchor_x, self._anchor_x)
+                self.region.hide()
+                self._show_point_marker(self._anchor_x)
+            # Claim press so subsequent move/release stay with selector drag logic.
+            return True
 
         elif et == QtCore.QEvent.GraphicsSceneMouseMove:
             if self._dragging_move:
@@ -3737,6 +3882,8 @@ class XRangeSelector(QtCore.QObject):
                 if (ev.scenePos() - self._press_scene).manhattanLength() >= self.drag_thresh_px:
                     self._moved = True
                 if self._moved:
+                    self._point_x = None
+                    self._hide_point_marker()
                     x = self._snap(self.vb.mapSceneToView(ev.scenePos()).x())
                     lo, hi = sorted((self._anchor_x, x))
                     lo, hi = self._enforce_span_limits(*self._clamp_pair(lo, hi))
@@ -3752,6 +3899,12 @@ class XRangeSelector(QtCore.QObject):
             if self._dragging_bg:
                 self._dragging_bg = False
                 if not self._moved:
+                    if self._annotator_interval_capture_active():
+                        self._point_x = float(self._anchor_x)
+                        self._set_region_silent(self._point_x, self._point_x)
+                        self.region.hide()
+                        self._show_point_marker(self._point_x)
+                        return True
                     x = self._anchor_x
                     half = 0.5 * self.click_span
                     lo, hi = self._enforce_span_limits(*self._clamp_pair(x - half, x + half))
@@ -3786,6 +3939,8 @@ class XRangeSelector(QtCore.QObject):
         self._schedule_emit(*self._enforce_span_limits(lo, hi))
 
     def _nudge(self, dx):
+        if not self._interaction_enabled():
+            return
         self._ensure_region_visible()        
         lo, hi = self.region.getRegion()
         lo, hi = self._snap_pair(lo, hi)
@@ -3795,6 +3950,8 @@ class XRangeSelector(QtCore.QObject):
         self._schedule_emit(lo, hi)
 
     def _zoom(self, factor):
+        if not self._interaction_enabled():
+            return
         self._ensure_region_visible()
         lo, hi = self.region.getRegion()
         c = 0.5*(lo + hi)

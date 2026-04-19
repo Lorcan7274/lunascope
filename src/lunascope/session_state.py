@@ -67,6 +67,7 @@ EXCLUDED_COMBO_BOXES = {
     "combo_ifnot_mask",
     "combo_if_mask",
     "combo_spectrogram",
+    "combo_annotator_mode",
 }
 
 

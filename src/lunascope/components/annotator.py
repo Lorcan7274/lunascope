@@ -38,7 +38,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
-    QSpinBox,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -46,6 +45,18 @@ from PySide6.QtWidgets import (
 
 
 ANNOTATOR_KEYS = ("1", "2", "3", "4", "5", "6", "7", "8", "9", "0")
+_ANNOTATOR_KEY_BY_QT = {
+    Qt.Key_0: "0",
+    Qt.Key_1: "1",
+    Qt.Key_2: "2",
+    Qt.Key_3: "3",
+    Qt.Key_4: "4",
+    Qt.Key_5: "5",
+    Qt.Key_6: "6",
+    Qt.Key_7: "7",
+    Qt.Key_8: "8",
+    Qt.Key_9: "9",
+}
 
 
 @dataclass
@@ -236,21 +247,9 @@ class AnnotatorDock(QDockWidget):
         self.combo_mode = QComboBox()
         self.combo_mode.setObjectName("combo_annotator_mode")
         self.combo_mode.addItem("Epoch", "epoch")
-        self.combo_mode.addItem("Point", "point")
         self.combo_mode.addItem("Interval", "interval")
+        self.combo_mode.setCurrentIndex(1)
         form.addRow("Capture", self.combo_mode)
-
-        self.check_use_selection = QCheckBox("Use current selection")
-        self.check_use_selection.setObjectName("check_annotator_use_selection")
-        self.check_use_selection.setChecked(True)
-        form.addRow("", self.check_use_selection)
-
-        self.spin_fixed_secs = QSpinBox()
-        self.spin_fixed_secs.setObjectName("spin_annotator_fixed_secs")
-        self.spin_fixed_secs.setRange(1, 3600)
-        self.spin_fixed_secs.setValue(10)
-        self.spin_fixed_secs.setSuffix(" s")
-        form.addRow("Fixed span", self.spin_fixed_secs)
         layout.addLayout(form)
 
         group = QGroupBox("Key Bindings")
@@ -282,8 +281,8 @@ class AnnotatorDock(QDockWidget):
         layout.addLayout(btn_row)
 
         self.lbl_hint = QLabel(
-            "Point mode stages immediately.\n"
-            "Epoch/Interval mode: hold a bound key, adjust the current selection, release to stage.\n"
+            "Epoch mode: fixed 30s at the current selection/window center.\n"
+            "Interval mode: drag/select a visible region, then press a bound key to stage.\n"
             "Use Commit Staged to write staged additions into Luna."
         )
         self.lbl_hint.setWordWrap(True)
@@ -325,10 +324,7 @@ class AnnotatorDock(QDockWidget):
         self._sync_mode_ui()
 
     def _sync_mode_ui(self):
-        mode = self.current_mode()
-        is_interval = mode == "interval"
-        self.check_use_selection.setEnabled(is_interval)
-        self.spin_fixed_secs.setEnabled(is_interval and not self.check_use_selection.isChecked())
+        pass
 
     def current_mode(self) -> str:
         return str(self.combo_mode.currentData() or "epoch")
@@ -373,11 +369,16 @@ class AnnotatorDock(QDockWidget):
 # ---------------------------------------------------------------------------
 
 class AnnotatorMixin:
+    def _annotator_key_text(self, ev) -> str:
+        txt = (ev.text() or "").strip()
+        if txt in ANNOTATOR_KEYS:
+            return txt
+        return _ANNOTATOR_KEY_BY_QT.get(ev.key(), "")
+
     def _init_annotator(self):
         self.annotator = AnnotatorDock(self.ui)
         self.ui.addDockWidget(Qt.RightDockWidgetArea, self.annotator)
         self.annotator.hide()
-        self.annotator.check_use_selection.toggled.connect(self.annotator._sync_mode_ui)
         self._annotator_pending: Optional[PendingAnnotation] = None
         self._annotator_staged: list[StagedAnnotation] = []
         self._annotator_epoch_secs = 30.0
@@ -393,6 +394,9 @@ class AnnotatorMixin:
         self._annot_cursor_item = None                 # current-selection highlight on pg1
 
         self.annotator.visibilityChanged.connect(self._annot_cursor_on_dock_visibility)
+        self.annotator.visibilityChanged.connect(self._annotator_sync_pg1_selector_visibility)
+        self.annotator.check_enabled.toggled.connect(self._annotator_sync_pg1_selector_visibility)
+        self.annotator.combo_mode.currentIndexChanged.connect(self._annotator_sync_pg1_selector_visibility)
 
         # wire editor buttons
         ed = self.annotator.editor
@@ -403,6 +407,13 @@ class AnnotatorMixin:
         self.annotator.butt_stage_clear.clicked.connect(self._annotator_clear_staged)
         self.annotator.butt_stage_commit.clicked.connect(self._annotator_commit_staged)
         self._annotator_sync_stage_widgets()
+
+    def _annotator_sync_pg1_selector_visibility(self, *_):
+        sel = getattr(self, "annot_sel", None)
+        if sel is None:
+            return
+        if not self._annotator_enabled() or self.annotator.current_mode() != "interval":
+            sel.clear_visuals()
 
     def _annot_identity_key(self, identity: dict) -> tuple[str, str, str, str, str]:
         return (
@@ -454,17 +465,7 @@ class AnnotatorMixin:
         )
 
     def _annotator_resolve_epoch_secs(self) -> float:
-        if not hasattr(self, "p"):
-            return 30.0
-        try:
-            self.p.silent_proc("EPOCH")
-            df = self.p.table("EPOCH")
-            if isinstance(df, pd.DataFrame) and not df.empty and {"START", "STOP"}.issubset(df.columns):
-                dur = float(df.iloc[0]["STOP"]) - float(df.iloc[0]["START"])
-                if dur > 0:
-                    return dur
-        except Exception:
-            pass
+        # Add-annotation epoch capture is intentionally fixed to 30s.
         return 30.0
 
     def _annotator_current_range(self) -> tuple[float, float]:
@@ -480,34 +481,55 @@ class AnnotatorMixin:
             lo, hi = hi, lo
         return lo, hi
 
-    def _annotator_selection_center(self) -> float:
-        lo, hi = self._annotator_current_range()
-        return 0.5 * (lo + hi)
-
     def _annotator_snap_epoch_range(self, lo: float, hi: float) -> tuple[float, float]:
-        step = max(1e-6, float(getattr(self, "_annotator_epoch_secs", 30.0) or 30.0))
+        epoch = float(getattr(self, "_annotator_epoch_secs", 30.0) or 30.0)
         lo = max(0.0, float(lo))
         hi = max(lo, float(hi))
-        start_idx = int(lo // step)
-        if hi <= lo:
-            stop_idx = start_idx + 1
-        else:
-            eps = 1e-9
-            stop_idx = int((max(hi - eps, lo) // step) + 1)
-        start = start_idx * step
-        stop = stop_idx * step
-        ns = float(getattr(self, "ns", stop))
-        return max(0.0, start), min(ns, max(start, stop))
+        center = 0.5 * (lo + hi)
+        half = 0.5 * epoch
+        ns = float(getattr(self, "ns", center + half))
+        start = max(0.0, center - half)
+        stop = start + epoch
+        if stop > ns:
+            stop = ns
+            start = max(0.0, stop - epoch)
+        return start, max(start, stop)
 
-    def _annotator_interval_from_range(self) -> tuple[float, float]:
+    def _annotator_visible_selection_range(self) -> Optional[tuple[float, float]]:
+        sel = getattr(self, "annot_sel", None)
+        if sel is None or not hasattr(sel, "region"):
+            return None
+        point_x = getattr(sel, "_point_x", None)
+        if point_x is not None:
+            x = max(0.0, min(float(getattr(self, "ns", point_x)), float(point_x)))
+            return x, x
+        region = getattr(sel, "region", None)
+        if region is None:
+            return None
+        try:
+            if not region.isVisible():
+                return None
+            lo, hi = map(float, region.getRegion())
+        except Exception:
+            return None
+        if hi < lo:
+            lo, hi = hi, lo
+        if (hi - lo) <= 1e-9:
+            return lo, lo
+        lo = max(0.0, lo)
+        ns = float(getattr(self, "ns", hi))
+        hi = min(ns, hi)
+        if hi < lo:
+            return None
+        return lo, hi
+
+    def _annotator_interval_from_range(self) -> Optional[tuple[float, float]]:
         lo, hi = self._annotator_current_range()
         mode = self.annotator.current_mode()
         if mode == "epoch":
             return self._annotator_snap_epoch_range(lo, hi)
-        if mode == "interval" and not self.annotator.check_use_selection.isChecked():
-            center = self._annotator_selection_center()
-            half = 0.5 * float(self.annotator.spin_fixed_secs.value())
-            return max(0.0, center - half), min(float(getattr(self, "ns", center + half)), center + half)
+        if mode == "interval":
+            return self._annotator_visible_selection_range()
         return max(0.0, lo), max(lo, hi)
 
     def _annotator_describe_interval(self, start: float, stop: float) -> str:
@@ -516,7 +538,15 @@ class AnnotatorMixin:
         return f"{start:.2f}s -> {stop:.2f}s"
 
     def _annotator_begin_pending(self, key: str, label: str):
-        start, stop = self._annotator_interval_from_range()
+        span = self._annotator_interval_from_range()
+        if span is None:
+            self._annotator_status(
+                "Interval mode requires a visible dragged selection; drag on the trace first.",
+                2500,
+            )
+            self._annotator_pending = None
+            return
+        start, stop = span
         self._annotator_pending = PendingAnnotation(
             key=key,
             label=label,
@@ -532,7 +562,13 @@ class AnnotatorMixin:
         pending = self._annotator_pending
         if pending is None:
             return
-        start, stop = self._annotator_interval_from_range()
+        span = self._annotator_interval_from_range()
+        if span is None:
+            self._annotator_status(
+                f"Holding {pending.key}: drag/select an interval region",
+            )
+            return
+        start, stop = span
         pending.start = start
         pending.stop = stop
         self._annotator_status(
@@ -668,9 +704,10 @@ class AnnotatorMixin:
     def _annotator_handle_maintrace_key_press(self, ev) -> bool:
         if ev.modifiers() & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier):
             return False
-        key_text = ev.text()
+        raw_text = (ev.text() or "").strip()
+        key_text = self._annotator_key_text(ev)
         # d/D: toggle queue-delete on the currently selected annotation (annotator dock must be up)
-        if key_text in ("d", "D"):
+        if raw_text in ("d", "D"):
             if (hasattr(self, "annotator") and self.annotator is not None
                     and self.annotator.isVisible()
                     and self.annotator.editor._identity is not None):
@@ -681,29 +718,34 @@ class AnnotatorMixin:
             return False
         if key_text not in ANNOTATOR_KEYS:
             return False
+        if ev.isAutoRepeat():
+            return True
         label = self.annotator.bound_label_for_key(key_text)
         if not label:
             self._annotator_status(f"No annotation bound to key {key_text}", 2000)
             return True
-        mode = self.annotator.current_mode()
-        if mode == "point":
-            if ev.isAutoRepeat():
-                return True
-            point = self._annotator_selection_center()
-            self._annotator_stage_annotation(key_text, label, mode, point, point)
+        span = self._annotator_interval_from_range()
+        if span is None:
+            self._annotator_status(
+                "Interval mode requires a visible dragged selection; drag on the trace first.",
+                2500,
+            )
             return True
-        if ev.isAutoRepeat():
-            return True
-        if self._annotator_pending is not None and self._annotator_pending.key != key_text:
-            return True
-        self._annotator_begin_pending(key_text, label)
+        start, stop = span
+        self._annotator_stage_annotation(
+            key_text,
+            label,
+            self.annotator.current_mode(),
+            start,
+            stop,
+        )
         return True
 
     def _annotator_handle_maintrace_key_release(self, ev) -> bool:
         pending = self._annotator_pending
         if pending is None:
             return False
-        key_text = ev.text()
+        key_text = self._annotator_key_text(ev)
         if key_text != pending.key:
             return False
         if ev.isAutoRepeat():

@@ -32,7 +32,8 @@ from PySide6 import QtCore, QtWidgets
 _ORG = "Lunascope"
 _APP = "Lunascope"
 _RECENT_KEY = "file_dialogs/recent_dirs"
-_MAX_RECENT_DIRS = 8
+# Keep enough entries to fill the sidebar without feeling stale.
+_MAX_RECENT_DIRS = 24
 
 
 def _settings() -> QtCore.QSettings:
@@ -56,6 +57,11 @@ def _normalize_dir(path: str) -> str:
     return path if os.path.isdir(path) else ""
 
 
+def _dedupe_key(path: str) -> str:
+    # Normalize path identity across case-insensitive filesystems and symlinks.
+    return os.path.normcase(os.path.realpath(path))
+
+
 def _read_recent_dirs() -> list[str]:
     try:
         raw = _settings().value(_RECENT_KEY, [])
@@ -69,9 +75,15 @@ def _read_recent_dirs() -> list[str]:
     seen: set[str] = set()
     for item in raw:
         folder = _normalize_dir(str(item))
-        if folder and folder not in seen:
-            out.append(folder)
-            seen.add(folder)
+        if not folder:
+            continue
+        key = _dedupe_key(folder)
+        if key in seen:
+            continue
+        out.append(folder)
+        seen.add(key)
+        if len(out) >= _MAX_RECENT_DIRS:
+            break
     return out
 
 
@@ -80,13 +92,19 @@ def _write_recent_dirs(paths: Iterable[str]) -> None:
     seen: set[str] = set()
     for item in paths:
         folder = _normalize_dir(str(item))
-        if folder and folder not in seen:
-            vals.append(folder)
-            seen.add(folder)
+        if not folder:
+            continue
+        key = _dedupe_key(folder)
+        if key in seen:
+            continue
+        vals.append(folder)
+        seen.add(key)
         if len(vals) >= _MAX_RECENT_DIRS:
             break
     try:
-        _settings().setValue(_RECENT_KEY, vals)
+        s = _settings()
+        s.setValue(_RECENT_KEY, vals)
+        s.sync()
     except Exception:
         pass
 
@@ -96,17 +114,31 @@ def remember_dialog_path(path: str) -> None:
     if not folder:
         return
     recent = _read_recent_dirs()
+    # Prepend most-recent and drop tail when at capacity.
     _write_recent_dirs([folder, *recent])
 
 
-def _sidebar_urls() -> list[QtCore.QUrl]:
+def _sidebar_urls(existing: Iterable[QtCore.QUrl] | None = None) -> list[QtCore.QUrl]:
     ordered: list[str] = []
     seen: set[str] = set()
-    for candidate in [_cwd(), os.path.expanduser("~"), *_read_recent_dirs()]:
+
+    def _push(candidate: str) -> None:
         folder = _normalize_dir(candidate)
-        if folder and folder not in seen:
-            ordered.append(folder)
-            seen.add(folder)
+        if not folder:
+            return
+        key = _dedupe_key(folder)
+        if key in seen:
+            return
+        ordered.append(folder)
+        seen.add(key)
+
+    for candidate in [_cwd(), os.path.expanduser("~"), *_read_recent_dirs()]:
+        _push(candidate)
+
+    for url in existing or []:
+        if url.isLocalFile():
+            _push(url.toLocalFile())
+
     return [QtCore.QUrl.fromLocalFile(folder) for folder in ordered]
 
 
@@ -119,7 +151,7 @@ def open_file_name(parent, title: str, directory: str = "", file_filter: str = "
     dlg = QtWidgets.QFileDialog(parent, title, directory or _dialog_start_path(), file_filter)
     dlg.setFileMode(QtWidgets.QFileDialog.ExistingFile)
     dlg.setOption(QtWidgets.QFileDialog.DontUseNativeDialog, True)
-    dlg.setSidebarUrls(_sidebar_urls())
+    dlg.setSidebarUrls(_sidebar_urls(dlg.sidebarUrls()))
     if dlg.exec() != QtWidgets.QDialog.Accepted:
         return "", ""
     files = dlg.selectedFiles()
@@ -134,7 +166,7 @@ def save_file_name(parent, title: str, directory: str = "", file_filter: str = "
     dlg.setAcceptMode(QtWidgets.QFileDialog.AcceptSave)
     dlg.setFileMode(QtWidgets.QFileDialog.AnyFile)
     dlg.setOption(QtWidgets.QFileDialog.DontUseNativeDialog, True)
-    dlg.setSidebarUrls(_sidebar_urls())
+    dlg.setSidebarUrls(_sidebar_urls(dlg.sidebarUrls()))
     if dlg.exec() != QtWidgets.QDialog.Accepted:
         return "", ""
     files = dlg.selectedFiles()
@@ -149,7 +181,7 @@ def existing_directory(parent, title: str, directory: str = "") -> str:
     dlg.setFileMode(QtWidgets.QFileDialog.Directory)
     dlg.setOption(QtWidgets.QFileDialog.ShowDirsOnly, True)
     dlg.setOption(QtWidgets.QFileDialog.DontUseNativeDialog, True)
-    dlg.setSidebarUrls(_sidebar_urls())
+    dlg.setSidebarUrls(_sidebar_urls(dlg.sidebarUrls()))
     if dlg.exec() != QtWidgets.QDialog.Accepted:
         return ""
     files = dlg.selectedFiles()
