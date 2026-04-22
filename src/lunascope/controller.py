@@ -631,14 +631,25 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
             else:
                 edf_file = f"{base}-edit.edf"
 
-            reply = QMessageBox.question(
-                self.ui,
-                "Fractional EDF record size warning",
-                f"Non-integer EDF record size ({rec_size}).\n\nNot an error, but can cause problems.\n\n"                
-                f"Would you like to generate a new EDF with standard 1-second EDF records?\n\n{edf_file}",
-                QMessageBox.Yes | QMessageBox.No )        
+            box = QMessageBox(self.ui)
+            box.setIcon(QMessageBox.Question)
+            box.setWindowTitle("Create 1-second EDF?")
+            box.setText(
+                f"Non-integer EDF record size ({rec_size}).\n\n"
+                "This is not an error, but it can cause problems."
+            )
+            box.setInformativeText(
+                "Create a new EDF with standard 1-second records?\n\n"
+                f"{edf_file}\n\n"
+                "Press Return to generate the new EDF."
+            )
+            create_btn = box.addButton("Create 1-Second EDF", QMessageBox.AcceptRole)
+            keep_btn = box.addButton("Keep Current EDF", QMessageBox.RejectRole)
+            box.setDefaultButton(create_btn)
+            box.setEscapeButton(keep_btn)
+            box.exec()
 
-            if reply == QMessageBox.Yes:
+            if box.clickedButton() is create_btn:
                 try:
                     self.p.eval( 'RECORD-SIZE dur=1 no-problem edf=' + edf_file[:-4] )
                 except Exception as e:
@@ -1105,6 +1116,9 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
 
     def eventFilter(self, obj, event):
         try:
+            if hasattr(self, "_annotator_handle_widget_key_event"):
+                if self._annotator_handle_widget_key_event(obj, event):
+                    return True
             if obj is self.ui and event.type() == QEvent.Close and not self._geometry_cache_saved:
                 self.save_geometry_cache_silently()
         except RuntimeError:

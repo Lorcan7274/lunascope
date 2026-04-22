@@ -52,10 +52,8 @@ class _BannerResizeFilter(QObject):
 class SignalsMixin:
     def _annotator_interval_capture_active(self):
         return bool(
-            hasattr(self, "annotator")
-            and self.annotator is not None
-            and self.annotator.isVisible()
-            and self.annotator.check_enabled.isChecked()
+            hasattr(self, "_annotator_add_mode_active")
+            and self._annotator_add_mode_active()
             and self.annotator.current_mode() == "interval"
         )
 
@@ -3135,17 +3133,9 @@ class MainTraceProbe(QtCore.QObject):
             mods = ev.modifiers()
             annot_mode = (hasattr(self.owner, "_annotator_mode_active") and
                           self.owner._annotator_mode_active())
-            annot_interval_mode = bool(
-                hasattr(self.owner, "annotator")
-                and self.owner.annotator is not None
-                and self.owner.annotator.current_mode() == "interval"
-            )
             annot_interval_capture = bool(
-                annot_interval_mode
-                and hasattr(self.owner, "annotator")
-                and self.owner.annotator is not None
-                and self.owner.annotator.isVisible()
-                and self.owner.annotator.check_enabled.isChecked()
+                hasattr(self.owner, "_annotator_interval_capture_active")
+                and self.owner._annotator_interval_capture_active()
             )
 
             # Interval capture must own plain left-drag on the trace.
@@ -3159,7 +3149,7 @@ class MainTraceProbe(QtCore.QObject):
                 # so that A/S/P/Z probe keys still work.
                 # In interval capture mode we prioritize drag-to-select, so plain
                 # left-clicks should not be consumed by annotation selection.
-                if (not annot_interval_mode) and hasattr(self.owner, "_annot_hit_test"):
+                if hasattr(self.owner, "_annot_hit_test"):
                     hit = self.owner._annot_hit_test(ev.scenePos(), self.vb)
                     if hit is not None:
                         zoom = bool(mods & (QtCore.Qt.ControlModifier |
@@ -3575,13 +3565,10 @@ class XRangeSelector(QtCore.QObject):
 
     def _annotator_interval_capture_active(self):
         owner = getattr(self, "owner", None)
-        annotator = getattr(owner, "annotator", None)
         return bool(
             owner is not None
-            and annotator is not None
-            and annotator.isVisible()
-            and annotator.check_enabled.isChecked()
-            and annotator.current_mode() == "interval"
+            and hasattr(owner, "_annotator_interval_capture_active")
+            and owner._annotator_interval_capture_active()
         )
 
     def _integer_zoom_ladder(self, max_w: float):

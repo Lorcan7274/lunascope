@@ -26,7 +26,7 @@ from typing import Optional
 
 import pandas as pd
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QEvent
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -85,7 +85,7 @@ class AnnotEditorWidget(QWidget):
     """The 'Edit' tab inside AnnotatorDock.
 
     Populated via set_instance() when a row is selected in the Instances dock.
-    Queues edits/deletes against self.ssa; user hits Apply to commit.
+    Queues edits/deletes against self.ssa; user then applies or cancels all pending changes.
     """
 
     def __init__(self, parent=None):
@@ -96,7 +96,7 @@ class AnnotEditorWidget(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
-        layout.setSpacing(6)
+        layout.setSpacing(10)
 
         # ---- header ------------------------------------------------------
         self.lbl_header = QLabel("No annotation selected")
@@ -135,6 +135,7 @@ class AnnotEditorWidget(QWidget):
 
         # ---- queue buttons -----------------------------------------------
         q_row = QHBoxLayout()
+        q_row.setSpacing(10)
         self.butt_queue_edit   = QPushButton("Queue Edit")
         self.butt_queue_edit.setObjectName("butt_anneditor_queue_edit")
         self.butt_queue_delete = QPushButton("Queue Delete")
@@ -152,10 +153,14 @@ class AnnotEditorWidget(QWidget):
 
         # ---- apply / discard --------------------------------------------
         btn_row = QHBoxLayout()
-        self.butt_apply   = QPushButton("Apply")
+        btn_row.setContentsMargins(0, 8, 0, 0)
+        btn_row.setSpacing(12)
+        self.butt_apply   = QPushButton("Apply Pending Changes")
         self.butt_apply.setObjectName("butt_anneditor_apply")
-        self.butt_discard = QPushButton("Discard")
+        self.butt_apply.setMinimumWidth(160)
+        self.butt_discard = QPushButton("Cancel Pending Changes")
         self.butt_discard.setObjectName("butt_anneditor_discard")
+        self.butt_discard.setMinimumWidth(160)
         btn_row.addStretch()
         btn_row.addWidget(self.butt_discard)
         btn_row.addWidget(self.butt_apply)
@@ -241,7 +246,8 @@ class AnnotatorDock(QDockWidget):
 
         self.check_enabled = QCheckBox("Enable annotator")
         self.check_enabled.setObjectName("check_annotator_enabled")
-        layout.addWidget(self.check_enabled)
+        self.check_enabled.setChecked(True)
+        self.check_enabled.hide()
 
         form = QFormLayout()
         self.combo_mode = QComboBox()
@@ -395,8 +401,15 @@ class AnnotatorMixin:
 
         self.annotator.visibilityChanged.connect(self._annot_cursor_on_dock_visibility)
         self.annotator.visibilityChanged.connect(self._annotator_sync_pg1_selector_visibility)
-        self.annotator.check_enabled.toggled.connect(self._annotator_sync_pg1_selector_visibility)
         self.annotator.combo_mode.currentIndexChanged.connect(self._annotator_sync_pg1_selector_visibility)
+        self.annotator._tabs.currentChanged.connect(self._annotator_sync_pg1_selector_visibility)
+        self.annotator.installEventFilter(self)
+        self.annotator._tabs.installEventFilter(self)
+        self.annotator.combo_mode.installEventFilter(self)
+        for combo in self.annotator.key_combos.values():
+            combo.installEventFilter(self)
+            if combo.lineEdit() is not None:
+                combo.lineEdit().installEventFilter(self)
 
         # wire editor buttons
         ed = self.annotator.editor
@@ -414,6 +427,18 @@ class AnnotatorMixin:
             return
         if not self._annotator_enabled() or self.annotator.current_mode() != "interval":
             sel.clear_visuals()
+        else:
+            self._annotator_status("Add annotation mode activated")
+
+    def _annotator_add_mode_active(self) -> bool:
+        return bool(
+            hasattr(self, "annotator")
+            and self.annotator is not None
+            and self.annotator.isVisible()
+            and getattr(self.annotator, "_tabs", None) is not None
+            and self.annotator._tabs.currentIndex() == 1
+            and hasattr(self, "p")
+        )
 
     def _annot_identity_key(self, identity: dict) -> tuple[str, str, str, str, str]:
         return (
@@ -456,13 +481,31 @@ class AnnotatorMixin:
             self.annotator.raise_()
 
     def _annotator_enabled(self) -> bool:
-        return bool(
-            hasattr(self, "annotator")
-            and self.annotator is not None
-            and self.annotator.isVisible()
-            and self.annotator.check_enabled.isChecked()
-            and hasattr(self, "p")
-        )
+        return self._annotator_add_mode_active()
+
+    def _annotator_handles_widget(self, obj) -> bool:
+        annotator = getattr(self, "annotator", None)
+        if annotator is None or obj is None:
+            return False
+        if obj is annotator or obj is annotator._tabs or obj is annotator.combo_mode:
+            return True
+        if obj in annotator.key_combos.values():
+            return True
+        for combo in annotator.key_combos.values():
+            if combo.lineEdit() is obj:
+                return True
+        return False
+
+    def _annotator_handle_widget_key_event(self, obj, event) -> bool:
+        if not self._annotator_add_mode_active():
+            return False
+        if not self._annotator_handles_widget(obj):
+            return False
+        if event.type() == QEvent.KeyPress:
+            return self._annotator_handle_maintrace_key_press(event)
+        if event.type() == QEvent.KeyRelease:
+            return self._annotator_handle_maintrace_key_release(event)
+        return False
 
     def _annotator_resolve_epoch_secs(self) -> float:
         # Add-annotation epoch capture is intentionally fixed to 30s.

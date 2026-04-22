@@ -28,6 +28,7 @@ import threading
 import faulthandler
 
 from .runtime_paths import app_cache_root
+from .tls import configure_tls
 
 def _boot_log(message: str) -> None:
     sys.stderr.write(f"[lunascope] {message}\n")
@@ -78,6 +79,7 @@ def _configure_runtime_cache_dirs() -> None:
 
 
 _configure_runtime_cache_dirs()
+configure_tls()
 
 import argparse
 

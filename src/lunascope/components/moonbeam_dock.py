@@ -31,6 +31,10 @@ import sys
 import tempfile
 import time
 
+from ..tls import configure_tls
+
+configure_tls()
+
 import lunapi as lp
 import pandas as pd
 from ..file_dialogs import existing_directory
@@ -42,6 +46,7 @@ from PySide6.QtCore import Qt, QObject, QRegularExpression, QSortFilterProxyMode
 from PySide6.QtGui import QColor, QFont, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
     QDockWidget,
     QFrame,
     QHBoxLayout,
@@ -233,12 +238,13 @@ class _MbDownloadWorker(QObject):
     finished  = Signal()
     error     = Signal(str)        # non-fatal per-item errors
 
-    def __init__(self, mb, iids, cohort, subcohort=None):
+    def __init__(self, mb, iids, cohort, subcohort=None, force_redownload=False):
         super().__init__()
         self._mb        = mb
         self._iids      = list(iids)
         self._cohort    = cohort
         self._subcohort = subcohort
+        self._force     = bool(force_redownload)
         self._stop      = False
 
     def stop(self):
@@ -269,6 +275,8 @@ class _MbDownloadWorker(QObject):
                     break
                 self.progress.emit(i, total)
                 try:
+                    if self._force:
+                        self._remove_cached_files(iid)
                     self._mb.pull(iid, subcohort=self._subcohort)
                     self.item_done.emit(str(iid), True)
                 except Exception as exc:
@@ -281,6 +289,26 @@ class _MbDownloadWorker(QObject):
             sys.stdout = _old_stdout
             sys.stderr = _old_stderr
             self.finished.emit()
+
+    def _remove_cached_files(self, iid):
+        """Delete local cached files so moonbeam.pull() re-downloads them."""
+        sc, _, info = self._mb._resolve_iid(iid, self._subcohort)
+        rel_paths = [info['edf'], *info['annots']]
+        if re.search(r'\.(edf\.gz|edfz)$', info['edf'], re.IGNORECASE):
+            rel_paths.append(info['edf'] + '.idx')
+
+        removed_any = False
+        for rel_path in rel_paths:
+            local = pathlib.Path(self._mb._local_path(self._cohort, rel_path.lstrip('/')))
+            try:
+                if local.exists():
+                    local.unlink()
+                    removed_any = True
+            except Exception as exc:
+                raise RuntimeError(f"could not remove cached file {local}: {exc}") from exc
+
+        if removed_any:
+            self.log_msg.emit(f"[force] cleared cached files for {iid} [{sc}]")
 
 
 class _MbCopyWorker(QObject):
@@ -430,9 +458,9 @@ class MoonbeamMixin:
         connect_btn.setObjectName("mb_connect_btn")
         connect_btn.setFixedWidth(90)
 
-        update_btn = QPushButton("Update")
+        update_btn = QPushButton("Update cohort permissions")
         update_btn.setObjectName("mb_update_btn")
-        update_btn.setToolTip("Refresh studies, permissions, and cached counts")
+        update_btn.setToolTip("Refresh cohort permissions and access counts")
         update_btn.setEnabled(False)
 
         status_lbl = QLabel("Token cached — press Connect" if _has_cached else "Not connected")
@@ -442,8 +470,8 @@ class MoonbeamMixin:
         tok_layout.addWidget(tok_lbl)
         tok_layout.addWidget(tok_edit)
         tok_layout.addWidget(connect_btn)
-        tok_layout.addWidget(update_btn)
         tok_layout.addWidget(status_lbl, 1)
+        tok_layout.addWidget(update_btn)
         outer.addWidget(tok_frame)
 
         # ---- Cache dir row ----------------------------------------------
@@ -602,8 +630,12 @@ class MoonbeamMixin:
 
         dl_sel_btn  = QPushButton("Download Selected")
         dl_sel_btn.setObjectName("mb_dl_sel_btn")
-        dl_all_btn  = QPushButton("Download All")
-        dl_all_btn.setObjectName("mb_dl_all_btn")
+        force_redownload_chk = QCheckBox("Force redownload")
+        force_redownload_chk.setObjectName("mb_force_redownload_chk")
+        force_redownload_chk.setToolTip(
+            "Default: if a file already exists in the cache, it is not downloaded again. "
+            "Enable this to replace partial or corrupted cached files."
+        )
         cancel_btn  = QPushButton("Cancel")
         cancel_btn.setObjectName("mb_cancel_btn")
         cancel_btn.setVisible(False)
@@ -624,7 +656,7 @@ class MoonbeamMixin:
         progress_lbl.setMinimumWidth(70)
 
         bot_layout.addWidget(dl_sel_btn)
-        bot_layout.addWidget(dl_all_btn)
+        bot_layout.addWidget(force_redownload_chk)
         bot_layout.addWidget(cancel_btn)
         bot_layout.addStretch(1)
         bot_layout.addWidget(progress_lbl)
@@ -667,7 +699,7 @@ class MoonbeamMixin:
         self.ui.mb_lbl_ncached   = lbl_ncached
         self.ui.mb_lbl_cdir      = lbl_cdir
         self.ui.mb_dl_sel_btn    = dl_sel_btn
-        self.ui.mb_dl_all_btn    = dl_all_btn
+        self.ui.mb_force_redownload_chk = force_redownload_chk
         self.ui.mb_cancel_btn    = cancel_btn
         self.ui.mb_pop_slist_btn = pop_slist_btn
         self.ui.mb_pop_sel_slist_btn = pop_sel_slist_btn
@@ -682,7 +714,6 @@ class MoonbeamMixin:
         cdir_temp_btn.clicked.connect(self._mb_use_temp_cache)
         tree.clicked.connect(self._mb_on_tree_click)
         dl_sel_btn.clicked.connect(self._mb_download_selected)
-        dl_all_btn.clicked.connect(self._mb_download_all)
         cancel_btn.clicked.connect(self._mb_cancel_download)
         pop_sel_slist_btn.clicked.connect(self._mb_populate_slist_selected)
         pop_slist_btn.clicked.connect(self._mb_populate_slist)
@@ -722,7 +753,7 @@ class MoonbeamMixin:
 
     def _mb_set_action_enabled(self, enabled: bool):
         """Gate download-only buttons on live connection; others work offline."""
-        for name in ("mb_dl_sel_btn", "mb_dl_all_btn"):
+        for name in ("mb_dl_sel_btn", "mb_force_redownload_chk"):
             w = getattr(self.ui, name, None)
             if w:
                 w.setEnabled(enabled)
@@ -978,21 +1009,28 @@ class MoonbeamMixin:
 
         if old_files:
             total_size = sum(f.stat().st_size for f in old_files)
-            msg = (
+            box = QMessageBox(self.ui)
+            box.setIcon(QMessageBox.Question)
+            box.setWindowTitle("Copy cached files before switching?")
+            box.setText(
                 f"Found {len(old_files):,} cached file(s) "
                 f"({_fmt_size(total_size)}) in:\n  {old_path}\n\n"
-                f"Copy to new location before switching?\n  {new_path}\n\n"
-                f"Original files are left in place.\n"
-                f"The switch happens after the copy completes."
+                f"Copy them to the new cache location?\n  {new_path}"
             )
-            reply = QMessageBox.question(
-                self.ui, "Copy cached files?", msg,
-                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
-                QMessageBox.Yes,
+            box.setInformativeText(
+                "The original files stay in place. "
+                "Press Return to copy first, then switch when the copy finishes."
             )
-            if reply == QMessageBox.Cancel:
+            copy_btn = box.addButton("Copy Then Switch", QMessageBox.AcceptRole)
+            switch_btn = box.addButton("Switch Without Copying", QMessageBox.DestructiveRole)
+            cancel_btn = box.addButton(QMessageBox.Cancel)
+            box.setDefaultButton(copy_btn)
+            box.setEscapeButton(cancel_btn)
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked is cancel_btn:
                 return
-            if reply == QMessageBox.Yes:
+            if clicked is copy_btn:
                 # Defer the actual cdir switch until copy finishes
                 self._mb_pending_cdir = new_path
                 self.ui.mb_cdir_edit.setText(f"{new_path}  ← copying…")
@@ -1353,10 +1391,16 @@ class MoonbeamMixin:
         if not iids:
             return
         label = self._mb_curr_subcohort or self._mb_curr_cohort
+        force_redownload = bool(self.ui.mb_force_redownload_chk.isChecked())
+        behavior_line = (
+            "Force redownload is enabled: cached files will be downloaded again."
+            if force_redownload else
+            "If a file already exists in the cache, it will not be downloaded again."
+        )
         reply = QMessageBox.question(
             self.ui, "Download All",
             f"Download all {len(iids):,} individuals from '{label}'?\n"
-            "Already-cached files will be skipped automatically.",
+            f"{behavior_line}",
             QMessageBox.Yes | QMessageBox.No
         )
         if reply != QMessageBox.Yes:
@@ -1377,6 +1421,8 @@ class MoonbeamMixin:
             return
 
         total = len(iids)
+        force_redownload = bool(self.ui.mb_force_redownload_chk.isChecked())
+        verb = "Re-downloading" if force_redownload else "Downloading"
         self.ui.mb_progress.setRange(0, total)
         self.ui.mb_progress.setValue(0)
         self.ui.mb_progress.setVisible(True)
@@ -1384,14 +1430,23 @@ class MoonbeamMixin:
         self.ui.mb_cancel_btn.setVisible(True)
         self._mb_set_action_enabled(False)
         self.ui.mb_connect_btn.setEnabled(False)
-        self.ui.mb_status_lbl.setText(f"Downloading 0 / {total}…")
+        self.ui.mb_status_lbl.setText(f"{verb} 0 / {total}…")
         self.ui.mb_log.clear()
+        if force_redownload:
+            self.ui.mb_log.append(
+                "Force redownload enabled: existing cached files will be replaced before download."
+            )
+        else:
+            self.ui.mb_log.append(
+                "Default mode: existing cached files will not be downloaded again."
+            )
 
         thread = QThread(self)
         worker = _MbDownloadWorker(
             self._mb, iids,
             self._mb_curr_cohort,
-            self._mb_curr_subcohort
+            self._mb_curr_subcohort,
+            force_redownload=force_redownload,
         )
         worker.moveToThread(thread)
 
@@ -1428,7 +1483,9 @@ class MoonbeamMixin:
     def _mb_on_dl_progress(self, current, total):
         self.ui.mb_progress.setValue(current)
         self.ui.mb_progress_lbl.setText(f"{current} / {total}")
-        self.ui.mb_status_lbl.setText(f"Downloading {current} / {total}…")
+        force_redownload = bool(self.ui.mb_force_redownload_chk.isChecked())
+        verb = "Re-downloading" if force_redownload else "Downloading"
+        self.ui.mb_status_lbl.setText(f"{verb} {current} / {total}…")
 
     def _mb_on_item_done(self, iid, success):
         """Update the Cached column in the table for the finished individual."""
@@ -1516,13 +1573,20 @@ class MoonbeamMixin:
             )
             return
 
-        reply = QMessageBox.question(
-            self.ui, "Populate S-List",
-            f"Load {len(rows):,} cached individual(s) from {origin_desc} "
-            f"into the S-List?\nThis will replace the current S-List.",
-            QMessageBox.Yes | QMessageBox.No
+        box = QMessageBox(self.ui)
+        box.setIcon(QMessageBox.Question)
+        box.setWindowTitle("Replace S-List?")
+        box.setText(
+            f"Replace the current S-List with {len(rows):,} cached individual(s) "
+            f"from {origin_desc}?"
         )
-        if reply != QMessageBox.Yes:
+        box.setInformativeText("Press Return to replace the S-List.")
+        replace_btn = box.addButton("Replace S-List", QMessageBox.AcceptRole)
+        cancel_btn = box.addButton(QMessageBox.Cancel)
+        box.setDefaultButton(replace_btn)
+        box.setEscapeButton(cancel_btn)
+        box.exec()
+        if box.clickedButton() is not replace_btn:
             return
 
         try:
@@ -1533,6 +1597,7 @@ class MoonbeamMixin:
             self._proxy.setSourceModel(model)
             self._configure_slist_view()
             self.ui.lbl_slist.setText(f"<moonbeam:{label}>")
+            self.ui.dock_moonbeam.hide()
         except Exception as exc:
             QMessageBox.critical(
                 self.ui, "Moonbeam – S-List Error", str(exc)

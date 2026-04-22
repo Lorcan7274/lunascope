@@ -10,6 +10,8 @@ from PySide6.QtWidgets import (
     QPlainTextEdit, QProgressBar, QPushButton, QVBoxLayout,
 )
 
+from .tls import create_default_context
+
 _PYPI_URL = "https://pypi.org/pypi/lunascope/json"
 _GITHUB_RELEASES_URL = "https://api.github.com/repos/Lorcan7274/lunascope/releases/latest"
 _GITHUB_RELEASES_PAGE = "https://github.com/Lorcan7274/lunascope/releases/latest"
@@ -48,12 +50,7 @@ def start_background_check(current_version: str, on_update_available) -> _Versio
 
 
 def _ssl_context():
-    import ssl
-    try:
-        import certifi
-        return ssl.create_default_context(cafile=certifi.where())
-    except Exception:
-        return ssl.create_default_context()
+    return create_default_context()
 
 
 def _fetch_latest_version_pypi() -> str:
@@ -145,6 +142,9 @@ class _UpdateDialog(QDialog):
         self._buttons = QDialogButtonBox()
         self._update_btn = self._buttons.addButton("Update", QDialogButtonBox.AcceptRole)
         self._cancel_btn = self._buttons.addButton("Cancel", QDialogButtonBox.RejectRole)
+        self._update_btn.setDefault(True)
+        self._update_btn.setAutoDefault(True)
+        self._cancel_btn.setAutoDefault(False)
         self._update_btn.clicked.connect(self._run_update)
         self._cancel_btn.clicked.connect(self.reject)
         layout.addWidget(self._buttons)
@@ -207,6 +207,9 @@ class _ExecUpdateDialog(QDialog):
         buttons = QDialogButtonBox()
         download_btn = buttons.addButton("Open Download Page", QDialogButtonBox.AcceptRole)
         later_btn = buttons.addButton("Later", QDialogButtonBox.RejectRole)
+        download_btn.setDefault(True)
+        download_btn.setAutoDefault(True)
+        later_btn.setAutoDefault(False)
         download_btn.clicked.connect(self._open_releases)
         later_btn.clicked.connect(self.reject)
         layout.addWidget(buttons)

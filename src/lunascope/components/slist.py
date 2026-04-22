@@ -503,19 +503,20 @@ class SListMixin:
 
             matching_annot = self._find_matching_annotation_file(edf_file)
             if matching_annot is not None:
-                msg = (
-                    f"Found matching annotation file for this EDF:\n\n"
-                    f"{matching_annot}\n\n"
-                    f"Load it together with the EDF?"
+                box = QMessageBox(self.ui)
+                box.setIcon(QMessageBox.Question)
+                box.setWindowTitle("Load matching annotation?")
+                box.setText(
+                    "A matching annotation file was found for this EDF.\n\n"
+                    f"{matching_annot}"
                 )
-                ans = QMessageBox.question(
-                    self.ui,
-                    "Load Matching Annotation?",
-                    msg,
-                    QMessageBox.Yes | QMessageBox.No,
-                    QMessageBox.Yes,
-                )
-                if ans == QMessageBox.Yes:
+                box.setInformativeText("Press Return to load the EDF together with this annotation.")
+                load_both_btn = box.addButton("Load EDF + Annotation", QMessageBox.AcceptRole)
+                edf_only_btn = box.addButton("Load EDF Only", QMessageBox.RejectRole)
+                box.setDefaultButton(load_both_btn)
+                box.setEscapeButton(edf_only_btn)
+                box.exec()
+                if box.clickedButton() is load_both_btn:
                     annot_file = matching_annot
 
             row = [ base , edf_file , annot_file ] 

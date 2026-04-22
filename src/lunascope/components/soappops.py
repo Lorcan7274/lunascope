@@ -31,8 +31,11 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QTextBrowser,
     QStyle,
+    QFrame,
+    QListWidget,
+    QListWidgetItem,
 )
-from PySide6.QtCore import QEvent, QMetaObject, Qt, QTimer, Slot
+from PySide6.QtCore import QEvent, QMetaObject, Qt, QTimer, Slot, QSize
 from PySide6.QtGui import QStandardItemModel, QStandardItem
 import html
 import json
@@ -52,7 +55,7 @@ POPS_STATE_FILE = "pops_location.json"
 
 
 class MultiSelectComboBox(QComboBox):
-    """QComboBox with checkable items and persistent popup for multi-select."""
+    """QComboBox-like widget with a custom persistent popup for multi-select."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -60,78 +63,101 @@ class MultiSelectComboBox(QComboBox):
         self.setEditable(True)
         self.lineEdit().setReadOnly(True)
         self.lineEdit().setPlaceholderText("Select one or more channels")
-        self.view().viewport().installEventFilter(self)
-        self._clicking_item = False  # True during the full event cycle of an item click
         self._popup_visible = False
+        self._press_row = -1
+
+        self._popup = QFrame(None, Qt.Popup)
+        self._popup.setFrameShape(QFrame.StyledPanel)
+        self._popup.installEventFilter(self)
+        popup_layout = QVBoxLayout(self._popup)
+        popup_layout.setContentsMargins(0, 0, 0, 0)
+        popup_layout.setSpacing(0)
+
+        self._list = QListWidget(self._popup)
+        self._list.setSelectionMode(QListWidget.NoSelection)
+        self._list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._list.viewport().installEventFilter(self)
+        popup_layout.addWidget(self._list)
+        self.lineEdit().installEventFilter(self)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
-            if self._popup_visible:
-                self._force_close()
-            else:
-                self.showPopup()
+            self._toggle_popup()
             event.accept()
             return
         super().mousePressEvent(event)
 
     def showPopup(self):
+        self._rebuild_popup_geometry()
         self._popup_visible = True
-        super().showPopup()
+        self._popup.show()
+        self._popup.raise_()
+        self._list.setFocus(Qt.PopupFocusReason)
 
     def _force_close(self):
         self._popup_visible = False
-        super().hidePopup()
+        self._popup.hide()
         self._refresh_text()
+
+    def _toggle_popup(self):
+        if self._popup_visible:
+            self._force_close()
+        else:
+            self.showPopup()
 
     def eventFilter(self, obj, event):
-        viewport = self.view().viewport()
-        if obj is viewport and event.type() == QEvent.MouseButtonPress:
-            index = self.view().indexAt(event.pos())
-            if index.isValid():
-                item = self.model().itemFromIndex(index)
-                if item is not None:
-                    item.setCheckState(
-                        Qt.Unchecked if item.checkState() == Qt.Checked else Qt.Checked
-                    )
-                # Hold flag for the entire synchronous event chain that this
-                # press may trigger (Qt can call hidePopup multiple times).
-                # Clear it via a zero-delay timer that fires after all of them.
-                self._clicking_item = True
-                QTimer.singleShot(0, self._end_item_click)
+        if obj is self.lineEdit():
+            if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+                self._toggle_popup()
                 event.accept()
                 return True
-        if obj is viewport and event.type() == QEvent.MouseButtonRelease:
-            event.accept()
-            return True
+            if event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
+                event.accept()
+                return True
+        if obj is self._popup and event.type() == QEvent.Hide:
+            self._popup_visible = False
+            self._press_row = -1
+            self._refresh_text()
+            return False
+        list_widget = getattr(self, "_list", None)
+        if list_widget is not None and obj is list_widget.viewport():
+            if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+                index = list_widget.indexAt(event.pos())
+                self._press_row = index.row() if index.isValid() else -1
+                event.accept()
+                return True
+            if event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
+                index = list_widget.indexAt(event.pos())
+                row = index.row() if index.isValid() else -1
+                if row >= 0 and row == self._press_row:
+                    self._toggle_row(row)
+                self._press_row = -1
+                event.accept()
+                return True
         return super().eventFilter(obj, event)
 
-    def _end_item_click(self):
-        self._clicking_item = False
-        self._refresh_text()
-
     def hidePopup(self):
-        if self._clicking_item:
-            return  # suppress all Qt-internal hide calls during an item click
-        self._popup_visible = False
-        super().hidePopup()
-        self._refresh_text()
+        self._force_close()
 
     def set_items(self, labels, checked_labels=None):
         checked = set(checked_labels or [])
         model = self.model()
         model.clear()
+        self._list.clear()
         for lab in labels:
             item = QStandardItem(str(lab))
             item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
             item.setData(Qt.Checked if lab in checked else Qt.Unchecked, Qt.CheckStateRole)
             model.appendRow(item)
+            popup_item = QListWidgetItem(str(lab), self._list)
+            popup_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
+            popup_item.setCheckState(Qt.Checked if lab in checked else Qt.Unchecked)
         self._refresh_text()
 
     def checked_items(self):
         out = []
-        model = self.model()
-        for r in range(model.rowCount()):
-            item = model.item(r)
+        for r in range(self._list.count()):
+            item = self._list.item(r)
             if item and item.checkState() == Qt.Checked:
                 out.append(item.text())
         return out
@@ -145,6 +171,31 @@ class MultiSelectComboBox(QComboBox):
             self.lineEdit().setText(", ".join(chs))
         else:
             self.lineEdit().setText(f"{len(chs)} selected")
+
+    def _toggle_row(self, row: int):
+        item = self._list.item(row)
+        model_item = self.model().item(row)
+        if item is None or model_item is None:
+            return
+        checked = item.checkState() != Qt.Checked
+        state = Qt.Checked if checked else Qt.Unchecked
+        item.setCheckState(state)
+        model_item.setCheckState(state)
+        self._refresh_text()
+
+    def _rebuild_popup_geometry(self):
+        row_count = self._list.count()
+        row_h = self._list.sizeHintForRow(0)
+        if row_h <= 0:
+            row_h = self.fontMetrics().height() + 10
+        frame = self._popup.frameWidth() * 2
+        visible_rows = min(max(row_count, 1), 10)
+        popup_h = visible_rows * row_h + frame
+        if row_count > visible_rows:
+            popup_h += self._list.horizontalScrollBar().sizeHint().height()
+        popup_w = max(self.width(), self._list.sizeHintForColumn(0) + 32)
+        self._popup.resize(QSize(popup_w, popup_h))
+        self._popup.move(self.mapToGlobal(self.rect().bottomLeft()))
 
 
 def _replace_with_multiselect(combo: QComboBox) -> MultiSelectComboBox:

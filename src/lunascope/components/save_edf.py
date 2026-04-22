@@ -408,13 +408,17 @@ class SaveEDFDialog(QDialog):
 
         # Offer to create folder if it doesn't exist yet
         if not os.path.isdir(out_dir):
-            ans = QMessageBox.question(
-                self,
-                "Create folder?",
-                f"Output folder does not exist:\n\n{out_dir}\n\nCreate it?",
-                QMessageBox.Yes | QMessageBox.No,
-            )
-            if ans != QMessageBox.Yes:
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Question)
+            box.setWindowTitle("Create output folder?")
+            box.setText(f"Create this output folder?\n\n{out_dir}")
+            box.setInformativeText("Press Return to create the folder and continue.")
+            create_btn = box.addButton("Create Folder", QMessageBox.AcceptRole)
+            cancel_btn = box.addButton(QMessageBox.Cancel)
+            box.setDefaultButton(create_btn)
+            box.setEscapeButton(cancel_btn)
+            box.exec()
+            if box.clickedButton() is not create_btn:
                 return
             try:
                 os.makedirs(out_dir, exist_ok=True)

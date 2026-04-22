@@ -5,20 +5,44 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "lunascope"
 version = "1.5.2"
-description = "Sleep-EEG viewer and interface to Luna"
+description = "Desktop sleep-EEG viewer and annotation interface for Luna"
 readme = "README.md"
 requires-python = ">=3.9, <3.15"
 license = {file = "LICENSE"}
+keywords = ["sleep", "EEG", "PSG", "Luna", "viewer", "annotation", "GUI"]
 classifiers = [
-  "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Science/Research",
+  "Intended Audience :: Healthcare Industry",
+  "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+  "Natural Language :: English",
+  "Operating System :: MacOS",
+  "Operating System :: Microsoft :: Windows",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Scientific/Engineering",
+  "Topic :: Scientific/Engineering :: Medical Science Apps.",
 ]
+
 authors = [
   {name = "Lorcan Purcell", email = "lpurcell26@nmhschool.org"  },
-  {name = "Shaun Purcell", email = "shaun.purcell@nyspi.columbia.edu"},
-  {name = "Nataliia Kozhemiako", email = "nkozhemiako@bwh.harvard.edu"} ]
+  {name = "Tejas Karkera", email = "tkarkera@mgh.harvard.edu"},
+  {name = "Nataliia Kozhemiako", email = "nkozhemiako@bwh.harvard.edu"},
+  {name = "Shaun Purcell", email = "shaun.purcell@nyspi.columbia.edu"} ]
+
+maintainers = [
+  {name = "Tejas Karkera", email = "tkarkera@mgh.harvard.edu"},
+  {name = "Lorcan Purcell", email = "lpurcell26@nmhschool.org"  }
+]
 
 dependencies = [
-  "lunapi>=1.5.1,<=1.5.1",
+  "lunapi>=1.5.2,<1.6",
   "PySide6>=6.10,<6.11",
   "pyqtgraph>=0.13.7,<0.14",
   "numpy>=2.0,<3",
@@ -26,6 +50,10 @@ dependencies = [
   "matplotlib>=3.8,<4",
   "psutil>=5.9"
 ]
+
+[project.urls]
+Homepage = "https://zzz.nyspi.org/lunascope/"
+Documentation = "https://zzz.nyspi.org/lunascope/"
 
 [project.scripts]
 lunascope = "lunascope.app:main"
