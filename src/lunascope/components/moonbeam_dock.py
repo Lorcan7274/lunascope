@@ -40,14 +40,13 @@ import pandas as pd
 from ..file_dialogs import existing_directory
 from lunapi.moonbeam import _load_token as _mb_load_tok, _save_token as _mb_save_tok
 
-from ..helpers import screen_clamp, is_dark_palette
+from ..helpers import screen_clamp, is_dark_palette, AuxiliaryWindow
 
 from PySide6.QtCore import Qt, QObject, QRegularExpression, QSortFilterProxyModel, QThread, Signal, Slot
 from PySide6.QtGui import QColor, QFont, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
-    QDockWidget,
     QFrame,
     QHBoxLayout,
     QHeaderView,
@@ -412,16 +411,8 @@ class MoonbeamMixin:
         # ----------------------------------------------------------------
         # Build the dock widget
         # ----------------------------------------------------------------
-        dock = QDockWidget("Moonbeam (NSRR)", self.ui)
+        dock = AuxiliaryWindow("Moonbeam (NSRR)", self.ui)
         dock.setObjectName("dock_moonbeam")
-        dock.setAllowedAreas(
-            Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea | Qt.BottomDockWidgetArea
-        )
-        dock.setFeatures(
-            QDockWidget.DockWidgetMovable
-            | QDockWidget.DockWidgetFloatable
-            | QDockWidget.DockWidgetClosable
-        )
         dock.setWindowFlag(Qt.WindowMinimizeButtonHint, True)
         dock.setWindowFlag(Qt.WindowMaximizeButtonHint, True)
 
@@ -667,8 +658,6 @@ class MoonbeamMixin:
 
         # ---- Attach dock to main window ---------------------------------
         dock.setWidget(root)
-        self.ui.addDockWidget(Qt.RightDockWidgetArea, dock)
-        dock.setFloating(True)
         _mb_w, _mb_h = screen_clamp(*self._MB_FLOAT_SIZE)
         dock.resize(_mb_w, _mb_h)
         # Position near top-centre of the main window
@@ -1596,7 +1585,10 @@ class MoonbeamMixin:
             model = self.df_to_model(df)
             self._proxy.setSourceModel(model)
             self._configure_slist_view()
-            self.ui.lbl_slist.setText(f"<moonbeam:{label}>")
+            if hasattr(self, "_set_slist_label"):
+                self._set_slist_label(f"<moonbeam:{label}>")
+            else:
+                self.ui.lbl_slist.setText(f"<moonbeam:{label}>")
             self.ui.dock_moonbeam.hide()
         except Exception as exc:
             QMessageBox.critical(

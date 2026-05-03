@@ -33,7 +33,7 @@ from PySide6.QtCore import QModelIndex, QObject, Signal, Qt, QSortFilterProxyMod
 from PySide6.QtGui import QAction, QStandardItemModel
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QDockWidget, QLabel, QFrame, QSizePolicy, QMessageBox, QLayout
-from PySide6.QtWidgets import QMainWindow, QProgressBar, QTableView, QAbstractItemView
+from PySide6.QtWidgets import QApplication, QMainWindow, QProgressBar, QTableView, QAbstractItemView
 from PySide6.QtWidgets import QFileDialog, QPushButton
 from PySide6.QtWidgets import QSplitter, QVBoxLayout, QWidget
 from PySide6.QtGui import QKeySequence, QGuiApplication
@@ -65,6 +65,7 @@ from .components.results_io import ResultsIOMixin
 from .components.moonbeam_dock import MoonbeamMixin
 from .components.explorer_dock import ExplorerMixin
 from .components.annotator import AnnotatorMixin
+from .components.predict_dock import PredictMixin
 from .gui_help import apply_gui_help, set_render_button_help
 from .session_state import save_session_file, load_session_file, save_geometry_file, load_geometry_file
 from .runtime_paths import app_state_file
@@ -84,9 +85,10 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
                   SpecMixin , ActigraphyMixin, MasksMixin,
                   MoonbeamMixin, ExplorerMixin, AnnotatorMixin, TutorialMixin,
                   SaveEDFMixin, DropSignalsMixin,
-                  PSDOverlayMixin ):
+                  PSDOverlayMixin, PredictMixin ):
 
     sig_results_changed = Signal()   # emitted whenever self.results is repopulated
+    sig_window_range_changed = Signal(float, float)
     sig_proj_eval_stream = Signal(str)
     sig_proj_eval_progress = Signal(int, int)
     sig_proj_eval_finished = Signal(object)
@@ -128,6 +130,7 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         self._init_explorer()
         self._init_annotator()
         self._init_psd_overlay()
+        self._init_predict()
         
         # for the tables added above, ensure all are read-only
         for v in self.ui.findChildren(QTableView):
@@ -135,7 +138,9 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         
         # set up menu items: open projects
         act_load_slist = QAction("Load S-List", self)
+        act_save_slist = QAction("Save S-List...", self)
         act_build_slist = QAction("Build S-List", self)
+        act_attach_annots = QAction("Attach Annotation Folder to S-List", self)
         act_load_edf = QAction("Load EDF", self)
         act_load_annot = QAction("Load Annotations", self)
         act_save_edf = QAction("Export EDF + Annotations…", self)
@@ -149,7 +154,9 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
 
         # connect to same slots as buttons
         act_load_slist.triggered.connect(self.open_file)
+        act_save_slist.triggered.connect(self.save_file)
         act_build_slist.triggered.connect(self.open_folder)
+        act_attach_annots.triggered.connect(self._attach_annotation_folder)
         act_load_edf.triggered.connect(self.open_edf)
         act_load_annot.triggered.connect(self.open_annot)
         act_save_edf.triggered.connect(self._save_edf_annots)
@@ -163,7 +170,9 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         self._act_proj_eval = act_proj_eval
 
         self.ui.menuProject.addAction(act_load_slist)
+        self.ui.menuProject.addAction(act_save_slist)
         self.ui.menuProject.addAction(act_build_slist)
+        self.ui.menuProject.addAction(act_attach_annots)
         self.ui.menuProject.addSeparator()
         self.ui.menuProject.addAction(act_load_edf)
         self.ui.menuProject.addAction(act_load_annot)
@@ -173,9 +182,6 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         self.ui.menuProject.addAction(act_refresh)
         self.ui.menuProject.addSeparator()
         self.ui.menuProject.addAction(act_proj_eval)
-        self.ui.menuProject.addSeparator()
-        self.ui.menuProject.addAction(act_save_session)
-        self.ui.menuProject.addAction(act_load_session)
         self.ui.menuProject.addAction(act_download_pops)
         self.ui.menuProject.addAction(act_download_tutorial)
 
@@ -190,17 +196,16 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         self.ui.menuView.addAction(self.ui.dock_spectrogram.toggleViewAction())
         act_hypno      = self.ui.dock_hypno.toggleViewAction()
         act_actigraphy = self.ui.dock_actigraphy.toggleViewAction()
-        self.ui.menuView.addAction(act_hypno)
-        self.ui.menuView.addAction(act_actigraphy)
         self._act_hypno_menu      = act_hypno
         self._act_actigraphy_menu = act_actigraphy
 
         # Single Ctrl+7 dispatcher – toggles whichever dock is active for the mode
-        act_7 = QAction("Hypno/Actigraphy (Ctrl+7)", self)
+        act_7 = QAction("(6) Hypnogram/Actigraphy", self)
         act_7.setShortcut(QKeySequence("Ctrl+7"))
         act_7.setShortcutContext(Qt.ApplicationShortcut)
         act_7.triggered.connect(self._toggle_hypno_or_actigraphy)
         self.ui.addAction(act_7)   # attach to window so it fires globally
+        self.ui.menuView.addAction(act_7)
         self.ui.menuView.addSeparator()
         self.ui.menuView.addAction(self.ui.dock_mask.toggleViewAction())
         self.ui.menuView.addAction(self.ui.dock_console.toggleViewAction())
@@ -211,12 +216,26 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         self.ui.menuView.addAction(act_moonbeam)
         act_annex = self.ui.dock_explorer.toggleViewAction()
         act_annex.setShortcut(QKeySequence("Ctrl+E"))
-        act_annex.setText("Explorer (Ctrl+E)")
+        act_annex.setText("Explorer")
         self.ui.menuView.addAction(act_annex)
         act_annotator = self.annotator.toggleViewAction()
         act_annotator.setShortcut(QKeySequence("Ctrl+Shift+A"))
-        act_annotator.setText("Annotator (Ctrl+Shift+A)")
+        act_annotator.setText("Annotator")
         self.ui.menuView.addAction(act_annotator)
+        act_predict = self.ui.dock_predict.toggleViewAction()
+        act_predict.setShortcut(QKeySequence("Ctrl+Shift+P"))
+        act_predict.setText("Predict")
+        self.ui.menuView.addAction(act_predict)
+        act_cycle_next = QAction("Next Lunascope Window", self)
+        act_cycle_next.setShortcuts([QKeySequence("Ctrl+`"), QKeySequence("Meta+`")])
+        act_cycle_next.setShortcutContext(Qt.ApplicationShortcut)
+        act_cycle_next.triggered.connect(lambda: self._cycle_lunascope_windows(+1))
+        self.ui.addAction(act_cycle_next)
+        act_cycle_prev = QAction("Previous Lunascope Window", self)
+        act_cycle_prev.setShortcuts([QKeySequence("Ctrl+Shift+`"), QKeySequence("Meta+Shift+`")])
+        act_cycle_prev.setShortcutContext(Qt.ApplicationShortcut)
+        act_cycle_prev.triggered.connect(lambda: self._cycle_lunascope_windows(-1))
+        self.ui.addAction(act_cycle_prev)
         self.ui.menuView.addSeparator()
         self.ui.menuView.addAction(self.ui.dock_help.toggleViewAction())
 
@@ -248,7 +267,9 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
 
         self._help_actions = {
             "project_load_slist": act_load_slist,
+            "project_save_slist": act_save_slist,
             "project_build_slist": act_build_slist,
+            "project_attach_annots": act_attach_annots,
             "project_load_edf": act_load_edf,
             "project_load_annot": act_load_annot,
             "project_refresh": act_refresh,
@@ -394,9 +415,7 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         self.ui.dock_actigraphy.hide()
         self._detach_actigraphy_dock_from_main_layout()
         self.ui.dock_explorer.hide()
-        self.ui.dock_explorer.setFloating(True)
         self.annotator.hide()
-        self.annotator.setFloating(True)
         self.ui.dock_spectrogram.widget().setMinimumHeight(240)
         self._capture_default_dock_layout()
         QTimer.singleShot(0, self._set_initial_focus)
@@ -510,6 +529,39 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         else:
             dock = self.ui.dock_hypno
         dock.setVisible(not dock.isVisible())
+
+    def _lunascope_window_cycle_order(self):
+        windows = [self.ui]
+        for name in ("dock_explorer", "dock_moonbeam", "dock_actigraphy", "dock_predict"):
+            win = getattr(self.ui, name, None)
+            if win is not None:
+                windows.append(win)
+        if getattr(self, "annotator", None) is not None:
+            windows.append(self.annotator)
+        ordered = []
+        seen = set()
+        for win in windows:
+            if win is None or id(win) in seen:
+                continue
+            seen.add(id(win))
+            ordered.append(win)
+        return ordered
+
+    def _cycle_lunascope_windows(self, step: int):
+        windows = [w for w in self._lunascope_window_cycle_order() if w.isVisible()]
+        if not windows:
+            return
+        active = QApplication.activeWindow()
+        current = -1
+        for idx, win in enumerate(windows):
+            if active is win or (active is not None and win.isAncestorOf(active)):
+                current = idx
+                break
+        next_idx = 0 if current < 0 else (current + step) % len(windows)
+        target = windows[next_idx]
+        target.show()
+        target.raise_()
+        target.activateWindow()
 
     def _update_mode_badge(self):
         multiday = getattr(self, "multiday_mode", False)
@@ -651,7 +703,7 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
 
             if box.clickedButton() is create_btn:
                 try:
-                    self.p.eval( 'RECORD-SIZE dur=1 no-problem edf=' + edf_file[:-4] )
+                    self.p.eval_lunascope( 'RECORD-SIZE dur=1 no-problem edf=' + edf_file[:-4] )
                 except Exception as e:
                     QMessageBox.critical(
                         self.ui,
@@ -681,6 +733,7 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         self._update_actigraphy_list()
         self._update_mask_list()
         self._update_soap_list()
+        self._update_predict_channels()
         self._update_params()
 
         # get/set cmaps (done automatically via updates) 
@@ -885,7 +938,7 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
 
         try:
             session_meta = {}
-            slabel = self.ui.lbl_slist.text().strip() if hasattr(self.ui, "lbl_slist") else ""
+            slabel = self._get_slist_label_full_text() if hasattr(self, "_get_slist_label_full_text") else (self.ui.lbl_slist.text().strip() if hasattr(self.ui, "lbl_slist") else "")
             if slabel and slabel not in {"(none)", "<internal>"}:
                 session_meta["slist_path"] = slabel
 
@@ -938,9 +991,6 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
             return
 
         was_visible = dock.isVisible()
-        if not dock.isFloating():
-            dock.setFloating(True)
-
         if was_visible:
             if hasattr(self, "_present_actigraphy_dock"):
                 self._present_actigraphy_dock()
@@ -987,7 +1037,10 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
                     df = self.proj.sample_list()
                     model = self.df_to_model(df)
                     self._proxy.setSourceModel(model)
-                    self.ui.lbl_slist.setText("<internal>")
+                    if hasattr(self, "_set_slist_label"):
+                        self._set_slist_label("<internal>")
+                    else:
+                        self.ui.lbl_slist.setText("<internal>")
                     self._configure_slist_view()
                     if model.rowCount() > 0:
                         row = max(0, min(selected_row, model.rowCount() - 1))
@@ -1085,7 +1138,6 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         self.annotator.hide()
 
         self.ui.dock_explorer.hide()
-        self.ui.dock_explorer.setFloating(True)
         self._detach_actigraphy_dock_from_main_layout()
 
     def _toggle_signals_only_or_default(self):
@@ -1116,6 +1168,15 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
 
     def eventFilter(self, obj, event):
         try:
+            if (
+                hasattr(self, "_is_project_eval_cancel_key_event")
+                and self._is_project_eval_cancel_key_event(event)
+                and getattr(self, "_busy", False)
+                and getattr(self, "project_mode", False)
+            ):
+                self._request_project_eval_cancel()
+                event.accept()
+                return True
             if hasattr(self, "_annotator_handle_widget_key_event"):
                 if self._annotator_handle_widget_key_event(obj, event):
                     return True

@@ -30,7 +30,6 @@ from PySide6.QtCore import Qt, QEvent
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
-    QDockWidget,
     QFormLayout,
     QGridLayout,
     QGroupBox,
@@ -42,6 +41,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from ..helpers import AuxiliaryWindow
 
 
 ANNOTATOR_KEYS = ("1", "2", "3", "4", "5", "6", "7", "8", "9", "0")
@@ -221,16 +222,10 @@ class AnnotEditorWidget(QWidget):
 # Dock shell — tabbed: "Add" (original) + "Edit" (new)
 # ---------------------------------------------------------------------------
 
-class AnnotatorDock(QDockWidget):
+class AnnotatorDock(AuxiliaryWindow):
     def __init__(self, parent=None):
         super().__init__("Annotator", parent)
         self.setObjectName("dock_annotator")
-        self.setFloating(True)
-        self.setFeatures(
-            QDockWidget.DockWidgetMovable
-            | QDockWidget.DockWidgetFloatable
-            | QDockWidget.DockWidgetClosable
-        )
 
         root = QWidget(self)
         self.setWidget(root)
@@ -383,7 +378,6 @@ class AnnotatorMixin:
 
     def _init_annotator(self):
         self.annotator = AnnotatorDock(self.ui)
-        self.ui.addDockWidget(Qt.RightDockWidgetArea, self.annotator)
         self.annotator.hide()
         self._annotator_pending: Optional[PendingAnnotation] = None
         self._annotator_staged: list[StagedAnnotation] = []

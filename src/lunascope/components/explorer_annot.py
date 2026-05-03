@@ -26,22 +26,27 @@
 
 """Cohort-level annotation explorer tab (peri-event, overlap, nearest, etc.)"""
 
+import os
 import traceback
 
 import numpy as np
+import pandas as pd
 
 from PySide6 import QtCore, QtWidgets
 from PySide6.QtCore import Qt, QSignalBlocker, QTimer
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFrame, QHBoxLayout, QLabel,
-    QListWidget, QListWidgetItem, QPushButton, QScrollArea, QSizePolicy, QSplitter,
+    QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel,
+    QListWidget, QListWidgetItem, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QSplitter,
     QVBoxLayout, QWidget,
 )
 
 from .explorer_base import BG, FG, GRID, SEP, _ExplorerTab
+from .soappops import MultiSelectComboBox
 from ..file_dialogs import open_file_name, save_file_name
 from .annot_explorer_funcs import (
+    ANNEX_CACHE_GAP_SECS,
+    ANNEX_SUBJECT_CLASS,
     ANNOT_PALETTE,
     compile_cohort,
     duration_stats,
@@ -56,6 +61,140 @@ from .annot_explorer_funcs import (
 )
 
 
+_MAX_FILTER_LEVELS = 10
+
+
+def _numeric_sort(values):
+    lst = list(values)
+    non_nan = [v for v in lst if not pd.isna(v)]
+    try:
+        [float(v) for v in non_nan]
+        def _num_key(v):
+            return (0, float(v)) if not pd.isna(v) else (1, 0.0)
+        return sorted(lst, key=_num_key)
+    except (ValueError, TypeError):
+        def _str_key(v):
+            return (0, str(v)) if not pd.isna(v) else (1, "")
+        return sorted(lst, key=_str_key)
+
+
+def _display_level(value):
+    if pd.isna(value):
+        return "(missing)"
+    if isinstance(value, (float, np.floating)) and float(value).is_integer():
+        return str(int(value))
+    return str(value)
+
+
+class _FilterRow(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._levels_by_col = {}
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        combo_col = QComboBox()
+        combo_col.setMinimumWidth(140)
+        combo_col.addItem("(factor)", None)
+
+        combo_mode = QComboBox()
+        combo_mode.setFixedWidth(90)
+        combo_mode.addItem("Include", "include")
+        combo_mode.addItem("Exclude", "exclude")
+
+        combo_levels = MultiSelectComboBox()
+        combo_levels.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        combo_levels.lineEdit().setPlaceholderText("Select levels")
+
+        btn_remove = QPushButton("✕")
+        btn_remove.setFixedWidth(26)
+        btn_remove.setToolTip("Remove this filter")
+
+        layout.addWidget(combo_col)
+        layout.addWidget(combo_mode)
+        layout.addWidget(combo_levels, 1)
+        layout.addWidget(btn_remove)
+
+        self._combo_col = combo_col
+        self._combo_mode = combo_mode
+        self._combo_levels = combo_levels
+        self._btn_remove = btn_remove
+
+        combo_col.currentIndexChanged.connect(self._on_column_changed)
+
+    def bind(self, on_change, on_remove):
+        self._combo_col.currentIndexChanged.connect(on_change)
+        self._combo_mode.currentIndexChanged.connect(on_change)
+        self._combo_levels.selectionChanged.connect(on_change)
+        self._btn_remove.clicked.connect(on_remove)
+
+    def set_candidates(self, candidates, state=None):
+        state = state or {}
+        current_col = state.get("column")
+        self._levels_by_col = {
+            col: [(str(label), value) for label, value in levels]
+            for col, levels in candidates.items()
+        }
+        self._combo_col.blockSignals(True)
+        self._combo_col.clear()
+        self._combo_col.addItem("(factor)", None)
+        for col in candidates:
+            self._combo_col.addItem(col, col)
+        idx = self._combo_col.findData(current_col)
+        self._combo_col.setCurrentIndex(idx if idx >= 0 else 0)
+        self._combo_col.blockSignals(False)
+
+        mode = state.get("mode", "include")
+        idx = self._combo_mode.findData(mode)
+        self._combo_mode.setCurrentIndex(idx if idx >= 0 else 0)
+
+        self._refresh_levels(state.get("labels"))
+
+    def get_state(self):
+        return {
+            "column": self._combo_col.currentData(),
+            "mode": self._combo_mode.currentData() or "include",
+            "labels": self._combo_levels.checked_items(),
+        }
+
+    def active_filter(self):
+        col = self._combo_col.currentData()
+        if not col:
+            return None
+        levels = self._levels_by_col.get(col, [])
+        all_labels = [label for label, _ in levels]
+        checked = self._combo_levels.checked_items()
+        if not checked or len(checked) == len(all_labels):
+            return None
+        selected = {label for label in checked}
+        values = {value for label, value in levels if label in selected}
+        if not values:
+            return None
+        return {
+            "column": col,
+            "mode": self._combo_mode.currentData() or "include",
+            "values": values,
+        }
+
+    def _on_column_changed(self, *_):
+        self._refresh_levels()
+
+    def _refresh_levels(self, selected_labels=None):
+        col = self._combo_col.currentData()
+        levels = self._levels_by_col.get(col, [])
+        labels = [label for label, _ in levels]
+        self._combo_levels.blockSignals(True)
+        self._combo_levels.setEnabled(bool(labels))
+        self._combo_levels.set_items(labels, checked_labels=labels)
+        if selected_labels is not None:
+            wanted = [lab for lab in selected_labels if lab in labels]
+            if wanted:
+                self._combo_levels.set_checked_items(wanted)
+        self._combo_levels.blockSignals(False)
+
+
 class AnnotTab(_ExplorerTab):
     """Annotation Explorer tab: cohort-level annotation visualisation."""
 
@@ -67,6 +206,7 @@ class AnnotTab(_ExplorerTab):
     _VIEWS = [
         ("peth",      "Peri-event (PETH)"),
         ("overlap",   "Overlap matrix"),
+        ("luna_overlap", "Luna OVERLAP"),
         ("nearest",   "Nearest-neighbour"),
         ("raster",    "Event raster"),
         ("occupancy", "Temporal occupancy"),
@@ -78,6 +218,11 @@ class AnnotTab(_ExplorerTab):
         super().__init__(ctrl, parent)
         self._cohort        = None
         self._render_result = None
+        self._class_source  = "dock4"
+        self._aux_df: pd.DataFrame | None = None
+        self._aux_path: str = ""
+        self._filter_rows: list[_FilterRow] = []
+        self._filter_candidates: dict[str, list[tuple[str, object]]] = {}
         self._render_timer  = QTimer(self)
         self._render_timer.setSingleShot(True)
         self._render_timer.setInterval(250)
@@ -101,7 +246,7 @@ class AnnotTab(_ExplorerTab):
 
         # ---- row 1: compile / status / view / export ------------------
         row1 = QWidget()
-        rl1  = QHBoxLayout(row1)
+        rl1  = QGridLayout(row1)
         rl1.setContentsMargins(0, 0, 0, 0); rl1.setSpacing(6)
 
         btn_compile = QPushButton("Compile All")
@@ -121,16 +266,63 @@ class AnnotTab(_ExplorerTab):
 
         btn_export = QPushButton("Export…"); btn_export.setFixedWidth(80)
 
-        rl1.addWidget(btn_compile)
-        rl1.addWidget(btn_load)
-        rl1.addWidget(btn_save)
-        rl1.addWidget(lbl_status, 1)
-        rl1.addWidget(QLabel("View:")); rl1.addWidget(combo_view)
-        rl1.addWidget(btn_export)
+        rl1.addWidget(btn_compile, 0, 0)
+        rl1.addWidget(btn_load, 0, 1)
+        rl1.addWidget(btn_save, 0, 2)
+        rl1.addWidget(lbl_status, 0, 3, 1, 3)
+        rl1.addWidget(QLabel("View:"), 1, 0)
+        rl1.addWidget(combo_view, 1, 1, 1, 2)
+        rl1.addWidget(btn_export, 1, 3)
+        rl1.setColumnStretch(3, 1)
+
+        # ---- row 1b: covariate file ----------------------------------
+        row1b = QWidget()
+        rl1b = QHBoxLayout(row1b)
+        rl1b.setContentsMargins(0, 0, 0, 0); rl1b.setSpacing(6)
+
+        btn_load_cov = QPushButton("Load covariates…"); btn_load_cov.setFixedWidth(140)
+        btn_load_cov.setToolTip("Upload a TSV/CSV file with an ID column to merge as subject covariates")
+        btn_clear_cov = QPushButton("✕"); btn_clear_cov.setFixedWidth(26)
+        btn_clear_cov.setToolTip("Remove loaded covariate file")
+        lbl_cov_file = QLabel("(none)")
+        lbl_cov_file.setStyleSheet("color:#888; font-size:11px;")
+        lbl_cov_file.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        rl1b.addWidget(QLabel("Covariates:"))
+        rl1b.addWidget(btn_load_cov)
+        rl1b.addWidget(btn_clear_cov)
+        rl1b.addWidget(lbl_cov_file, 1)
+
+        # ---- row 1c: optional subject filters ------------------------
+        row1c = QWidget()
+        rl1c = QHBoxLayout(row1c)
+        rl1c.setContentsMargins(0, 0, 0, 0); rl1c.setSpacing(6)
+
+        btn_add_filter = QPushButton("+ Filter")
+        btn_add_filter.setFixedWidth(80)
+        btn_add_filter.setToolTip("Subset subjects before analysis")
+        btn_clear_filters = QPushButton("Clear")
+        btn_clear_filters.setFixedWidth(60)
+        btn_clear_filters.setToolTip("Remove all subject filters")
+        lbl_filters = QLabel("Subset IDs:")
+        lbl_filters_hint = QLabel("")
+        lbl_filters_hint.setStyleSheet("color:#888; font-size:11px;")
+        lbl_filters_hint.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        rl1c.addWidget(lbl_filters)
+        rl1c.addWidget(btn_add_filter)
+        rl1c.addWidget(btn_clear_filters)
+        rl1c.addWidget(lbl_filters_hint, 1)
+
+        filter_host = QWidget()
+        filter_host.setLayout(QVBoxLayout())
+        filter_host.layout().setContentsMargins(0, 0, 0, 0)
+        filter_host.layout().setSpacing(4)
+        filter_host.setVisible(False)
 
         # ---- row 2: parameters ----------------------------------------
         row2 = QWidget()
-        rl2  = QHBoxLayout(row2)
+        rl2  = QGridLayout(row2)
         rl2.setContentsMargins(0, 0, 0, 0); rl2.setSpacing(6)
 
         combo_ref = QComboBox()
@@ -203,17 +395,58 @@ class AnnotTab(_ExplorerTab):
         lbl_win = QLabel("±")
         lbl_bin = QLabel("Bin:")
 
-        rl2.addWidget(lbl_ref); rl2.addWidget(combo_ref, 1)
-        rl2.addWidget(lbl_win); rl2.addWidget(spin_win)
-        rl2.addWidget(lbl_bin); rl2.addWidget(spin_bin)
-        rl2.addWidget(lbl_anchor);   rl2.addWidget(combo_anchor)
-        rl2.addWidget(lbl_tgt_mode); rl2.addWidget(combo_tgt_mode)
-        rl2.addWidget(lbl_nn_anchor); rl2.addWidget(combo_nn_anchor)
-        rl2.addWidget(lbl_nn_mode);   rl2.addWidget(combo_nn_mode)
-        rl2.addWidget(lbl_gap);      rl2.addWidget(spin_gap)
-        rl2.addWidget(lbl_flank);    rl2.addWidget(spin_flank)
-        rl2.addWidget(lbl_maxdist);  rl2.addWidget(spin_maxdist)
-        rl2.addStretch(1)
+        rl2.addWidget(lbl_ref, 0, 0)
+        rl2.addWidget(combo_ref, 0, 1)
+        rl2.addWidget(lbl_win, 0, 2)
+        rl2.addWidget(spin_win, 0, 3)
+        rl2.addWidget(lbl_bin, 0, 4)
+        rl2.addWidget(spin_bin, 0, 5)
+        rl2.addWidget(lbl_anchor, 0, 6)
+        rl2.addWidget(combo_anchor, 0, 7)
+        rl2.addWidget(lbl_tgt_mode, 0, 8)
+        rl2.addWidget(combo_tgt_mode, 0, 9)
+        rl2.addWidget(lbl_nn_anchor, 1, 0)
+        rl2.addWidget(combo_nn_anchor, 1, 1)
+        rl2.addWidget(lbl_nn_mode, 1, 2)
+        rl2.addWidget(combo_nn_mode, 1, 3)
+        rl2.addWidget(lbl_gap, 1, 4)
+        rl2.addWidget(spin_gap, 1, 5)
+        rl2.addWidget(lbl_flank, 1, 6)
+        rl2.addWidget(spin_flank, 1, 7)
+        rl2.addWidget(lbl_maxdist, 1, 8)
+        rl2.addWidget(spin_maxdist, 1, 9)
+        rl2.setColumnStretch(1, 1)
+
+        # ---- row 2b: Luna OVERLAP ------------------------------------
+        row2b = QWidget()
+        rl2b = QGridLayout(row2b)
+        rl2b.setContentsMargins(0, 0, 0, 0); rl2b.setSpacing(6)
+
+        combo_overlap_source = QComboBox()
+        combo_overlap_source.setFixedWidth(150)
+        combo_overlap_source.addItem("Current subject", "current")
+        combo_overlap_source.addItem("Compiled cohort", "cohort")
+        combo_overlap_source.setToolTip(
+            "Current subject: run OVERLAP on the attached instance\n"
+            "Compiled cohort: build an in-memory pooled timeline with per-subject offsets"
+        )
+
+        txt_overlap_args = QPlainTextEdit()
+        txt_overlap_args.setPlaceholderText(
+            "Enter OVERLAP arguments, e.g. seed=SP other=SO bg=N2 nreps=500 seed-seed=T"
+        )
+        txt_overlap_args.setMaximumHeight(58)
+        txt_overlap_args.setTabChangesFocus(True)
+
+        btn_overlap_run = QPushButton("Run OVERLAP")
+        btn_overlap_run.setFixedWidth(110)
+
+        rl2b.addWidget(btn_overlap_run, 0, 0)
+        rl2b.addWidget(QLabel("Source:"), 1, 0)
+        rl2b.addWidget(combo_overlap_source, 1, 1)
+        rl2b.addWidget(QLabel("Args:"), 2, 0)
+        rl2b.addWidget(txt_overlap_args, 2, 1)
+        rl2b.setColumnStretch(1, 1)
 
         # ---- class list (left) + canvas (right) -----------------------
         btn_toggle_all = QPushButton("Clear all")
@@ -233,6 +466,7 @@ class AnnotTab(_ExplorerTab):
         list_layout.setSpacing(6)
         list_layout.addWidget(btn_toggle_all)
         list_layout.addWidget(list_cls, 1)
+        list_host.hide()
 
         canvas_host = QFrame()
         canvas_host.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
@@ -266,11 +500,22 @@ class AnnotTab(_ExplorerTab):
         splitter.setSizes([200, 1000])
         splitter.setStretchFactor(0, 0); splitter.setStretchFactor(1, 1)
 
-        outer.addWidget(row1); outer.addWidget(row2); outer.addWidget(splitter, 1)
+        outer.addWidget(row1)
+        outer.addWidget(row1b)
+        outer.addWidget(row1c)
+        outer.addWidget(filter_host)
+        outer.addWidget(row2)
+        outer.addWidget(row2b)
+        outer.addWidget(splitter, 1)
 
         # ---- store refs -----------------------------------------------
         self._root          = root
         self._lbl_status    = lbl_status
+        self._lbl_cov_file  = lbl_cov_file
+        self._lbl_filters_hint = lbl_filters_hint
+        self._btn_add_filter = btn_add_filter
+        self._btn_clear_filters = btn_clear_filters
+        self._filter_host = filter_host
         self._combo_view    = combo_view
         self._combo_ref     = combo_ref
         self._spin_win      = spin_win
@@ -282,6 +527,8 @@ class AnnotTab(_ExplorerTab):
         self._combo_tgt_mode= combo_tgt_mode
         self._combo_nn_anchor = combo_nn_anchor
         self._combo_nn_mode   = combo_nn_mode
+        self._row_params      = row2
+        self._row_overlap     = row2b
         self._lbl_ref       = lbl_ref
         self._lbl_win       = lbl_win
         self._lbl_bin       = lbl_bin
@@ -292,13 +539,21 @@ class AnnotTab(_ExplorerTab):
         self._lbl_gap       = lbl_gap
         self._lbl_flank     = lbl_flank
         self._lbl_maxdist   = lbl_maxdist
+        self._combo_overlap_source = combo_overlap_source
+        self._txt_overlap_args = txt_overlap_args
+        self._btn_overlap_run = btn_overlap_run
         self._list_cls      = list_cls
         self._btn_toggle_all = btn_toggle_all
+        self._list_host     = list_host
 
         # ---- wire signals ---------------------------------------------
         btn_compile.clicked.connect(self._compile)
         btn_load.clicked.connect(self._load_cache)
         btn_save.clicked.connect(self._save_cache)
+        btn_load_cov.clicked.connect(self._load_aux_file)
+        btn_clear_cov.clicked.connect(self._clear_aux_file)
+        btn_add_filter.clicked.connect(self._add_filter_row)
+        btn_clear_filters.clicked.connect(self._clear_filter_rows)
         btn_export.clicked.connect(self._save_figure)
         btn_toggle_all.clicked.connect(self._toggle_all_annots)
         combo_view.currentIndexChanged.connect(self._on_view_changed)
@@ -312,6 +567,9 @@ class AnnotTab(_ExplorerTab):
         combo_tgt_mode.currentIndexChanged.connect(self._schedule_render)
         combo_nn_anchor.currentIndexChanged.connect(self._schedule_render)
         combo_nn_mode.currentIndexChanged.connect(self._schedule_render)
+        combo_overlap_source.currentIndexChanged.connect(self._on_overlap_source_changed)
+        txt_overlap_args.textChanged.connect(self._on_overlap_source_changed)
+        btn_overlap_run.clicked.connect(self._run_luna_overlap)
 
         # Set initial visibility
         self._on_view_changed()
@@ -427,9 +685,12 @@ class AnnotTab(_ExplorerTab):
         is_nearest = (view == "nearest")
         is_raster = (view == "raster")
         is_overlap = (view == "overlap")
+        is_luna_overlap = (view == "luna_overlap")
         is_occupancy = (view == "occupancy")
         is_dist = view in ("nearest", "iei")
         show_bin = is_peth or is_overlap or is_occupancy or is_nearest
+        self._row_params.setVisible(not is_luna_overlap)
+        self._row_overlap.setVisible(is_luna_overlap)
         self._lbl_win.setVisible(is_peth)
         self._spin_win.setVisible(is_peth)
         self._lbl_bin.setVisible(show_bin)
@@ -448,7 +709,22 @@ class AnnotTab(_ExplorerTab):
         self._spin_flank.setVisible(is_overlap)
         self._lbl_maxdist.setVisible(is_dist)
         self._spin_maxdist.setVisible(is_dist)
-        self._schedule_render()
+        self._list_host.setVisible(not is_luna_overlap and self._cohort is not None)
+        if is_luna_overlap:
+            self._on_overlap_source_changed()
+        else:
+            self._schedule_render()
+
+    def _on_overlap_source_changed(self, *_):
+        is_cohort = self._combo_overlap_source.currentData() == "cohort"
+        self._btn_overlap_run.setEnabled(bool(self._txt_overlap_args.toPlainText().strip()))
+        if self._combo_view.currentData() == "luna_overlap":
+            self._list_host.setVisible(False)
+            self._lbl_status.setToolTip(
+                "Compiled cohort mode uses the currently compiled/filtered cohort"
+                if is_cohort else
+                "Current subject mode runs on the currently attached individual"
+            )
 
     # ------------------------------------------------------------------
     # Sample-list helpers
@@ -469,6 +745,319 @@ class AnnotTab(_ExplorerTab):
             return None
         idx = view.currentIndex()
         return idx.siblingAtColumn(0).data(Qt.DisplayRole) if idx.isValid() else None
+
+    def _dock4_annotation_classes(self):
+        view = getattr(self.ctrl.ui, "tbl_desc_annots", None)
+        model = view.model() if view is not None else None
+        annots = []
+
+        if model is not None:
+            headers = [
+                str(model.headerData(c, Qt.Horizontal) or "")
+                for c in range(model.columnCount())
+            ]
+            try:
+                annot_col = headers.index("Annotations")
+            except ValueError:
+                annot_col = None
+
+            if annot_col is not None:
+                for r in range(model.rowCount()):
+                    val = str(model.index(r, annot_col).data(Qt.DisplayRole) or "").strip()
+                    if val and val != "SleepStage":
+                        annots.append(val)
+
+        if not annots:
+            p = getattr(self.ctrl, "p", None)
+            if p is not None:
+                try:
+                    annots = [
+                        str(c) for c in (p.edf.annots() or [])
+                        if str(c) and str(c) != "SleepStage"
+                    ]
+                except Exception:
+                    annots = []
+
+        seen = set()
+        ordered = []
+        for annot in annots:
+            if annot in seen:
+                continue
+            seen.add(annot)
+            ordered.append(annot)
+        return ordered
+
+    def _populate_class_controls(self, classes, *, checked=None, ref=None):
+        classes = [str(c) for c in classes if str(c)]
+        checked_set = set(classes if checked is None else [str(c) for c in checked])
+        ref = str(ref or "")
+
+        self._list_cls.blockSignals(True)
+        self._list_cls.clear()
+        for i, cls in enumerate(classes):
+            item = QListWidgetItem(cls)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked if cls in checked_set else Qt.Unchecked)
+            item.setForeground(QColor(ANNOT_PALETTE[i % len(ANNOT_PALETTE)]))
+            self._list_cls.addItem(item)
+        self._list_cls.blockSignals(False)
+        self._update_toggle_all_button()
+
+        blocker = QSignalBlocker(self._combo_ref)
+        self._combo_ref.clear()
+        self._combo_ref.addItems(classes)
+        if ref:
+            idx = self._combo_ref.findText(ref)
+            if idx >= 0:
+                self._combo_ref.setCurrentIndex(idx)
+        del blocker
+
+    def _load_aux_file(self):
+        fn, _ = open_file_name(self._root, "Load Covariate File", "",
+                               "Tabular files (*.tsv *.csv *.txt);;All files (*)")
+        if not fn:
+            return
+        try:
+            sep = "\t" if fn.lower().endswith(".tsv") or fn.lower().endswith(".txt") else ","
+            df = pd.read_csv(fn, sep=sep, dtype=str)
+            if len(df.columns) == 1:
+                df = pd.read_csv(fn, sep=",", dtype=str)
+            df.replace(["NA", "na", "N/A", "n/a", ".", ""], np.nan, inplace=True)
+            id_col = next((c for c in df.columns if c.strip().upper() == "ID"), None)
+            if id_col is None:
+                QtWidgets.QMessageBox.warning(
+                    self._root, "Covariates",
+                    "File must contain a column named 'ID'."
+                )
+                return
+            if id_col != "ID":
+                df = df.rename(columns={id_col: "ID"})
+            df["ID"] = df["ID"].astype(str).str.strip()
+            for col in df.columns:
+                if col == "ID":
+                    continue
+                coerced = pd.to_numeric(df[col], errors="coerce")
+                if coerced.notna().any():
+                    df[col] = coerced
+            self._aux_df = df
+            self._aux_path = fn
+            self._lbl_cov_file.setText(
+                os.path.basename(fn) + f"  ({len(df)} rows, {len(df.columns) - 1} covariate cols)"
+            )
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self._root, "Covariates", f"Could not load file:\n{e}")
+            return
+        self._refresh_filter_context()
+        self._schedule_render()
+
+    def _clear_aux_file(self):
+        self._aux_df = None
+        self._aux_path = ""
+        self._lbl_cov_file.setText("(none)")
+        self._refresh_filter_context()
+        self._schedule_render()
+
+    def _subject_covariate_df(self):
+        cohort = self._cohort
+        if cohort is None:
+            return None, []
+        ids_df = pd.DataFrame({
+            "ID": [str(subj.get("id", "")).strip() for subj in cohort.get("subjects", [])]
+        })
+        if self._aux_df is None:
+            return ids_df, []
+        aux_cols = [c for c in self._aux_df.columns if c != "ID"]
+        existing = set(ids_df.columns)
+        rename_map = {}
+        for col in aux_cols:
+            if col in existing:
+                rename_map[col] = col + "_cov"
+        aux = self._aux_df.rename(columns=rename_map)
+        merged_aux_cols = [rename_map.get(c, c) for c in aux_cols]
+        merged = pd.merge(ids_df, aux, on="ID", how="left")
+        return merged, merged_aux_cols
+
+    def _filterable_columns(self, df):
+        out = {}
+        if df is None:
+            return out
+        for col in df.columns:
+            if str(col).strip().upper() == "ID":
+                continue
+            vals = [v for v in pd.unique(df[col]) if not pd.isna(v)]
+            if len(vals) < 2 or len(vals) > _MAX_FILTER_LEVELS:
+                continue
+            sorted_vals = _numeric_sort(vals)
+            levels = [(_display_level(v), v) for v in sorted_vals]
+            if len({label for label, _ in levels}) != len(levels):
+                levels = [(repr(v), v) for v in sorted_vals]
+            out[col] = levels
+        return out
+
+    def _snapshot_filter_rows(self):
+        return [row.get_state() for row in self._filter_rows]
+
+    def _restore_filter_rows(self, states):
+        self._clear_filter_rows(schedule=False)
+        restored = 0
+        for state in states:
+            if state.get("column") and state["column"] not in self._filter_candidates:
+                continue
+            self._add_filter_row(state=state, schedule=False)
+            restored += 1
+        if restored == 0 and not self._filter_rows:
+            self._sync_filter_controls()
+
+    def _add_filter_row(self, *_args, state=None, schedule=True):
+        row = _FilterRow(self._filter_host)
+        row.set_candidates(self._filter_candidates, state=state)
+        row.bind(self._schedule_render, lambda: self._remove_filter_row(row))
+        self._filter_host.layout().addWidget(row)
+        self._filter_rows.append(row)
+        self._sync_filter_controls()
+        if schedule:
+            self._schedule_render()
+
+    def _remove_filter_row(self, row):
+        if row not in self._filter_rows:
+            return
+        self._filter_rows.remove(row)
+        row.setParent(None)
+        row.deleteLater()
+        self._sync_filter_controls()
+        self._schedule_render()
+
+    def _clear_filter_rows(self, *_args, schedule=True):
+        while self._filter_rows:
+            row = self._filter_rows.pop()
+            row.setParent(None)
+            row.deleteLater()
+        self._sync_filter_controls()
+        if schedule:
+            self._schedule_render()
+
+    def _collect_active_filters(self):
+        return [flt for flt in (row.active_filter() for row in self._filter_rows) if flt]
+
+    def _apply_subject_filters(self, subject_df):
+        filters = self._collect_active_filters()
+        if not filters:
+            return subject_df, []
+        sub = subject_df
+        active_cols = []
+        for flt in filters:
+            col = flt["column"]
+            vals = flt["values"]
+            keep = sub[col].isin(vals)
+            if flt["mode"] == "exclude":
+                keep = ~keep
+            sub = sub[keep]
+            active_cols.append(col)
+        return sub, active_cols
+
+    def _filtered_cohort(self):
+        cohort = self._cohort
+        if cohort is None:
+            return None, []
+        subject_df, _ = self._subject_covariate_df()
+        if subject_df is None:
+            return cohort, []
+        filtered_df, active_cols = self._apply_subject_filters(subject_df)
+        keep_ids = set(filtered_df["ID"].astype(str).tolist())
+        subjects = [
+            subj for subj in cohort.get("subjects", [])
+            if str(subj.get("id", "")).strip() in keep_ids
+        ]
+        present_classes = {
+            str(cls)
+            for subj in subjects
+            for cls in subj.get("events", pd.DataFrame()).get("Class", pd.Series(dtype=str)).dropna().astype(str).tolist()
+        }
+        classes = [
+            cls for cls in cohort.get("annot_classes", [])
+            if str(cls) in present_classes
+        ]
+        filtered = {
+            "subjects": subjects,
+            "annot_classes": classes,
+            "total_events": sum(len(subj.get("events", [])) for subj in subjects),
+            "n_subjects": len(subjects),
+        }
+        return filtered, active_cols
+
+    def _sync_filter_controls(self):
+        n_candidates = len(self._filter_candidates)
+        self._btn_add_filter.setEnabled(n_candidates > 0)
+        self._btn_clear_filters.setEnabled(bool(self._filter_rows))
+        self._filter_host.setVisible(bool(self._filter_rows))
+        if self._aux_df is None:
+            self._lbl_filters_hint.setText("Load covariates to enable ID filters")
+        elif n_candidates == 0:
+            self._lbl_filters_hint.setText("No low-cardinality factors available")
+        else:
+            self._lbl_filters_hint.setText(
+                f"{n_candidates} factor columns available (<= {_MAX_FILTER_LEVELS} levels)"
+            )
+
+    def _refresh_filter_context(self):
+        filter_states = self._snapshot_filter_rows()
+        subject_df, _ = self._subject_covariate_df()
+        self._filter_candidates = self._filterable_columns(subject_df)
+        self._restore_filter_rows(filter_states)
+        self._sync_filter_controls()
+
+    def _update_status_label(self):
+        cohort = self._cohort
+        if cohort is None:
+            self._lbl_status.setStyleSheet("color:#888;")
+            self._lbl_status.setText("No data compiled")
+            return
+        base_subjects = int(cohort.get("n_subjects", 0))
+        base_events = int(cohort.get("total_events", 0))
+        n_cl = len(cohort.get("annot_classes", []))
+        filtered, active_cols = self._filtered_cohort()
+        self._lbl_status.setStyleSheet("color:#06d6a0;")
+        if active_cols:
+            self._lbl_status.setText(
+                f"{base_subjects} subjects -> {filtered['n_subjects']} filtered"
+                f" · {base_events:,} events -> {filtered['total_events']:,} filtered"
+                f" · {n_cl} classes"
+            )
+        else:
+            self._lbl_status.setText(
+                f"{base_subjects} subjects · {base_events:,} events · {n_cl} classes"
+            )
+
+    def refresh_controls(self):
+        """Refresh Explorer classes from Dock 4 unless a cache is pinned."""
+        if self._cohort is None:
+            return
+        if self._class_source == "cache":
+            return
+
+        classes = self._dock4_annotation_classes()
+        cohort = self._cohort
+        if cohort is not None:
+            cohort_classes = set(cohort.get("annot_classes", []) or [])
+            classes = [cls for cls in classes if cls in cohort_classes]
+            if not classes:
+                classes = list(cohort.get("annot_classes", []) or [])
+        if not classes:
+            return
+
+        checked = self._checked_classes() if self._list_cls.count() else classes
+        ref = self._combo_ref.currentText()
+        checked = [cls for cls in checked if cls in classes]
+        if not checked:
+            checked = classes
+        if ref not in classes:
+            ref = classes[0]
+
+        self._populate_class_controls(classes, checked=checked, ref=ref)
+        self._refresh_filter_context()
+        self._update_status_label()
+        if self._cohort is not None:
+            self._schedule_render()
 
     # ------------------------------------------------------------------
     # Save / load cache
@@ -498,6 +1087,7 @@ class AnnotTab(_ExplorerTab):
             QtWidgets.QMessageBox.critical(self._root, "Load error", str(e))
             return
         self._cohort = cohort
+        self._class_source = "cache"
         self._post_compile()
 
     # ------------------------------------------------------------------
@@ -538,20 +1128,31 @@ class AnnotTab(_ExplorerTab):
     # ------------------------------------------------------------------
 
     def _schedule_render(self, *_):
+        if self._combo_view.currentData() == "luna_overlap":
+            return
         if self._cohort is None:
             return
+        self._update_status_label()
         self._render_timer.start()
 
     def _render_view(self):
-        cohort = self._cohort
+        cohort, active_filter_cols = self._filtered_cohort()
         if cohort is None:
             return
         checked = self._checked_classes()
         if not checked:
             self._render_empty("No annotation classes selected.")
             return
+        if cohort["n_subjects"] == 0:
+            msg = "No subjects remain after filtering."
+            if active_filter_cols:
+                msg += f"\n\nActive filters: {', '.join(active_filter_cols)}"
+            self._render_empty(msg)
+            self._update_status_label()
+            return
         if not self._start_work("Analysing…"):
             return
+        self._update_status_label()
 
         view       = self._combo_view.currentData()
         ref        = self._combo_ref.currentText()
@@ -624,6 +1225,8 @@ class AnnotTab(_ExplorerTab):
                 self._post_compile()
             elif payload["type"] == "render":
                 self._do_render(payload["result"])
+            elif payload["type"] == "luna_overlap":
+                self._finish_luna_overlap(payload["result"])
         except Exception:
             import traceback as tb; print(tb.format_exc(), flush=True)
         finally:
@@ -646,28 +1249,22 @@ class AnnotTab(_ExplorerTab):
 
     def _post_compile(self):
         cohort = self._cohort
-        n_s  = cohort["n_subjects"]
-        n_ev = cohort["total_events"]
-        n_cl = len(cohort["annot_classes"])
-        self._lbl_status.setStyleSheet("color:#06d6a0;")
-        self._lbl_status.setText(
-            f"{n_s} subjects · {n_ev:,} events · {n_cl} classes")
-
-        self._list_cls.blockSignals(True)
-        self._list_cls.clear()
-        for i, cls in enumerate(cohort["annot_classes"]):
-            item = QListWidgetItem(cls)
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setCheckState(Qt.Checked)
-            item.setForeground(QColor(ANNOT_PALETTE[i % len(ANNOT_PALETTE)]))
-            self._list_cls.addItem(item)
-        self._list_cls.blockSignals(False)
-        self._update_toggle_all_button()
-
-        blocker = QSignalBlocker(self._combo_ref)
-        self._combo_ref.clear()
-        self._combo_ref.addItems(cohort["annot_classes"])
-        del blocker
+        self._list_host.show()
+        if self._class_source == "cache":
+            classes = cohort["annot_classes"]
+        else:
+            dock4_classes = self._dock4_annotation_classes()
+            cohort_classes = set(cohort["annot_classes"])
+            classes = [cls for cls in dock4_classes if cls in cohort_classes]
+            if not classes:
+                classes = cohort["annot_classes"]
+            self._class_source = "dock4"
+        ref = self._combo_ref.currentText()
+        if ref not in classes and cohort["annot_classes"]:
+            ref = cohort["annot_classes"][0]
+        self._populate_class_controls(classes, checked=classes, ref=ref)
+        self._refresh_filter_context()
+        self._update_status_label()
 
         # Restore individual
         saved = getattr(self, "_saved_id", None)
@@ -678,6 +1275,222 @@ class AnnotTab(_ExplorerTab):
                 pass
 
         self._schedule_render()
+
+    def _normalize_overlap_command(self, text: str) -> str:
+        cmd = (text or "").strip()
+        if not cmd:
+            raise ValueError("Enter OVERLAP arguments.")
+        if cmd.upper().startswith("OVERLAP"):
+            return cmd
+        return f"OVERLAP {cmd}"
+
+    @staticmethod
+    def _build_overlap_temp_instance(cohort):
+        import lunapi as lp
+
+        subjects = list((cohort or {}).get("subjects", []) or [])
+        if not subjects:
+            raise ValueError("No compiled subjects are available.")
+
+        offset = 0.0
+        max_stop = 0.0
+        by_class: dict[str, list[tuple[float, float]]] = {}
+        marker_intervals: list[tuple[float, float]] = []
+
+        for subj in subjects:
+            ev = subj.get("events")
+            dur = float(subj.get("duration", 0.0) or 0.0)
+            subj_max_stop = 0.0
+            if isinstance(ev, pd.DataFrame) and not ev.empty:
+                work = ev.copy()
+                work["Class"] = work["Class"].astype(str)
+                work["Start"] = pd.to_numeric(work["Start"], errors="coerce")
+                work["Stop"] = pd.to_numeric(work["Stop"], errors="coerce")
+                work = work.dropna(subset=["Class", "Start", "Stop"])
+                work = work[work["Stop"] >= work["Start"]]
+                if not work.empty:
+                    subj_max_stop = float(work["Stop"].max())
+                    for cls, grp in work.groupby("Class", sort=False):
+                        ints = by_class.setdefault(str(cls), [])
+                        ints.extend(
+                            (float(row.Start) + offset, float(row.Stop) + offset)
+                            for row in grp.itertuples(index=False)
+                        )
+            dur = max(dur, subj_max_stop)
+            marker_intervals.append((offset, offset + dur))
+            max_stop = max(max_stop, offset + dur)
+            offset += dur + ANNEX_CACHE_GAP_SECS
+
+        nr = max(1, int(np.ceil(max_stop)) + 1)
+        proj = lp.proj()
+        p = proj.empty_inst("__luna_overlap__", nr, 1)
+        for cls, intervals in by_class.items():
+            if intervals:
+                p.insert_annot(cls, intervals)
+        if marker_intervals:
+            p.insert_annot(ANNEX_SUBJECT_CLASS, marker_intervals)
+        return p
+
+    @staticmethod
+    def _collect_luna_overlap_results(p):
+        tbls = p.strata()
+        results = {}
+        if tbls is not None:
+            for row in tbls.itertuples(index=False):
+                key = "_".join([row.Command, row.Strata])
+                results[key] = p.table(row.Command, row.Strata)
+        return tbls, results
+
+    @staticmethod
+    def _run_luna_overlap_worker(source, cmd, cohort=None, current_p=None):
+        if source == "current":
+            if current_p is None:
+                raise ValueError("No current subject is attached.")
+            p = current_p
+        else:
+            p = AnnotTab._build_overlap_temp_instance(cohort)
+        stdout = p.eval_lunascope(cmd) or ""
+        tbls, results = AnnotTab._collect_luna_overlap_results(p)
+        return {
+            "source": source,
+            "command": cmd,
+            "stdout": stdout,
+            "tbls": tbls,
+            "results": results,
+        }
+
+    def _run_luna_overlap(self):
+        try:
+            cmd = self._normalize_overlap_command(self._txt_overlap_args.toPlainText())
+        except ValueError as e:
+            QtWidgets.QMessageBox.warning(self._root, "Luna OVERLAP", str(e))
+            return
+
+        source = self._combo_overlap_source.currentData()
+        cohort = None
+        if source == "cohort":
+            cohort, active_filter_cols = self._filtered_cohort()
+            if cohort is None:
+                QtWidgets.QMessageBox.warning(
+                    self._root, "Luna OVERLAP",
+                    "Compile annotations first for cohort mode."
+                )
+                return
+            if cohort["n_subjects"] == 0:
+                msg = "No subjects remain after filtering."
+                if active_filter_cols:
+                    msg += f"\n\nActive filters: {', '.join(active_filter_cols)}"
+                QtWidgets.QMessageBox.warning(self._root, "Luna OVERLAP", msg)
+                return
+        elif not hasattr(self.ctrl, "p"):
+            QtWidgets.QMessageBox.warning(
+                self._root, "Luna OVERLAP",
+                "No current subject is attached."
+            )
+            return
+
+        if not self._start_work("Running OVERLAP…"):
+            return
+        self._render_empty(
+            f"Running {cmd}\n\n"
+            f"Source: {'compiled cohort' if source == 'cohort' else 'current subject'}"
+        )
+
+        current_p = getattr(self.ctrl, "p", None) if source == "current" else None
+        fut = self.ctrl._exec.submit(
+            self._run_luna_overlap_worker, source, cmd, cohort, current_p
+        )
+        def _done(_f=fut):
+            try:
+                self._sig_ok.emit({"type": "luna_overlap", "result": _f.result()})
+            except Exception:
+                self._sig_err.emit(traceback.format_exc())
+        fut.add_done_callback(_done)
+
+    def _finish_luna_overlap(self, result):
+        tbls = result.get("tbls")
+        results = result.get("results", {})
+        self.ctrl.results = results
+        self.ctrl.project_mode = False
+        self.ctrl._project_results_mode = False
+        self.ctrl.set_tree_from_df(tbls[["Command", "Strata"]].copy() if tbls is not None else None)
+        if tbls is not None and not tbls.empty:
+            first = tbls.iloc[0]
+            self.ctrl._update_table(str(first["Command"]), str(first["Strata"]))
+            tv = self.ctrl.ui.anal_tables
+            model = tv.model()
+            if model is not None and model.rowCount() > 0:
+                idx = model.index(0, 0)
+                tv.setCurrentIndex(idx)
+                sel = tv.selectionModel()
+                if sel is not None:
+                    sel.select(
+                        idx,
+                        QtCore.QItemSelectionModel.ClearAndSelect
+                        | QtCore.QItemSelectionModel.Rows,
+                    )
+        self.ctrl.sig_results_changed.emit()
+        try:
+            self.ctrl.ui.dock_outputs.show()
+            self.ctrl.ui.dock_outputs.raise_()
+        except Exception:
+            pass
+        self._render_luna_overlap_summary(result)
+
+    def _render_luna_overlap_summary(self, result):
+        canvas = self._ensure_canvas()
+        fig = canvas.figure
+        fig.clear()
+        fig.patch.set_facecolor(BG)
+        self._set_canvas_height(min_height=520)
+
+        ax = fig.add_subplot(111)
+        ax.set_facecolor(BG)
+        ax.set_axis_off()
+
+        cmd = result.get("command", "OVERLAP")
+        source = result.get("source", "current")
+        stdout = (result.get("stdout", "") or "").strip()
+        tbls = result.get("tbls")
+        results = result.get("results", {})
+
+        lines = [
+            f"Luna OVERLAP summary",
+            f"Source: {'compiled cohort' if source == 'cohort' else 'current subject'}",
+            f"Command: {cmd}",
+            "",
+        ]
+        if tbls is None or tbls.empty:
+            lines.append("No result tables were returned.")
+        else:
+            lines.append("Result tables:")
+            for row in tbls.itertuples(index=False):
+                key = "_".join([row.Command, row.Strata])
+                df = results.get(key)
+                n_rows = len(df) if isinstance(df, pd.DataFrame) else 0
+                lines.append(f"  {row.Command}/{row.Strata}: {n_rows} row(s)")
+            lines.append("")
+            key_other = next((k for k in results if k == "OVERLAP_OTHER_SEED"), None)
+            if key_other is not None and isinstance(results[key_other], pd.DataFrame):
+                df = results[key_other]
+                cols = [c for c in ("SEED", "OTHER", "N_OBS", "N_EXP", "N_Z", "D1_OBS", "D1_Z", "D2_OBS", "D2_Z") if c in df.columns]
+                if cols:
+                    lines.append("Preview:")
+                    for row in df.loc[:, cols].head(6).itertuples(index=False):
+                        parts = [f"{col}={val}" for col, val in zip(cols, row)]
+                        lines.append("  " + " | ".join(parts))
+                    lines.append("")
+        if stdout:
+            tail = stdout.strip().splitlines()[-12:]
+            lines.append("Console tail:")
+            lines.extend(f"  {line}" for line in tail)
+
+        ax.text(
+            0.02, 0.98, "\n".join(lines),
+            color=FG, ha="left", va="top", fontsize=8.5,
+            family="monospace", transform=ax.transAxes, wrap=True
+        )
+        canvas.draw()
 
     # ------------------------------------------------------------------
     # Dispatch

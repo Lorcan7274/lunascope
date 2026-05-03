@@ -30,9 +30,16 @@ import faulthandler
 from .runtime_paths import app_cache_root
 from .tls import configure_tls
 
+def _debug_logging_enabled() -> bool:
+    return str(os.environ.get("LUNASCOPE_DEBUG", "")).strip().lower() in {
+        "1", "true", "yes", "on", "debug"
+    }
+
+
 def _boot_log(message: str) -> None:
-    sys.stderr.write(f"[lunascope] {message}\n")
-    sys.stderr.flush()
+    if _debug_logging_enabled():
+        sys.stderr.write(f"[lunascope] {message}\n")
+        sys.stderr.flush()
 
 
 _boot_log("Initiating startup...")
@@ -49,8 +56,9 @@ def _append_diagnostics_log(message: str) -> None:
             fh.write(line)
     except OSError:
         pass
-    sys.stderr.write(line)
-    sys.stderr.flush()
+    if _debug_logging_enabled():
+        sys.stderr.write(line)
+        sys.stderr.flush()
 
 
 def _configure_runtime_cache_dirs() -> None:
@@ -87,7 +95,7 @@ import lunapi as lp
 
 import pyqtgraph as pg
 
-from PySide6.QtCore import QFile, QTimer
+from PySide6.QtCore import QFile, QTimer, QtMsgType, qInstallMessageHandler
 from PySide6.QtUiTools import QUiLoader
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QPalette, QColor
@@ -98,6 +106,19 @@ from .helpers import SmallPlaceholderEdit
 
 # suppress macOS warnings
 os.environ["OS_ACTIVITY_MODE"] = "disable"
+
+
+def _qt_message_handler(mode, context, message):
+    # Qt 6.x internal bug: UniqueConnection attempted with a functor (not a member
+    # pointer) inside QStyleHints dark-mode handling — harmless, suppress it.
+    if "QStyleHints" in message and "unique connections" in message:
+        return
+    if mode == QtMsgType.QtWarningMsg:
+        sys.stderr.write(f"[Qt] {message}\n")
+    elif mode == QtMsgType.QtCriticalMsg:
+        sys.stderr.write(f"[Qt critical] {message}\n")
+    elif mode == QtMsgType.QtFatalMsg:
+        sys.stderr.write(f"[Qt fatal] {message}\n")
 
 
 def _apply_forced_dark_theme(app: QApplication) -> None:
@@ -420,6 +441,7 @@ def main(argv=None) -> int:
 #        faulthandler.register(signal.SIGUSR1)  # kill -USR1 <pid> dumps stacks
 
     args = _parse_args(argv or sys.argv[1:])
+    qInstallMessageHandler(_qt_message_handler)
     _boot_log("Creating application...")
     app = QApplication(sys.argv)
     _apply_forced_dark_theme(app)

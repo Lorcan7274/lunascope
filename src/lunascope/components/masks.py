@@ -90,7 +90,7 @@ class MasksMixin:
         
         # run MASK
 
-        self.p.eval( 'MASK ' + msk + ' & RE ' )
+        self.p.eval_lunascope( 'MASK ' + msk + ' & RE ' )
 
         # update the things that need updating
 

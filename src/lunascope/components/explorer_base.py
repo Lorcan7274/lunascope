@@ -133,11 +133,13 @@ class _ExplorerTab(QtCore.QObject):
             self._canvas_scroll = None
             return
         width = max(320, viewport.width())
-        self._canvas_host.setMinimumWidth(width)
-        self._canvas_host.setMaximumWidth(width)
+        self._canvas_host.setMinimumWidth(0)
+        self._canvas_host.setMaximumWidth(16777215)
+        self._canvas_host.resize(width, self._canvas_host.height())
         if self._canvas is not None:
-            self._canvas.setMinimumWidth(width)
-            self._canvas.setMaximumWidth(width)
+            self._canvas.setMinimumWidth(320)
+            self._canvas.setMaximumWidth(16777215)
+            self._canvas.resize(width, self._canvas.height())
 
     def eventFilter(self, obj, event):
         if self._canvas_scroll is not None:

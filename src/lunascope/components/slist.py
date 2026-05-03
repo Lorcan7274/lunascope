@@ -30,11 +30,12 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QAbstractItemView,
     QMessageBox,
+    QSizePolicy,
     QStyledItemDelegate,
     QStyle,
     QStyleOptionViewItem,
 )
-from PySide6.QtCore import Qt, QDir, QRegularExpression, QSortFilterProxyModel, QAbstractTableModel, QModelIndex, QSize
+from PySide6.QtCore import Qt, QDir, QEvent, QRegularExpression, QSortFilterProxyModel, QAbstractTableModel, QModelIndex, QSize
 from PySide6.QtGui import QStandardItemModel, QStandardItem, QPalette, QIcon
 
 import pandas as pd
@@ -42,7 +43,15 @@ import numpy as np
 from pandas.api.types import is_numeric_dtype, is_integer_dtype
 
 from .tbl_funcs import attach_comma_filter
-from ..file_dialogs import existing_directory, open_file_name
+from ..file_dialogs import (
+    attach_annots_directory,
+    build_slist_directory,
+    normalize_build_ext,
+    normalize_build_exts,
+    open_file_name,
+    save_file_name,
+    _annot_stem_for_ext,
+)
 
 
 class NumericSortFilterProxy(QSortFilterProxyModel):
@@ -260,6 +269,36 @@ class SampleListCompactDelegate(QStyledItemDelegate):
 
 class SListMixin:
 
+    def _set_slist_label(self, text: str):
+        label = self.ui.lbl_slist
+        full_text = str(text or "").strip() or "(none)"
+        label.setProperty("fullText", full_text)
+        self._refresh_slist_label()
+
+    def _get_slist_label_full_text(self) -> str:
+        label = self.ui.lbl_slist
+        full_text = label.property("fullText")
+        if full_text is None:
+            full_text = label.text()
+        return str(full_text or "").strip()
+
+    def _refresh_slist_label(self):
+        label = self.ui.lbl_slist
+        full_text = self._get_slist_label_full_text() or "(none)"
+        avail = max(40, label.width() - 12)
+        shown = label.fontMetrics().elidedText(full_text, Qt.ElideMiddle, avail)
+        label.setText(shown)
+        if shown != full_text:
+            label.setToolTip(full_text)
+        else:
+            label.setToolTip("")
+
+    def eventFilter(self, obj, event):
+        if hasattr(self, "ui") and obj is getattr(self.ui, "lbl_slist", None):
+            if event.type() in (QEvent.Resize, QEvent.Show):
+                self._refresh_slist_label()
+        return super().eventFilter(obj, event)
+
     def _annotation_paths_from_cell(self, value):
         text = str(value or "").strip()
         if text in ("", "."):
@@ -306,6 +345,7 @@ class SListMixin:
         return rows
 
     def _replace_sample_rows(self, rows, selected_source_row=0):
+        self.proj.clear()
         self.proj.eng.set_sample_list(rows)
         df = self.proj.sample_list()
         model = self.df_to_model(df)
@@ -346,6 +386,111 @@ class SListMixin:
                 return str(by_ext[e][0])
         return None
 
+    def _sample_list_base_dir(self) -> str:
+        label = self._get_slist_label_full_text()
+        if label and label not in {"<internal>", "(built)"}:
+            try:
+                p = Path(label).expanduser()
+                if p.exists() or p.parent.exists():
+                    return str(p.resolve().parent)
+            except Exception:
+                pass
+        try:
+            return os.getcwd()
+        except Exception:
+            return QDir.currentPath()
+
+    def _attach_annotation_folder(self):
+        rows = self._sample_rows_from_source_model()
+        if not rows:
+            QMessageBox.information(self.ui, "Attach Annotation Folder", "No sample list is loaded.")
+            return
+
+        ids = [row[0] for row in rows if str(row[0] or "").strip()]
+        if not ids:
+            QMessageBox.information(self.ui, "Attach Annotation Folder", "The sample list does not contain any IDs.")
+            return
+
+        folder, annot_ext, path_mode = attach_annots_directory(
+            self.ui,
+            "Select Annotation Folder",
+            ids,
+            QDir.currentPath(),
+        )
+        if not folder:
+            return
+
+        annot_exts = normalize_build_exts(annot_ext)
+        if not annot_exts:
+            QMessageBox.information(self.ui, "Attach Annotation Folder", "No annotation suffixes were specified.")
+            return
+
+        base_dir = self._sample_list_base_dir()
+
+        annot_index: dict[str, list[str]] = {}
+        for root, _dirs, files in os.walk(folder):
+            for name in sorted(files):
+                abs_path = os.path.abspath(os.path.join(root, name))
+                stored_path = abs_path
+                if path_mode == "relative":
+                    try:
+                        stored_path = os.path.relpath(abs_path, base_dir)
+                    except Exception:
+                        stored_path = abs_path
+                for ext in annot_exts:
+                    annot_stem = _annot_stem_for_ext(name, ext)
+                    if annot_stem is None:
+                        continue
+                    annot_index.setdefault(annot_stem, []).append(stored_path)
+
+        def _norm_path(p: str) -> str:
+            try:
+                path_str = str(p)
+                if not os.path.isabs(path_str):
+                    path_str = os.path.join(base_dir, path_str)
+                return os.path.normcase(os.path.realpath(os.path.abspath(os.path.expanduser(path_str))))
+            except Exception:
+                return os.path.normcase(str(p))
+
+        selected_row = self._current_slist_source_row()
+        updated_rows = []
+        rows_updated = 0
+        files_added = 0
+
+        for row in rows:
+            id_str = str(row[0] or "").strip()
+            existing = self._annotation_paths_from_cell(row[2])
+            existing_norm = {_norm_path(path) for path in existing}
+            new_paths = []
+            for cand in annot_index.get(id_str, []):
+                norm = _norm_path(cand)
+                if norm in existing_norm:
+                    continue
+                new_paths.append(cand)
+                existing_norm.add(norm)
+
+            if new_paths:
+                rows_updated += 1
+                files_added += len(new_paths)
+                row = list(row)
+                row[2] = ",".join([*existing, *new_paths]) or "."
+            updated_rows.append(row)
+
+        if files_added == 0:
+            QMessageBox.information(
+                self.ui,
+                "Attach Annotation Folder",
+                "No new matching annotation files were found for the current sample list.",
+            )
+            return
+
+        self._replace_sample_rows(updated_rows, selected_row if selected_row >= 0 else 0)
+        QMessageBox.information(
+            self.ui,
+            "Attach Annotation Folder",
+            f"Added {files_added} annotation file(s) across {rows_updated} sample-list row(s).",
+        )
+
     def _init_slist(self):
 
         # attach comma-delimited OR filter
@@ -359,6 +504,10 @@ class SListMixin:
         self._proxy.rowsInserted.connect(lambda *_args: self._refresh_slist_row_heights())
         self._proxy.rowsRemoved.connect(lambda *_args: self._refresh_slist_row_heights())
         self._configure_slist_view()
+        self.ui.lbl_slist.setMinimumWidth(0)
+        self.ui.lbl_slist.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        self.ui.lbl_slist.installEventFilter(self)
+        self._set_slist_label(self.ui.lbl_slist.text())
         
         # wire buttons
         self.ui.butt_load_slist.clicked.connect(self.open_file)
@@ -394,11 +543,47 @@ class SListMixin:
         self._read_slist_from_file( slist )
 
 
+    def save_file(self):
+        rows = self._sample_rows_from_source_model()
+        if not rows:
+            QMessageBox.information(self.ui, "Save Sample List", "No sample list is loaded.")
+            return
+
+        current_label = self._get_slist_label_full_text()
+        default_name = current_label if current_label and current_label not in {"<internal>", "(built)"} else "sample.lst"
+        filename, _ = save_file_name(
+            self.ui,
+            "Save sample-list file",
+            default_name,
+            "slist (*.lst *.txt);;All Files (*)",
+        )
+        if not filename:
+            return
+
+        try:
+            with open(filename, "w", encoding="utf-8") as fh:
+                for row in rows:
+                    vals = []
+                    for value in row[:3]:
+                        text = str(value or "").strip()
+                        vals.append(text if text else ".")
+                    fh.write("\t".join(vals) + "\n")
+        except Exception as e:
+            QMessageBox.critical(
+                self.ui,
+                "Error",
+                f"Could not save sample list '{filename}':\n{e}",
+            )
+            return
+
+        self._set_slist_label(filename)
+
+
     def _apply_sample_list_df(self, df, label: str):
         model = self.df_to_model(df)
         self._proxy.setSourceModel(model)
         self._configure_slist_view()
-        self.ui.lbl_slist.setText(label)
+        self._set_slist_label(label)
 
     def _configure_slist_view(self):
         view = self.ui.tbl_slist
@@ -444,12 +629,19 @@ class SListMixin:
         self._attach_inst(current, previous)
 
 
-    def _build_slist_from_folder(self, folder: str):
+    def _build_slist_from_folder(self, folder: str, annot_ext: str = ""):
         if not folder:
             return
-        self.proj.build(folder)
+        annot_ext = normalize_build_ext(annot_ext)
+        # Building a new sample list from a folder should replace the current
+        # list, not append to whatever the engine singleton already holds.
+        self.proj.clear()
+        if annot_ext:
+            self.proj.build([folder, f"-ext={annot_ext}"])
+        else:
+            self.proj.build(folder)
         df = self.proj.sample_list()
-        self._apply_sample_list_df(df, folder)
+        self._apply_sample_list_df(df, "(built)")
 
 
     # ------------------------------------------------------------
@@ -473,11 +665,11 @@ class SListMixin:
         
     def open_folder(self):
 
-        folder = existing_directory(self.ui, "Select Folder", QDir.currentPath())
+        folder, annot_ext = build_slist_directory(self.ui, "Select Folder", QDir.currentPath())
 
         # update
         if folder != "":
-            self._build_slist_from_folder(folder)
+            self._build_slist_from_folder(folder, annot_ext)
 
             
     # ------------------------------------------------------------
@@ -533,7 +725,7 @@ class SListMixin:
             self._proxy.setSourceModel(model)
             self._configure_slist_view()
             # update label to show slist file
-            self.ui.lbl_slist.setText( '<internal>' )
+            self._set_slist_label('<internal>')
 
             # and prgrammatically select this first row
             model = self.ui.tbl_slist.model()
@@ -604,30 +796,25 @@ class SListMixin:
                 if clicked == cancel_button:
                     return
                 if clicked == add_button:
-                    try:
-                        self.p.attach_annot(annot_file)
-                    except Exception as e:
-                        QMessageBox.critical(
-                            self.ui,
-                            "Error",
-                            f"Could not append annotation:\n{e}",
-                        )
-                        return
-
                     rows = self._sample_rows_from_source_model()
                     selected_row = self._current_slist_source_row()
-                    if 0 <= selected_row < len(rows):
-                        annots = self._annotation_paths_from_cell(rows[selected_row][2])
-                        if annot_file not in annots:
-                            annots.append(annot_file)
-                        rows[selected_row][2] = ",".join(annots) or "."
-                        self._replace_sample_rows(rows, selected_row)
-                        self.ui.lbl_slist.setText("<internal>")
-
-                    # Refresh annotation-related displays
-                    self._update_metrics()
-                    self._render_hypnogram()
-                    self._render_signals_simple()
+                    if not (0 <= selected_row < len(rows)):
+                        return
+                    annots = self._annotation_paths_from_cell(rows[selected_row][2])
+                    if annot_file not in annots:
+                        annots.append(annot_file)
+                    rows[selected_row][2] = ",".join(annots) or "."
+                    # Update the C++ sample list so the annotation is stored in
+                    # this individual's row only.  _replace_sample_rows then
+                    # triggers _attach_inst (via setCurrentIndex), which reloads
+                    # the individual cleanly from the updated sample list.
+                    # Calling attach_annot() directly is intentionally avoided:
+                    # it registers the path globally in the engine singleton and
+                    # causes every subsequent individual load to also attempt to
+                    # open that file, producing "does not exist for EDF X" errors
+                    # and writing the wrong ID in project-mode WRITE-ANNOTS runs.
+                    self._replace_sample_rows(rows, selected_row)
+                    self._set_slist_label("<internal>")
                     return
                 if clicked != load_only_button:
                     return
@@ -648,7 +835,7 @@ class SListMixin:
             self._proxy.setSourceModel(model)
             self._configure_slist_view()
             # update label to show slist file
-            self.ui.lbl_slist.setText( '<internal>' )
+            self._set_slist_label('<internal>')
 
             # and prgrammatically select this first row
             model = self.ui.tbl_slist.model()

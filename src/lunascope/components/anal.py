@@ -31,7 +31,7 @@ from .tbl_funcs import attach_comma_filter, copy_selection, save_table_as_tsv
 from .slist import NumericSortFilterProxy
 
 from PySide6.QtWidgets import QPlainTextEdit, QFileDialog, QMessageBox
-from PySide6.QtCore import QMetaObject, Qt, Slot
+from PySide6.QtCore import QEvent, QMetaObject, Qt, Slot
 from PySide6.QtCore import Qt, QItemSelection, QSortFilterProxyModel, QRegularExpression
 from PySide6.QtGui import QStandardItemModel, QStandardItem
 from PySide6.QtWidgets import QAbstractItemView, QHeaderView
@@ -118,15 +118,42 @@ class AnalMixin:
         self._proj_cancel_event = threading.Event()
         self._proj_cancel_requested = False
         self._proj_cancel_action = QAction("Stop project eval after current record", self.ui)
-        self._proj_cancel_action.setShortcut(QKeySequence("Ctrl+."))
+        self._proj_cancel_action.setShortcuts(self._project_eval_cancel_shortcuts())
         self._proj_cancel_action.setShortcutContext(Qt.ApplicationShortcut)
         self._proj_cancel_action.triggered.connect(self._request_project_eval_cancel)
         self.ui.addAction(self._proj_cancel_action)
+        app = QGuiApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
         self.sig_proj_eval_stream.connect(self._proj_eval_append_stream, Qt.QueuedConnection)
         self.sig_proj_eval_progress.connect(self._proj_eval_update_progress, Qt.QueuedConnection)
         self.sig_proj_eval_finished.connect(self._proj_eval_done_ok, Qt.QueuedConnection)
         self.sig_proj_eval_failed.connect(self._proj_eval_done_err, Qt.QueuedConnection)
 
+
+    def _project_eval_cancel_shortcuts(self):
+        shortcuts = [QKeySequence("Ctrl+.")]
+        if sys.platform == "darwin":
+            shortcuts.append(QKeySequence("Meta+."))
+        return shortcuts
+
+    def _project_eval_cancel_shortcut_label(self):
+        labels = [
+            seq.toString(QKeySequence.NativeText)
+            for seq in self._project_eval_cancel_shortcuts()
+            if not seq.isEmpty()
+        ]
+        return " or ".join(labels)
+
+    def _is_project_eval_cancel_key_event(self, event):
+        if event.type() not in (QEvent.KeyPress, QEvent.ShortcutOverride):
+            return False
+        if event.key() != Qt.Key_Period:
+            return False
+        mods = event.modifiers()
+        if sys.platform == "darwin":
+            return bool(mods & (Qt.ControlModifier | Qt.MetaModifier))
+        return bool(mods & Qt.ControlModifier)
 
 
     # ------------------------------------------------------------
@@ -560,13 +587,12 @@ class AnalMixin:
         tv = self.ui.anal_tables
         # disconnect old selection model if present
         if self._tree_sel is not None:
-            try: self._tree_sel.selectionChanged.disconnect(self._on_tree_sel)
-            except TypeError: pass
+            try:
+                self._tree_sel.selectionChanged.disconnect(self._on_tree_sel)
+            except TypeError:
+                pass
         self._tree_sel = tv.selectionModel()
-        # avoid duplicate connects if this gets called often
-        try:
-            self._tree_sel.selectionChanged.connect(self._on_tree_sel, Qt.UniqueConnection)
-        except TypeError:
+        if self._tree_sel is not None:
             self._tree_sel.selectionChanged.connect(self._on_tree_sel)
 
 
@@ -693,7 +719,8 @@ class AnalMixin:
         self.sb_progress.setRange(0, len(records))
         self.sb_progress.setValue(0)
         self.sb_progress.setFormat(f"0 / {len(records)}")
-        self.lock_ui("Processing...\n\nPress Ctrl+. to stop after this record")
+        shortcut_label = self._project_eval_cancel_shortcut_label()
+        self.lock_ui(f"Processing...\n\nPress {shortcut_label} to stop after this record")
 
         fut = self._exec.submit(self._project_eval_worker, records, cmd, param)
 
@@ -771,6 +798,8 @@ class AnalMixin:
         return {"tbls": all_tbls, "results": proj_results, "cancelled": cancelled}
 
     def _request_project_eval_cancel(self):
+        if not (getattr(self, "_busy", False) and getattr(self, "project_mode", False)):
+            return
         if self._proj_cancel_requested:
             return
         self._proj_cancel_requested = True

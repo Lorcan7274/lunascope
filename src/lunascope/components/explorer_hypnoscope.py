@@ -296,7 +296,7 @@ class HypnoscopeTab(_ExplorerTab):
         outer = QVBoxLayout(root)
         outer.setContentsMargins(6, 4, 6, 4); outer.setSpacing(4)
 
-        row = QWidget(); rl = QHBoxLayout(row)
+        row = QWidget(); rl = QtWidgets.QGridLayout(row)
         rl.setContentsMargins(0, 0, 0, 0); rl.setSpacing(6)
 
         btn_compile = QPushButton("Compile All");  btn_compile.setFixedWidth(100)
@@ -312,15 +312,20 @@ class HypnoscopeTab(_ExplorerTab):
         for key, lbl in self._ALIGN_OPTS:
             combo_align.addItem(lbl, key)
 
-        combo_sort = QComboBox(); combo_sort.setMinimumWidth(160)
+        combo_sort = QComboBox(); combo_sort.setMinimumWidth(120)
         for key, lbl in self._SORT_OPTS:
             combo_sort.addItem(lbl, key)
 
-        rl.addWidget(btn_compile); rl.addWidget(btn_load); rl.addWidget(btn_save)
-        rl.addWidget(lbl_status, 1)
-        rl.addWidget(QLabel("Align:")); rl.addWidget(combo_align)
-        rl.addWidget(QLabel("Sort:"));  rl.addWidget(combo_sort)
-        rl.addWidget(btn_export)
+        rl.addWidget(btn_compile, 0, 0)
+        rl.addWidget(btn_load, 0, 1)
+        rl.addWidget(btn_save, 0, 2)
+        rl.addWidget(lbl_status, 0, 3, 1, 5)
+        rl.addWidget(QLabel("Align:"), 1, 0)
+        rl.addWidget(combo_align, 1, 1)
+        rl.addWidget(QLabel("Sort:"), 1, 2)
+        rl.addWidget(combo_sort, 1, 3)
+        rl.addWidget(btn_export, 1, 4)
+        rl.setColumnStretch(3, 1)
 
         canvas_host = QFrame()
         canvas_host.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)

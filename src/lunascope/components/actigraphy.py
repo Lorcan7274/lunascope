@@ -27,7 +27,7 @@ import traceback
 import lunapi as lp
 import numpy as np
 
-from ..helpers import screen_clamp, is_dark_palette
+from ..helpers import screen_clamp, is_dark_palette, AuxiliaryWindow
 from ..file_dialogs import save_file_name
 
 from PySide6 import QtCore, QtWidgets, QtGui
@@ -36,7 +36,6 @@ from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
-    QDockWidget,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -67,14 +66,8 @@ class ActigraphyMixin:
         self._act_last_data = None
         self._act_raw_annot_cache = {}
 
-        dock = QDockWidget("Actigraphy", self.ui)
+        dock = AuxiliaryWindow("Actigraphy", self.ui)
         dock.setObjectName("dock_actigraphy")
-        dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea | Qt.BottomDockWidgetArea)
-        dock.setFeatures(
-            QDockWidget.DockWidgetMovable
-            | QDockWidget.DockWidgetFloatable
-            | QDockWidget.DockWidgetClosable
-        )
         dock.setWindowFlag(Qt.WindowMinimizeButtonHint, True)
         dock.setWindowFlag(Qt.WindowMaximizeButtonHint, True)
 
@@ -202,7 +195,6 @@ class ActigraphyMixin:
         outer.addWidget(host, 1)
 
         dock.setWidget(root)
-        self.ui.addDockWidget(Qt.RightDockWidgetArea, dock)
 
         self.ui.dock_actigraphy = dock
         self.ui.combo_actigraphy = combo_sig

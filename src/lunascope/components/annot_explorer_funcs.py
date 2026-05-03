@@ -421,7 +421,7 @@ def peri_event_histogram(
     bins = (edges[:-1] + edges[1:]) / 2.0
     n_bins = len(bins)
 
-    counts = {cls: np.zeros(n_bins, dtype=float) for cls in target_classes}
+    counts = {cls: np.zeros(n_bins, dtype=np.float32) for cls in target_classes}
     n_ref = 0
 
     for subj in cohort["subjects"]:
@@ -429,8 +429,9 @@ def peri_event_histogram(
         if ev is None or ev.empty or "Class" not in ev.columns:
             continue
 
-        ref_ev = ev[ev["Class"] == ref_class]
-        if ref_ev.empty:
+        by_class = {str(cls): grp for cls, grp in ev.groupby("Class", sort=False)}
+        ref_ev = by_class.get(ref_class)
+        if ref_ev is None or ref_ev.empty:
             continue
 
         if ref_anchor == "start":
@@ -440,10 +441,12 @@ def peri_event_histogram(
         else:  # "mid"
             ref_times = ((ref_ev["Start"].values + ref_ev["Stop"].values) / 2.0)
         n_ref += len(ref_times)
+        ref_lo = float(ref_times.min()) - window_secs
+        ref_hi = float(ref_times.max()) + window_secs
 
         for cls in target_classes:
-            tgt_ev = ev[ev["Class"] == cls]
-            if tgt_ev.empty:
+            tgt_ev = by_class.get(cls)
+            if tgt_ev is None or tgt_ev.empty:
                 continue
 
             is_self = (cls == ref_class)
@@ -452,6 +455,11 @@ def peri_event_histogram(
                 # ts - ref <= t <= te - ref.  Accumulate via diff+cumsum.
                 tgt_starts = tgt_ev["Start"].values.astype(float)
                 tgt_stops  = tgt_ev["Stop"].values.astype(float)
+                keep = (tgt_stops >= ref_lo) & (tgt_starts <= ref_hi)
+                if not np.any(keep):
+                    continue
+                tgt_starts = tgt_starts[keep]
+                tgt_stops = tgt_stops[keep]
                 # All pairwise lag intervals — shape (N_tgt, N_ref)
                 N_tgt, N_ref = len(tgt_starts), len(ref_times)
                 lag_lo_mat = tgt_starts[:, np.newaxis] - ref_times[np.newaxis, :]
@@ -471,13 +479,17 @@ def peri_event_histogram(
                     np.searchsorted(edges, lag_hi, side="left"),  0, n_bins)
                 valid = b1 > b0
                 if valid.any():
-                    delta = np.zeros(n_bins + 1, dtype=float)
+                    delta = np.zeros(n_bins + 1, dtype=np.float32)
                     np.add.at(delta, b0[valid].astype(int),  1.0)
                     np.add.at(delta, b1[valid].astype(int), -1.0)
                     counts[cls] += np.cumsum(delta)[:n_bins]
             else:
                 # "onset": histogram of target start times relative to ref anchor
                 tgt_times = tgt_ev["Start"].values.astype(float)
+                keep = (tgt_times >= ref_lo) & (tgt_times < ref_hi)
+                if not np.any(keep):
+                    continue
+                tgt_times = tgt_times[keep]
                 N_tgt, N_ref = len(tgt_times), len(ref_times)
                 lags_mat = tgt_times[:, np.newaxis] - ref_times[np.newaxis, :]
                 if is_self and N_tgt == N_ref:

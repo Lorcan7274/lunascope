@@ -126,7 +126,9 @@ WIDGET_HELP: dict[str, str] = {
 
 ACTION_HELP: dict[str, str] = {
     "project_load_slist": "Load a sample-list file into the Project dock.",
+    "project_save_slist": "Save the current sample list, including any in-memory annotation edits, to a file.",
     "project_build_slist": "Build a sample list from a selected folder.",
+    "project_attach_annots": "Scan a folder and append matching annotation files onto the current sample list by ID.",
     "project_load_edf": "Load one EDF file as an internal sample list.",
     "project_load_annot": "Load annotations for current sample/EDF.",
     "project_refresh": "Refresh and reattach the currently selected sample.",

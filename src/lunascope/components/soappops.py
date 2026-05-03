@@ -35,8 +35,9 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
 )
-from PySide6.QtCore import QEvent, QMetaObject, Qt, QTimer, Slot, QSize
+from PySide6.QtCore import QEvent, QMetaObject, Qt, QTimer, Slot, QSize, Signal
 from PySide6.QtGui import QStandardItemModel, QStandardItem
+from shiboken6 import isValid
 import html
 import json
 import os
@@ -56,6 +57,8 @@ POPS_STATE_FILE = "pops_location.json"
 
 class MultiSelectComboBox(QComboBox):
     """QComboBox-like widget with a custom persistent popup for multi-select."""
+
+    selectionChanged = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -79,6 +82,9 @@ class MultiSelectComboBox(QComboBox):
         self._list.viewport().installEventFilter(self)
         popup_layout.addWidget(self._list)
         self.lineEdit().installEventFilter(self)
+
+    def _valid_qobject(self, obj):
+        return obj is not None and isValid(obj)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -106,7 +112,11 @@ class MultiSelectComboBox(QComboBox):
             self.showPopup()
 
     def eventFilter(self, obj, event):
-        if obj is self.lineEdit():
+        if not self._valid_qobject(self):
+            return False
+
+        line_edit = self.lineEdit() if self._valid_qobject(self.lineEdit()) else None
+        if obj is line_edit:
             if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
                 self._toggle_popup()
                 event.accept()
@@ -114,13 +124,17 @@ class MultiSelectComboBox(QComboBox):
             if event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
                 event.accept()
                 return True
-        if obj is self._popup and event.type() == QEvent.Hide:
+        popup = self._popup if self._valid_qobject(getattr(self, "_popup", None)) else None
+        if obj is popup and event.type() == QEvent.Hide:
             self._popup_visible = False
             self._press_row = -1
             self._refresh_text()
             return False
         list_widget = getattr(self, "_list", None)
-        if list_widget is not None and obj is list_widget.viewport():
+        if not self._valid_qobject(list_widget):
+            list_widget = None
+        viewport = list_widget.viewport() if list_widget is not None and self._valid_qobject(list_widget.viewport()) else None
+        if obj is viewport:
             if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
                 index = list_widget.indexAt(event.pos())
                 self._press_row = index.row() if index.isValid() else -1
@@ -134,7 +148,7 @@ class MultiSelectComboBox(QComboBox):
                 self._press_row = -1
                 event.accept()
                 return True
-        return super().eventFilter(obj, event)
+        return super().eventFilter(obj, event) if self._valid_qobject(self) else False
 
     def hidePopup(self):
         self._force_close()
@@ -153,8 +167,11 @@ class MultiSelectComboBox(QComboBox):
             popup_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
             popup_item.setCheckState(Qt.Checked if lab in checked else Qt.Unchecked)
         self._refresh_text()
+        self.selectionChanged.emit()
 
     def checked_items(self):
+        if not self._valid_qobject(getattr(self, "_list", None)):
+            return []
         out = []
         for r in range(self._list.count()):
             item = self._list.item(r)
@@ -162,15 +179,59 @@ class MultiSelectComboBox(QComboBox):
                 out.append(item.text())
         return out
 
+    def set_checked_items(self, labels):
+        wanted = {str(label) for label in (labels or [])}
+        if not self._valid_qobject(getattr(self, "_list", None)):
+            return
+        for r in range(self._list.count()):
+            item = self._list.item(r)
+            model_item = self.model().item(r)
+            if item is None or model_item is None:
+                continue
+            state = Qt.Checked if item.text() in wanted else Qt.Unchecked
+            item.setCheckState(state)
+            model_item.setCheckState(state)
+        self._refresh_text()
+        self.selectionChanged.emit()
+
+    def check_all(self):
+        if not self._valid_qobject(getattr(self, "_list", None)):
+            return
+        for r in range(self._list.count()):
+            item = self._list.item(r)
+            model_item = self.model().item(r)
+            if item is None or model_item is None:
+                continue
+            item.setCheckState(Qt.Checked)
+            model_item.setCheckState(Qt.Checked)
+        self._refresh_text()
+        self.selectionChanged.emit()
+
+    def clear_all(self):
+        if not self._valid_qobject(getattr(self, "_list", None)):
+            return
+        for r in range(self._list.count()):
+            item = self._list.item(r)
+            model_item = self.model().item(r)
+            if item is None or model_item is None:
+                continue
+            item.setCheckState(Qt.Unchecked)
+            model_item.setCheckState(Qt.Unchecked)
+        self._refresh_text()
+        self.selectionChanged.emit()
+
     def _refresh_text(self):
         chs = self.checked_items()
         self.setCurrentIndex(-1)
+        line_edit = self.lineEdit() if self._valid_qobject(self.lineEdit()) else None
+        if line_edit is None:
+            return
         if not chs:
-            self.lineEdit().setText("")
+            line_edit.setText("")
         elif len(chs) <= 3:
-            self.lineEdit().setText(", ".join(chs))
+            line_edit.setText(", ".join(chs))
         else:
-            self.lineEdit().setText(f"{len(chs)} selected")
+            line_edit.setText(f"{len(chs)} selected")
 
     def _toggle_row(self, row: int):
         item = self._list.item(row)
@@ -182,6 +243,7 @@ class MultiSelectComboBox(QComboBox):
         item.setCheckState(state)
         model_item.setCheckState(state)
         self._refresh_text()
+        self.selectionChanged.emit()
 
     def _rebuild_popup_geometry(self):
         row_count = self._list.count()

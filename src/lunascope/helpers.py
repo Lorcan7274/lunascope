@@ -27,7 +27,7 @@ from PySide6.QtGui import QRegularExpressionValidator
 from PySide6.QtCore import QModelIndex, QObject, Signal, Qt, QSortFilterProxyModel
 from PySide6.QtCore import QRegularExpression, Qt
 
-from PySide6.QtWidgets import QDockWidget
+from PySide6.QtWidgets import QDockWidget, QVBoxLayout, QWidget
 from PySide6.QtCore import QSortFilterProxyModel
 
 from PySide6.QtWidgets import (
@@ -90,6 +90,82 @@ class SmallPlaceholderEdit(QPlainTextEdit):
             painter.end()
         else:
             super().paintEvent(event)
+
+
+class AuxiliaryWindow(QWidget):
+    """Top-level helper window that preserves a dock-like toggle API.
+
+    This lets legacy code keep calling methods like `toggleViewAction()`,
+    `setFloating()`, and `isFloating()` while the actual UI behaves like a
+    normal top-level window instead of a floating QDockWidget.
+    """
+
+    visibilityChanged = Signal(bool)
+
+    def __init__(self, title: str, parent=None):
+        super().__init__(parent)
+        self.setWindowFlag(Qt.Window, True)
+        self.setWindowTitle(title)
+        self.setAttribute(Qt.WA_DeleteOnClose, False)
+        self._toggle_action = QAction(title, self)
+        self._toggle_action.setCheckable(True)
+        self._toggle_action.toggled.connect(self._on_toggle_action)
+        self._central_widget = None
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+        self._layout.setSpacing(0)
+
+    def setWidget(self, widget: QWidget) -> None:
+        if self._central_widget is not None:
+            self._central_widget.setParent(None)
+        self._central_widget = widget
+        if widget is not None:
+            widget.setParent(self)
+            self._layout.addWidget(widget)
+
+    def widget(self) -> QWidget | None:
+        return self._central_widget
+
+    def toggleViewAction(self) -> QAction:
+        return self._toggle_action
+
+    def setAllowedAreas(self, *_args, **_kwargs) -> None:
+        pass
+
+    def setFeatures(self, *_args, **_kwargs) -> None:
+        pass
+
+    def isFloating(self) -> bool:
+        return False
+
+    def setFloating(self, _floating: bool) -> None:
+        pass
+
+    def _on_toggle_action(self, checked: bool) -> None:
+        if checked:
+            self.show()
+            self.raise_()
+            self.activateWindow()
+        else:
+            self.hide()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._toggle_action.blockSignals(True)
+        self._toggle_action.setChecked(True)
+        self._toggle_action.blockSignals(False)
+        self.visibilityChanged.emit(True)
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self._toggle_action.blockSignals(True)
+        self._toggle_action.setChecked(False)
+        self._toggle_action.blockSignals(False)
+        self.visibilityChanged.emit(False)
+
+    def closeEvent(self, event):
+        event.ignore()
+        self.hide()
 
 
 # ------------------------------------------------------------

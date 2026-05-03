@@ -1174,6 +1174,8 @@ class SignalsMixin:
         else:
             self.ui.lbl_ewin.setText(f"E: {int(lo/30)+1} - {int(hi/30)+1}")
         self._update_pg1()
+        if hasattr(self, "sig_window_range_changed"):
+            self.sig_window_range_changed.emit(float(lo), float(hi))
         if hasattr(self, "_annotator_on_window_range_changed"):
             self._annotator_on_window_range_changed(lo, hi)
         if hasattr(self, "_psd_overlay_on_range_changed"):
@@ -1272,6 +1274,12 @@ class SignalsMixin:
             pi.removeItem(curve)
         self.annot_curves.clear()
 
+        def _fast_curve(pen):
+            item = pg.PlotDataItem(pen=pen, connect="finite", antialias=False)
+            item.setClipToView(True)
+            item.setDownsampling(auto=True, method="peak")
+            return item
+
         
         #
         # initiate channels
@@ -1279,7 +1287,7 @@ class SignalsMixin:
         
         for i in range(nchan):
             pen = pg.mkPen( self.colors[i], width= self.cfg_line_weight , cosmetic=True )
-            c = pg.PlotCurveItem(pen=pen, connect='finite')
+            c = _fast_curve(pen)
             pi.addItem(c)
             self.curves.append(c)
 
@@ -1319,7 +1327,7 @@ class SignalsMixin:
             for j in range(18):
                 col = colors[j % len(colors)]
                 pen = pg.mkPen(col, width=self.cfg_line_weight, cosmetic=True)
-                c = pg.PlotCurveItem(pen=pen, connect='finite')
+                c = _fast_curve(pen)
                 pi.addItem(c)
                 self.sigmod_curves.append(c)
                 self.sigmod_curve_colors.append(col)

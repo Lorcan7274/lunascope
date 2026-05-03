@@ -23,10 +23,10 @@
 import re
 from pathlib import Path
 from PySide6.QtWidgets import QMessageBox
-from PySide6.QtCore import QSignalBlocker
+from PySide6.QtCore import QSignalBlocker, Qt
 
 from .tbl_funcs import set_filter_for_channel
-from ..helpers import override_colors
+from ..helpers import override_colors, pick_two_colors
 from ..file_dialogs import open_file_name
 
 # helper to parse and store cmaps
@@ -53,6 +53,45 @@ from ..file_dialogs import open_file_name
 import os, sys
 import pyqtgraph as pg
 from  ..helpers import random_darkbg_colors
+
+
+def _checked_names_from_view(view, header_candidates):
+    checked_fn = getattr(view, "checked", None)
+    if callable(checked_fn):
+        try:
+            return list(checked_fn())
+        except Exception:
+            pass
+
+    model = getattr(view, "model", lambda: None)()
+    if model is None:
+        return []
+    src = model.sourceModel() if hasattr(model, "sourceModel") and callable(model.sourceModel) else model
+    if src is None:
+        return []
+
+    ncols = int(src.columnCount())
+    headers = [str(src.headerData(c, Qt.Horizontal) or "").strip().upper() for c in range(ncols)]
+    value_col = -1
+    for candidate in header_candidates:
+        if candidate.upper() in headers:
+            value_col = headers.index(candidate.upper())
+            break
+    if value_col < 0:
+        value_col = 1 if ncols > 1 else 0
+
+    out = []
+    for r in range(int(src.rowCount())):
+        include = True
+        item0 = src.item(r, 0) if hasattr(src, "item") else None
+        if item0 is not None and getattr(item0, "isCheckable", lambda: False)():
+            include = item0.checkState() == Qt.Checked
+        if not include:
+            continue
+        val = src.data(src.index(r, value_col))
+        if val is not None and str(val).strip():
+            out.append(str(val))
+    return out
 
 _CMAP_DEFAULT_TEXT = """\
 %  -- lunascope config guide --
@@ -627,9 +666,10 @@ class CMapsMixin:
     def _set_spectrum_palette(self):
         self.palset = 'spectrum'
         self.ui.pg1.setBackground('black')        
-        nchan = len( self.ui.tbl_desc_signals.checked() )
+        sigs = _checked_names_from_view(self.ui.tbl_desc_signals, ["CH"])
+        nchan = len(sigs)
         self.colors = [pg.intColor(i, hues=nchan) for i in range(nchan)]
-        anns = self.ui.tbl_desc_annots.checked()
+        anns = _checked_names_from_view(self.ui.tbl_desc_annots, ["ANNOT", "CLASS"])
         nanns = len( anns )
         self.acolors = [pg.intColor(i, hues=nanns) for i in range(nanns)]
         self.acolors = self._update_stage_cols( self.acolors , anns )
@@ -638,9 +678,9 @@ class CMapsMixin:
     def _set_white_palette(self):        
         self.palset = 'white'
         self.ui.pg1.setBackground('#E0E0E0')
-        nchan = len( self.ui.tbl_desc_signals.checked() )      
+        nchan = len(_checked_names_from_view(self.ui.tbl_desc_signals, ["CH"]))
         self.colors = ['#101010'] * nchan
-        anns = self.ui.tbl_desc_annots.checked()
+        anns = _checked_names_from_view(self.ui.tbl_desc_annots, ["ANNOT", "CLASS"])
         nanns = len( anns )
         self.acolors = ['#101010'] * nanns
         self.acolors = self._update_stage_cols( self.acolors , anns )
@@ -649,9 +689,9 @@ class CMapsMixin:
     def _set_muted_palette(self):
         self.palset = 'muted'
         self.ui.pg1.setBackground('#D0C0D0')
-        nchan = len( self.ui.tbl_desc_signals.checked() )
+        nchan = len(_checked_names_from_view(self.ui.tbl_desc_signals, ["CH"]))
         self.colors = ['#403020'] * nchan
-        anns = self.ui.tbl_desc_annots.checked()
+        anns = _checked_names_from_view(self.ui.tbl_desc_annots, ["ANNOT", "CLASS"])
         nanns = len( anns )
         self.acolors = ['#403020'] * nanns
         self.acolors = self._update_stage_cols( self.acolors , anns )
@@ -660,9 +700,9 @@ class CMapsMixin:
     def _set_black_palette(self):
         self.palset = 'black'
         self.ui.pg1.setBackground('#101010')
-        nchan = len( self.ui.tbl_desc_signals.checked() )
+        nchan = len(_checked_names_from_view(self.ui.tbl_desc_signals, ["CH"]))
         self.colors = ['#E0E0E0'] * nchan
-        anns = self.ui.tbl_desc_annots.checked()
+        anns = _checked_names_from_view(self.ui.tbl_desc_annots, ["ANNOT", "CLASS"])
         nanns = len( anns )
         self.acolors = ['#E0E0E0'] * nanns
         self.acolors = self._update_stage_cols( self.acolors , anns )
@@ -671,9 +711,9 @@ class CMapsMixin:
     def _set_random_palette(self):
         self.palset = 'random'
         self.ui.pg1.setBackground('#101010')
-        nchan = len( self.ui.tbl_desc_signals.checked() )
+        nchan = len(_checked_names_from_view(self.ui.tbl_desc_signals, ["CH"]))
         self.colors = random_darkbg_colors( nchan )
-        anns = self.ui.tbl_desc_annots.checked()
+        anns = _checked_names_from_view(self.ui.tbl_desc_annots, ["ANNOT", "CLASS"])
         nanns = len( anns )
         self.acolors = random_darkbg_colors( nanns )
         self.acolors = self._update_stage_cols( self.acolors , anns )
@@ -683,9 +723,9 @@ class CMapsMixin:
         self.palset = 'user'
         self.c1, self.c2 = pick_two_colors()
         self.ui.pg1.setBackground(self.c1)
-        nchan = len( self.ui.tbl_desc_signals.checked() )
+        nchan = len(_checked_names_from_view(self.ui.tbl_desc_signals, ["CH"]))
         self.colors = [self.c2] * nchan
-        anns = self.ui.tbl_desc_annots.checked()
+        anns = _checked_names_from_view(self.ui.tbl_desc_annots, ["ANNOT", "CLASS"])
         nanns = len( anns )
         self.acolors = [self.c2] * nanns
         self.acolors = self._update_stage_cols( self.acolors , anns )
@@ -696,9 +736,9 @@ class CMapsMixin:
         # assume self.c1 and self.c2 already set
         #self.c1, self.c2 = pick_two_colors()
         self.ui.pg1.setBackground(self.c1)
-        nchan = len( self.ui.tbl_desc_signals.checked() )
+        nchan = len(_checked_names_from_view(self.ui.tbl_desc_signals, ["CH"]))
         self.colors = [self.c2] * nchan
-        anns = self.ui.tbl_desc_annots.checked()
+        anns = _checked_names_from_view(self.ui.tbl_desc_annots, ["ANNOT", "CLASS"])
         nanns = len( anns )
         self.acolors = [self.c2] * nanns
         self.acolors = self._update_stage_cols( self.acolors , anns )
@@ -708,7 +748,7 @@ class CMapsMixin:
         # back default black (i.e. for things not seen)
         self._set_black_palette()
         self.palset = 'bespoke'
-        chs = self.ui.tbl_desc_signals.checked()
+        chs = _checked_names_from_view(self.ui.tbl_desc_signals, ["CH"])
         # re-order list
         if self.cmap_list:
             chs = sorted( chs, key=lambda x: (self.cmap_list.index(x) if x in self.cmap_list else len(self.cmap_list) + chs.index(x)))
@@ -717,7 +757,7 @@ class CMapsMixin:
         # set signal colors
         self.colors = override_colors(self.colors, chs, self.cmap)
         # and annots
-        anns = self.ui.tbl_desc_annots.checked()
+        anns = _checked_names_from_view(self.ui.tbl_desc_annots, ["ANNOT", "CLASS"])
         if self.cmap_rlist:
             anns = sorted( anns, key=lambda x: (self.cmap_list.index(x) if x in self.cmap_list else len(self.cmap_list) + anns.index(x)))
         self.acolors = override_colors(self.acolors, anns, self.cmap)

@@ -32,21 +32,47 @@ individual thin traces plus mean ± 95 % CI on top.
 """
 
 import traceback
+import warnings
 
 import numpy as np
 import pandas as pd
+from scipy import stats
 
 from PySide6 import QtCore, QtWidgets
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDoubleSpinBox, QFrame, QHBoxLayout, QLabel,
-    QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QDoubleSpinBox, QFrame, QGridLayout, QHBoxLayout, QLabel,
+    QPushButton, QScrollArea, QSizePolicy, QSlider, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from .explorer_base import BG, FG, GRID, _ExplorerTab
+from ..file_dialogs import existing_directory, open_file_name
+from ..lwf import format_lwf_summary, format_lwf_summary_compact, load_lwf_directory
 
 TRACE_SUMMARY_THRESHOLD = 2000
 QUANTILE_SUBSAMPLE_LIMIT = 4000
+RENDER_BUTTON_STYLE = (
+    "QPushButton {"
+    " background-color:#1f6feb;"
+    " color:#f8fafc;"
+    " border:1px solid #388bfd;"
+    " border-radius:6px;"
+    " font-weight:600;"
+    " padding:4px 12px;"
+    "}"
+    "QPushButton:hover { background-color:#2f81f7; border-color:#58a6ff; }"
+    "QPushButton:pressed { background-color:#1a5fd0; }"
+    "QPushButton:disabled { background-color:#1f2937; color:#9ca3af; border-color:#374151; }"
+)
+INSPECTOR_LOCAL_FEATURES = [
+    ("rms", "RMS"),
+    ("ptp", "Peak-to-peak"),
+    ("mean_abs", "Mean |x|"),
+    ("auc_abs", "Area |x|"),
+    ("hjorth_activity", "Hjorth Activity"),
+    ("hjorth_mobility", "Hjorth Mobility"),
+    ("hjorth_complexity", "Hjorth Complexity"),
+]
 
 
 def _apply_transform(mat, transform_mode):
@@ -55,150 +81,167 @@ def _apply_transform(mat, transform_mode):
     return mat
 
 
-# ---------------------------------------------------------------------------
-# Pure computation (background thread)
-# ---------------------------------------------------------------------------
+def _apply_outlier_policy(seg_or_mat, outlier_mode, outlier_sd_thresh):
+    if outlier_mode == "none" or not np.isfinite(outlier_sd_thresh) or outlier_sd_thresh <= 0:
+        return seg_or_mat
 
-def _extract_traces(p, ns, annot_class, channels, pre_secs, post_secs, align_to, baseline,
-                    transform_mode, summary_mode):
-    """
-    Extract peri-event signal windows.
+    data = np.asarray(seg_or_mat, dtype=float)
+    if data.size == 0:
+        return data
 
-    Returns dict:
-        traces    – {ch: list of (t_rel np.ndarray, values np.ndarray)}
-        t_grid    – common relative-time grid
-        mean      – {ch: np.ndarray}
-        ci_lo/hi  – {ch: np.ndarray}   (95% CI via ±1.96 SE)
-        n_events  – int
-        sr        – {ch: float}
-    """
-    try:
-        hdr = p.headers()
-    except Exception:
-        hdr = None
+    mean = np.nanmean(data, axis=0, keepdims=True)
+    std = np.nanstd(data, axis=0, ddof=1, keepdims=True)
+    std = np.where(np.isfinite(std) & (std > 0), std, np.nan)
+    lo = mean - (float(outlier_sd_thresh) * std)
+    hi = mean + (float(outlier_sd_thresh) * std)
 
-    # ---- events --------------------------------------------------------
-    try:
-        ev = p.fetch_annots([annot_class])
-    except Exception as e:
-        raise RuntimeError(f"Could not fetch annotations for  '{annot_class}': {e}")
+    if outlier_mode == "winsorize":
+        return np.clip(data, lo, hi)
+    if outlier_mode == "remove":
+        mask = (data < lo) | (data > hi)
+        return np.where(mask, np.nan, data)
+    return data
 
-    if ev is None or ev.empty:
-        raise RuntimeError(f"No events found for annotation  '{annot_class}'.")
 
-    # normalise column names
-    col_map = {}
-    for col in ev.columns:
-        lc = col.lower()
-        if lc in ("class", "annotation"): col_map[col] = "Class"
-        elif lc == "start":               col_map[col] = "Start"
-        elif lc in ("stop", "end"):       col_map[col] = "Stop"
-    if col_map:
-        ev = ev.rename(columns=col_map)
+def _normalize_trace(seg):
+    seg = np.asarray(seg, dtype=float)
+    finite = np.isfinite(seg)
+    if not np.any(finite):
+        return seg
+    vals = seg[finite]
+    lo = float(np.min(vals))
+    hi = float(np.max(vals))
+    if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+        out = np.full(seg.shape, 0.0, dtype=float)
+        out[~finite] = np.nan
+        return out
+    out = seg.copy()
+    out[finite] = ((vals - lo) / (hi - lo)) * 2.0 - 1.0
+    return out
 
-    ev["Start"] = pd.to_numeric(ev.get("Start", pd.Series()), errors="coerce")
-    ev["Stop"]  = pd.to_numeric(ev.get("Stop",  pd.Series()), errors="coerce")
-    ev = ev.dropna(subset=["Start", "Stop"])
-    if ev.empty:
-        raise RuntimeError("No valid event times found.")
 
-    # Alignment point
-    if align_to == "start":
-        t_aligns = ev["Start"].values.astype(float)
-    elif align_to == "stop":
-        t_aligns = ev["Stop"].values.astype(float)
-    else:  # midpoint
-        t_aligns = ((ev["Start"].values + ev["Stop"].values) / 2.0).astype(float)
+def _preprocess_traces(segs, *, n_pre, baseline_mode, outlier_mode, outlier_sd_thresh, transform_mode):
+    segs = np.asarray(segs, dtype=float)
+    if segs.size == 0:
+        return segs
 
-    n_events = len(t_aligns)
+    segs = _apply_outlier_policy(segs, outlier_mode, outlier_sd_thresh)
 
-    traces_out: dict[str, list] = {ch: [] for ch in channels}
-    sr_out: dict[str, float]    = {}
-    t_grid_out: dict[str, np.ndarray] = {}
+    if baseline_mode in {"subtract", "subtract_normalize"} and n_pre > 0:
+        base = segs[:, :n_pre]
+        with np.errstate(invalid="ignore"):
+            base_mean = np.nanmean(base, axis=1, keepdims=True)
+        segs = segs - base_mean
 
+    if baseline_mode in {"normalize", "subtract_normalize"}:
+        segs = np.vstack([_normalize_trace(seg) for seg in segs])
+
+    segs = _apply_transform(segs, transform_mode)
+    return segs
+
+
+def _safe_nanvar(x):
+    x = np.asarray(x, dtype=float)
+    finite = x[np.isfinite(x)]
+    if finite.size == 0:
+        return np.nan
+    return float(np.nanvar(finite))
+
+
+def _compute_local_trace_features(seg, sr=None):
+    seg = np.asarray(seg, dtype=float)
+    finite = seg[np.isfinite(seg)]
+    features = {}
+    if finite.size == 0:
+        for key, _ in INSPECTOR_LOCAL_FEATURES:
+            features[key] = np.nan
+        return features
+
+    features["rms"] = float(np.sqrt(np.mean(finite * finite)))
+    features["ptp"] = float(np.max(finite) - np.min(finite))
+    features["mean_abs"] = float(np.mean(np.abs(finite)))
+    if np.isfinite(sr) and sr and sr > 0:
+        features["auc_abs"] = float(np.sum(np.abs(finite)) / float(sr))
+    else:
+        features["auc_abs"] = float(np.sum(np.abs(finite)))
+
+    activity = _safe_nanvar(seg)
+    d1 = np.diff(seg)
+    mobility_num = _safe_nanvar(d1)
+    mobility = np.sqrt(mobility_num / activity) if np.isfinite(activity) and activity > 0 and np.isfinite(mobility_num) else np.nan
+    d2 = np.diff(d1)
+    mobility_d1_num = _safe_nanvar(d2)
+    mobility_d1 = np.sqrt(mobility_d1_num / mobility_num) if np.isfinite(mobility_num) and mobility_num > 0 and np.isfinite(mobility_d1_num) else np.nan
+    complexity = mobility_d1 / mobility if np.isfinite(mobility) and mobility > 0 and np.isfinite(mobility_d1) else np.nan
+
+    features["hjorth_activity"] = activity
+    features["hjorth_mobility"] = mobility
+    features["hjorth_complexity"] = complexity
+    return features
+
+
+def _feature_label(feature_key: str) -> str:
+    for key, label in INSPECTOR_LOCAL_FEATURES:
+        if key == feature_key:
+            return label
+    return str(feature_key)
+
+
+def _collect_feature_names(trace_meta, channels):
+    names = []
+    seen = set()
+    for key, _ in INSPECTOR_LOCAL_FEATURES:
+        names.append(key)
+        seen.add(key)
     for ch in channels:
-        # Fetch full-recording signal for this channel once
-        try:
-            idx = p.s2i([(0.0, float(ns))])
-            raw = p.slice(idx, chs=ch, time=True)
-            if raw is None or raw[1] is None or len(raw[1]) == 0:
-                continue
-            arr  = raw[1]
-            t_all = arr[:, 0].astype(float)
-            v_all = arr[:, 1].astype(float)
-        except Exception:
-            continue
+        for meta in trace_meta.get(ch, []):
+            for key in meta.get("features", {}):
+                if key not in seen:
+                    seen.add(key)
+                    names.append(key)
+    return names
 
-        if len(t_all) < 2:
-            continue
-        header_sr = np.nan
-        if hdr is not None and not hdr.empty and "CH" in hdr.columns and "SR" in hdr.columns:
-            row = hdr.loc[hdr["CH"] == ch]
-            if not row.empty:
-                try:
-                    header_sr = float(row["SR"].iloc[0])
-                except Exception:
-                    header_sr = np.nan
-        inferred_sr = (len(t_all) / float(ns)) if ns else np.nan
-        diffs = np.diff(t_all)
-        positive_diffs = diffs[diffs > 0]
-        sample_dt = float(np.median(positive_diffs)) if positive_diffs.size else np.nan
-        effective_sr = (1.0 / sample_dt) if np.isfinite(sample_dt) and sample_dt > 0 else np.nan
-        sr = effective_sr if np.isfinite(effective_sr) else (header_sr if np.isfinite(header_sr) else inferred_sr)
-        sr_out[ch] = sr
 
-        if not np.isfinite(sr) or sr <= 0:
-            continue
+def _metric_window_mask(t_vals, meta, source, custom_pre, custom_post):
+    t_vals = np.asarray(t_vals, dtype=float)
+    if t_vals.size == 0:
+        return np.zeros(0, dtype=bool)
+    if source == "custom":
+        return (t_vals >= -float(custom_pre)) & (t_vals <= float(custom_post))
+    if source == "annot":
+        anchor = float(meta.get("anchor_sec", np.nan))
+        annot_start = float(meta.get("annot_start_sec", np.nan))
+        annot_stop = float(meta.get("annot_stop_sec", np.nan))
+        if np.isfinite(anchor) and np.isfinite(annot_start) and np.isfinite(annot_stop):
+            rel_start = annot_start - anchor
+            rel_stop = annot_stop - anchor
+            if rel_stop > rel_start:
+                return (t_vals >= rel_start) & (t_vals <= rel_stop)
+    return np.ones(t_vals.shape, dtype=bool)
 
-        n_pre = int(round(float(pre_secs) * sr))
-        n_post = int(round(float(post_secs) * sr))
-        offsets = np.arange(-n_pre, n_post + 1, dtype=np.int64)
-        expected_rel = offsets.astype(float) / float(sr)
-        t_grid_out[ch] = expected_rel
 
-        insert_idx = np.searchsorted(t_all, t_aligns, side="left")
-        center_idx = np.clip(insert_idx, 0, len(t_all) - 1)
-        between = (insert_idx > 0) & (insert_idx < len(t_all))
-        if np.any(between):
-            left_idx = insert_idx[between] - 1
-            right_idx = insert_idx[between]
-            choose_left = (
-                np.abs(t_aligns[between] - t_all[left_idx]) <=
-                np.abs(t_all[right_idx] - t_aligns[between])
-            )
-            center_idx[between] = np.where(choose_left, left_idx, right_idx)
+def _metric_window_label(source, custom_pre, custom_post):
+    if source == "custom":
+        return f"metrics [-{custom_pre:g}, +{custom_post:g}]s"
+    if source == "annot":
+        return "metrics annot interval"
+    return "metrics visible window"
 
-        in_bounds = (
-            (center_idx + offsets[0] >= 0) &
-            (center_idx + offsets[-1] < len(t_all))
-        )
-        valid_centers = center_idx[in_bounds]
 
-        kept_chunks = []
-        dropped_gap = 0
-        gap_tol = max(1e-6, abs(sample_dt) * 0.25) if np.isfinite(sample_dt) else 1e-6
-        chunk_size = 2048
-        for start in range(0, len(valid_centers), chunk_size):
-            centers_chunk = valid_centers[start:start + chunk_size]
-            idx_mat = centers_chunk[:, None] + offsets[None, :]
-            segs = np.asarray(v_all[idx_mat], dtype=float)
-            rel = np.asarray(t_all[idx_mat] - t_all[centers_chunk][:, None], dtype=float)
-            uniform = np.all(np.abs(rel - expected_rel[None, :]) <= gap_tol, axis=1)
-            if not np.any(uniform):
-                dropped_gap += int(len(centers_chunk))
-                continue
-            segs = segs[uniform]
-            dropped_gap += int(np.count_nonzero(~uniform))
-            if baseline and n_pre > 0 and segs.size:
-                segs = segs - segs[:, :n_pre].mean(axis=1, keepdims=True)
-            segs = _apply_transform(segs, transform_mode)
-            kept_chunks.append(segs)
+def _nearest_sample_index(sample_times: np.ndarray, target: float) -> int:
+    insert_idx = int(np.searchsorted(sample_times, target, side="left"))
+    center_idx = min(max(insert_idx, 0), len(sample_times) - 1)
+    if 0 < insert_idx < len(sample_times):
+        left_idx = insert_idx - 1
+        right_idx = insert_idx
+        if abs(target - sample_times[left_idx]) <= abs(sample_times[right_idx] - target):
+            center_idx = left_idx
+        else:
+            center_idx = right_idx
+    return center_idx
 
-        if kept_chunks:
-            mat = np.vstack(kept_chunks)
-            traces_out[ch] = [row for row in mat]
 
-    # ---- summary stats -------------------------------------------------
+def _compute_summary_stats(traces_out, channels, summary_mode):
     mean_out  = {}
     ci_lo_out = {}
     ci_hi_out = {}
@@ -212,10 +255,10 @@ def _extract_traces(p, ns, annot_class, channels, pre_secs, post_secs, align_to,
     quantile_n_out = {}
 
     for ch in channels:
-        segs = traces_out[ch]
+        segs = traces_out.get(ch, [])
         if not segs:
             continue
-        mat = np.vstack(segs)         # shape (n_events, n_grid)
+        mat = np.vstack(segs)
         valid = ~np.isnan(mat)
         counts = np.sum(valid, axis=0)
 
@@ -258,26 +301,640 @@ def _extract_traces(p, ns, annot_class, channels, pre_secs, post_secs, align_to,
             quantile_n_out[ch] = int(mat.shape[0])
 
     return {
-        "traces":   traces_out,
-        "t_grid":   t_grid_out,
-        "mean":     mean_out,
-        "ci_lo":    ci_lo_out,
-        "ci_hi":    ci_hi_out,
-        "std":      std_out,
-        "var":      var_out,
-        "median":   median_out,
-        "q05":      q05_out,
-        "q25":      q25_out,
-        "q75":      q75_out,
-        "q95":      q95_out,
+        "mean": mean_out,
+        "ci_lo": ci_lo_out,
+        "ci_hi": ci_hi_out,
+        "std": std_out,
+        "var": var_out,
+        "median": median_out,
+        "q05": q05_out,
+        "q25": q25_out,
+        "q75": q75_out,
+        "q95": q95_out,
         "quantile_n": quantile_n_out,
+    }
+
+
+def _build_trace_result(
+    traces_out,
+    trace_meta_out,
+    t_grid_out,
+    channels,
+    sr_out,
+    summary_mode,
+    *,
+    annot_class,
+    n_events,
+    transform_mode,
+    units=None,
+    trace_count_label="events",
+    extra_title_bits=None,
+    source_mode="record",
+    baseline_mode="subtract",
+    outlier_mode="none",
+    outlier_sd_thresh=np.nan,
+    view_pre_secs=np.nan,
+    view_post_secs=np.nan,
+):
+    stats = _compute_summary_stats(traces_out, channels, summary_mode)
+    result = {
+        "traces": traces_out,
+        "t_grid": t_grid_out,
         "transform_mode": transform_mode,
         "summary_mode": summary_mode,
         "n_events": n_events,
-        "sr":       sr_out,
+        "sr": sr_out,
         "annot_class": annot_class,
         "channels": channels,
+        "trace_meta": trace_meta_out,
+        "feature_names": _collect_feature_names(trace_meta_out, channels),
+        "trace_count_label": trace_count_label,
+        "units": dict(units or {}),
+        "extra_title_bits": list(extra_title_bits or []),
+        "source_mode": source_mode,
+        "baseline_mode": baseline_mode,
+        "outlier_mode": outlier_mode,
+        "outlier_sd_thresh": outlier_sd_thresh,
+        "view_pre_secs": float(view_pre_secs),
+        "view_post_secs": float(view_post_secs),
+    }
+    result.update(stats)
+    return result
+
+
+def _compute_two_group_pointwise_stats(group0, group1):
+    mat0 = np.vstack(group0)
+    mat1 = np.vstack(group1)
+    valid0 = np.sum(np.isfinite(mat0), axis=0)
+    valid1 = np.sum(np.isfinite(mat1), axis=0)
+    mean0 = np.full(mat0.shape[1], np.nan, dtype=float)
+    mean1 = np.full(mat1.shape[1], np.nan, dtype=float)
+    cols0 = valid0 > 0
+    cols1 = valid1 > 0
+    if np.any(cols0):
+        mean0[cols0] = np.nansum(mat0[:, cols0], axis=0) / valid0[cols0]
+    if np.any(cols1):
+        mean1[cols1] = np.nansum(mat1[:, cols1], axis=0) / valid1[cols1]
+    diff = mean1 - mean0
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        warnings.simplefilter("ignore")
+        tstat, pval = stats.ttest_ind(mat1, mat0, axis=0, equal_var=False, nan_policy="omit")
+    with np.errstate(divide="ignore", invalid="ignore"):
+        neglogp = -np.log10(pval)
+    neglogp[~np.isfinite(neglogp)] = np.nan
+    return {
+        "mean_diff": diff,
+        "pval": np.asarray(pval, dtype=float),
+        "neglogp": np.asarray(neglogp, dtype=float),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Pure computation (background thread)
+# ---------------------------------------------------------------------------
+
+def _extract_traces(p, ns, annot_class, channels, pre_secs, post_secs, align_to, baseline_mode,
+                    outlier_mode, outlier_sd_thresh, transform_mode, summary_mode):
+    """
+    Extract peri-event signal windows.
+
+    Returns dict:
+        traces    – {ch: list of (t_rel np.ndarray, values np.ndarray)}
+        t_grid    – common relative-time grid
+        mean      – {ch: np.ndarray}
+        ci_lo/hi  – {ch: np.ndarray}   (95% CI via ±1.96 SE)
+        n_events  – int
+        sr        – {ch: float}
+    """
+    try:
+        extracted = p.extract_event_waveforms_with_features(
+            [annot_class],
+            channels,
+            float(pre_secs),
+            float(post_secs),
+            align=align_to,
+            require="full",
+            catch24=False,
+            basic_stats=True,
+        )
+    except Exception as e:
+        raise RuntimeError(f"Could not extract waveforms for '{annot_class}': {e}")
+
+    events = list(extracted.get("events", []))
+    if not events:
+        raise RuntimeError(f"No events found for annotation '{annot_class}'.")
+
+    traces_out: dict[str, list] = {ch: [] for ch in channels}
+    trace_meta_out: dict[str, list] = {ch: [] for ch in channels}
+    sr_out: dict[str, float] = {}
+    t_grid_out: dict[str, np.ndarray] = {}
+    unit_out: dict[str, str] = {}
+    n_events = int(extracted.get("total_events", len(events)))
+
+    for ev in events:
+        blocks = ev.get("blocks", {})
+        for ch in channels:
+            block = blocks.get(ch)
+            if block is None:
+                continue
+            sr = float(block.get("sr", np.nan))
+            rel = np.asarray(block.get("rel_time", []), dtype=float)
+            vals = np.asarray(block.get("values", []), dtype=float)
+            if rel.size == 0 or vals.size == 0 or rel.shape[0] != vals.shape[0]:
+                continue
+            if ch not in t_grid_out:
+                t_grid_out[ch] = rel
+                sr_out[ch] = sr
+                unit_out[ch] = str(block.get("unit", "") or "")
+            traces_out[ch].append(vals)
+            trace_meta_out[ch].append(
+                {
+                    "annot": str(ev.get("annot", annot_class)),
+                    "instance": str(ev.get("instance", "")),
+                    "annot_ch": str(ev.get("annot_ch", "")),
+                    "anchor_sec": float(ev.get("anchor_sec", np.nan)),
+                    "annot_start_sec": float(ev.get("annot_start_sec", np.nan)),
+                    "annot_stop_sec": float(ev.get("annot_stop_sec", np.nan)),
+                    "features": dict(block.get("features", {}) or {}),
+                    "feature_qc": int(block.get("feature_qc", -1)),
+                }
+            )
+
+    for ch in channels:
+        if ch not in t_grid_out or not traces_out[ch]:
+            continue
+        sr = float(sr_out.get(ch, np.nan))
+        if not np.isfinite(sr) or sr <= 0:
+            continue
+        n_pre = int(round(float(pre_secs) * sr))
+        mat = np.vstack(traces_out[ch])
+        mat = _preprocess_traces(
+            mat,
+            n_pre=n_pre,
+            baseline_mode=baseline_mode,
+            outlier_mode=outlier_mode,
+            outlier_sd_thresh=outlier_sd_thresh,
+            transform_mode=transform_mode,
+        )
+        traces_out[ch] = [row for row in mat]
+        updated_meta = []
+        for row, meta in zip(mat, trace_meta_out[ch]):
+            meta2 = dict(meta)
+            features = dict(meta2.get("features", {}))
+            features.update(_compute_local_trace_features(row, sr=sr))
+            meta2["features"] = features
+            updated_meta.append(meta2)
+        trace_meta_out[ch] = updated_meta
+
+    return _build_trace_result(
+        traces_out,
+        trace_meta_out,
+        t_grid_out,
+        channels,
+        sr_out,
+        summary_mode,
+        annot_class=annot_class,
+        n_events=n_events,
+        transform_mode=transform_mode,
+        baseline_mode=baseline_mode,
+        outlier_mode=outlier_mode,
+        outlier_sd_thresh=outlier_sd_thresh,
+        units=unit_out,
+        source_mode="record",
+        view_pre_secs=pre_secs,
+        view_post_secs=post_secs,
+    )
+
+
+def _format_lwf_panel_label(ch_value, annot_value, tag_value, strategies):
+    parts = []
+    if strategies.get("CH", "stratify") == "stratify":
+        parts.append(str(ch_value))
+    if strategies.get("ANNOT", "pool") == "stratify":
+        parts.append(f"Annot={annot_value}")
+    if strategies.get("TAG", "pool") == "stratify":
+        parts.append(f"Tag={tag_value}")
+    return " | ".join(parts) if parts else "Pooled"
+
+
+def _extract_lwf_traces(dataset, filters, strategies, pre_secs, post_secs, align_to, baseline_mode,
+                        outlier_mode, outlier_sd_thresh, transform_mode, summary_mode, average_by_id):
+    files_df = dataset.files
+    waves_df = dataset.waves
+    channels_df = dataset.channels
+
+    selected_channels = [str(x) for x in filters.get("CH", [])]
+    selected_annots = {str(x) for x in filters.get("ANNOT", [])}
+    selected_tags = {str(x) for x in filters.get("TAG", [])}
+    selected_ids = {str(x) for x in filters.get("ID", [])}
+
+    if not selected_channels:
+        raise RuntimeError("No channels selected.")
+    if not selected_annots:
+        raise RuntimeError("No annotations selected.")
+    if not selected_tags:
+        raise RuntimeError("No tags selected.")
+    if not selected_ids:
+        raise RuntimeError("No IDs selected.")
+
+    file_meta = files_df[["FILE", "LWF_ID", "TAG"]].drop_duplicates()
+    valid_files = set(
+        file_meta.loc[
+            file_meta["LWF_ID"].astype(str).isin(selected_ids)
+            & file_meta["TAG"].astype(str).isin(selected_tags),
+            "FILE",
+        ].tolist()
+    )
+    if not valid_files:
+        raise RuntimeError("No .lwf files matched the selected ID/TAG filters.")
+
+    selected_waves = waves_df.loc[
+        waves_df["FILE"].isin(valid_files)
+        & waves_df["ANNOT"].astype(str).isin(selected_annots)
+    ]
+    if selected_waves.empty:
+        raise RuntimeError("No waveform events matched the selected filters.")
+
+    file_id_map = dict(zip(file_meta["FILE"], file_meta["LWF_ID"]))
+    sr_map = {}
+    unit_map = {}
+    for ch in selected_channels:
+        rows = channels_df.loc[channels_df["CH"].astype(str) == ch]
+        if rows.empty:
+            continue
+        sr_map[ch] = float(rows["SR"].iloc[0])
+        unit = str(rows["UNIT"].iloc[0]).strip()
+        unit_map[ch] = "" if unit == "nan" else unit
+
+    ch_mode = str(strategies.get("CH", "stratify"))
+    annot_mode = str(strategies.get("ANNOT", "pool"))
+    tag_mode = str(strategies.get("TAG", "pool"))
+    contrast = dict(strategies.get("CONTRAST") or {"axis": "none"})
+    if ch_mode == "pool":
+        pooled_srs = {sr_map.get(ch) for ch in selected_channels if np.isfinite(sr_map.get(ch, np.nan))}
+        if len(pooled_srs) > 1:
+            raise RuntimeError(
+                "Cannot pool selected channels because they do not share the same sample rate."
+            )
+        pooled_units = {unit_map.get(ch, "") for ch in selected_channels}
+        pooled_unit = pooled_units.pop() if len(pooled_units) == 1 else ""
+    else:
+        pooled_unit = ""
+
+    traces_out = {}
+    trace_meta = {}
+    trace_ids = {}
+    trace_group_labels = {}
+    t_grid_out = {}
+    used_sr = {}
+    panel_units = {}
+    contrast_groups = {}
+    raw_trace_count = 0
+    contrast_axis = str(contrast.get("axis", "none"))
+    if contrast_axis == "id_group":
+        cov_df = contrast["covariates"]
+        cov_name = str(contrast["covariate"])
+        cov_map = dict(zip(cov_df["LWF_ID"].astype(str), cov_df[cov_name]))
+        group_levels = ["0", "1"]
+        contrast_title = f"ID group={cov_name}"
+    elif contrast_axis in {"CH", "ANNOT", "TAG"}:
+        group_levels = [str(x) for x in contrast.get("levels", [])]
+        contrast_title = f"{contrast_axis}: {group_levels[0]} vs {group_levels[1]}"
+    else:
+        group_levels = []
+        contrast_title = ""
+
+    for ch in selected_channels:
+        sr = sr_map.get(ch)
+        if not np.isfinite(sr) or sr <= 0:
+            continue
+        n_pre = int(round(float(pre_secs) * sr))
+        n_post = int(round(float(post_secs) * sr))
+        offsets = np.arange(-n_pre, n_post + 1, dtype=np.int64)
+        expected_rel = offsets.astype(float) / float(sr)
+        gap_tol = max(1e-6, (1.0 / float(sr)) * 0.25)
+
+        for row in selected_waves.itertuples(index=False):
+            row_tag = str(row.TAG)
+            if row_tag not in selected_tags:
+                continue
+            blocks = row.BLOCKS
+            block = blocks.get(ch)
+            if block is None or block.n <= 0:
+                continue
+
+            center_sec = float(row.ANCHOR_SEC)
+
+            panel_strategies = {"CH": ch_mode, "ANNOT": annot_mode, "TAG": tag_mode}
+            if contrast_axis in panel_strategies:
+                panel_strategies[contrast_axis] = "pool"
+            panel_label = _format_lwf_panel_label(
+                ch if ch_mode == "stratify" else ",".join(selected_channels),
+                str(row.ANNOT),
+                row_tag,
+                panel_strategies,
+            )
+            if panel_label not in traces_out:
+                traces_out[panel_label] = []
+                trace_meta[panel_label] = []
+                trace_ids[panel_label] = []
+                trace_group_labels[panel_label] = []
+                t_grid_out[panel_label] = expected_rel
+                used_sr[panel_label] = sr
+                panel_units[panel_label] = unit_map.get(ch, "") if ch_mode == "stratify" else pooled_unit
+                if contrast_axis != "none":
+                    contrast_groups[panel_label] = {gl: [] for gl in group_levels}
+
+            if contrast_axis == "id_group":
+                lwf_id = str(file_id_map.get(row.FILE, ""))
+                group_value = cov_map.get(lwf_id, np.nan)
+                if pd.isna(group_value):
+                    continue
+                group_label = str(int(group_value))
+                if group_label not in contrast_groups[panel_label]:
+                    continue
+            elif contrast_axis == "CH":
+                group_label = ch
+                if group_label not in group_levels:
+                    continue
+            elif contrast_axis == "ANNOT":
+                group_label = str(row.ANNOT)
+                if group_label not in group_levels:
+                    continue
+            elif contrast_axis == "TAG":
+                group_label = row_tag
+                if group_label not in group_levels:
+                    continue
+            else:
+                group_label = None
+
+            sample_times = float(block.data_start_sec) + (np.arange(block.n, dtype=float) / float(sr))
+            center_idx = _nearest_sample_index(sample_times, center_sec)
+            req_start_idx = int(center_idx + offsets[0])
+            req_stop_idx = int(center_idx + offsets[-1])
+            src_start_idx = max(0, req_start_idx)
+            src_stop_idx = min(block.n - 1, req_stop_idx)
+            if src_start_idx > src_stop_idx:
+                continue
+            dst_start_idx = int(src_start_idx - req_start_idx)
+            dst_stop_idx = int(dst_start_idx + (src_stop_idx - src_start_idx))
+
+            seg = np.full(expected_rel.shape[0], np.nan, dtype=float)
+            src_values = np.asarray(block.values[src_start_idx:src_stop_idx + 1], dtype=float)
+            rel = sample_times[src_start_idx:src_stop_idx + 1] - center_sec
+            expected_slice = expected_rel[dst_start_idx:dst_stop_idx + 1]
+            if src_values.shape[0] != expected_slice.shape[0]:
+                continue
+            if not np.all(np.abs(rel - expected_slice) <= gap_tol):
+                continue
+            seg[dst_start_idx:dst_stop_idx + 1] = src_values
+
+            lwf_id = str(file_id_map.get(row.FILE, ""))
+            traces_out[panel_label].append(seg)
+            trace_meta[panel_label].append(
+                {
+                    "annot": str(row.ANNOT),
+                    "instance": str(row.INSTANCE),
+                    "annot_ch": str(row.ANNOT_CH),
+                    "anchor_sec": float(row.ANCHOR_SEC),
+                    "annot_start_sec": float(row.ANNOT_START_SEC),
+                    "annot_stop_sec": float(row.ANNOT_STOP_SEC),
+                    "lwf_id": lwf_id,
+                    "tag": row_tag,
+                    "features": dict(getattr(block, "features", {}) or {}),
+                    "feature_qc": int(getattr(block, "feature_qc", -1)),
+                }
+            )
+            trace_ids[panel_label].append(lwf_id)
+            trace_group_labels[panel_label].append(group_label)
+            if contrast_axis != "none":
+                contrast_groups[panel_label][group_label].append((seg, lwf_id))
+            raw_trace_count += 1
+
+    for panel in list(traces_out.keys()):
+        segs = traces_out.get(panel, [])
+        if not segs:
+            continue
+        n_pre = int(round(float(pre_secs) * float(used_sr[panel])))
+        proc = _preprocess_traces(
+            np.vstack(segs),
+            n_pre=n_pre,
+            baseline_mode=baseline_mode,
+            outlier_mode=outlier_mode,
+            outlier_sd_thresh=outlier_sd_thresh,
+            transform_mode=transform_mode,
+        )
+        traces_out[panel] = [row for row in proc]
+        updated_meta = []
+        for row, meta in zip(proc, trace_meta[panel]):
+            meta2 = dict(meta)
+            features = dict(meta2.get("features", {}))
+            features.update(_compute_local_trace_features(row, sr=used_sr[panel]))
+            meta2["features"] = features
+            updated_meta.append(meta2)
+        trace_meta[panel] = updated_meta
+        if contrast_axis != "none":
+            panel_groups = {gl: [] for gl in group_levels}
+            for seg, lwf_id, group_label in zip(proc, trace_ids[panel], trace_group_labels[panel]):
+                if group_label in panel_groups:
+                    panel_groups[group_label].append((seg, lwf_id))
+            contrast_groups[panel] = panel_groups
+
+    panel_keys = list(traces_out.keys())
+    contrast_group_stats = {}
+    if average_by_id:
+        averaged = {panel: [] for panel in panel_keys}
+        averaged_meta = {panel: [] for panel in panel_keys}
+        for panel in panel_keys:
+            if not traces_out[panel]:
+                continue
+            by_id = {}
+            by_meta = {}
+            for seg, lwf_id, meta in zip(traces_out[panel], trace_ids[panel], trace_meta[panel]):
+                by_id.setdefault(lwf_id, []).append(seg)
+                by_meta.setdefault(lwf_id, []).append(meta)
+            for lwf_id in sorted(by_id):
+                mean_seg = np.vstack(by_id[lwf_id]).mean(axis=0)
+                averaged[panel].append(mean_seg)
+                meta = dict(by_meta[lwf_id][0]) if by_meta.get(lwf_id) else {"lwf_id": lwf_id}
+                meta["anchor_sec"] = np.nan
+                meta["annot_start_sec"] = np.nan
+                meta["annot_stop_sec"] = np.nan
+                meta["features"] = _compute_local_trace_features(mean_seg, sr=used_sr[panel])
+                averaged_meta[panel].append(meta)
+        traces_out = averaged
+        trace_meta = averaged_meta
+        if contrast_axis != "none":
+            reduced_groups = {}
+            for panel in panel_keys:
+                reduced_groups[panel] = {gl: [] for gl in group_levels}
+                for gl in group_levels:
+                    by_id = {}
+                    for seg, lwf_id in contrast_groups[panel][gl]:
+                        by_id.setdefault(lwf_id, []).append(seg)
+                    for lwf_id in sorted(by_id):
+                        reduced_groups[panel][gl].append(np.vstack(by_id[lwf_id]).mean(axis=0))
+            contrast_groups = reduced_groups
+        n_events = sum(len(v) for v in traces_out.values())
+        trace_count_label = "ID means"
+        extra_title_bits = [f"{raw_trace_count} waves"]
+    else:
+        if contrast_axis != "none":
+            reduced_groups = {}
+            for panel in panel_keys:
+                reduced_groups[panel] = {gl: [seg for seg, _ in contrast_groups[panel][gl]] for gl in group_levels}
+            contrast_groups = reduced_groups
+        n_events = sum(len(v) for v in traces_out.values())
+        trace_count_label = "waves"
+        extra_title_bits = []
+
+    if n_events == 0:
+        raise RuntimeError("No waveform segments matched the requested window and filters.")
+
+    panel_keys = [panel for panel, segs in traces_out.items() if segs]
+    traces_out = {panel: traces_out[panel] for panel in panel_keys}
+    trace_meta = {panel: trace_meta[panel] for panel in panel_keys}
+    t_grid_out = {panel: t_grid_out[panel] for panel in panel_keys}
+    used_sr = {panel: used_sr[panel] for panel in panel_keys}
+    panel_units = {panel: panel_units[panel] for panel in panel_keys}
+
+    title_bits = []
+    if annot_mode == "pool":
+        annot_label = ", ".join(sorted(selected_annots))
+        if len(annot_label) > 48:
+            annot_label = annot_label[:45] + "..."
+        title_bits.append(f"annots={annot_label}")
+    else:
+        annot_label = "stratified annots"
+    if tag_mode == "pool":
+        pooled_tags_label = ", ".join(sorted(selected_tags))
+        if len(pooled_tags_label) > 36:
+            pooled_tags_label = pooled_tags_label[:33] + "..."
+        title_bits.append(f"tags={pooled_tags_label}")
+    if ch_mode == "pool":
+        title_bits.append(f"channels={len(selected_channels)} pooled")
+    else:
+        title_bits.append(f"channels={len(panel_keys)} panels")
+    extra_title_bits = title_bits + extra_title_bits
+    result = _build_trace_result(
+        traces_out,
+        trace_meta,
+        t_grid_out,
+        panel_keys,
+        used_sr,
+        summary_mode,
+        annot_class=annot_label,
+        n_events=n_events,
+        transform_mode=transform_mode,
+        baseline_mode=baseline_mode,
+        outlier_mode=outlier_mode,
+        outlier_sd_thresh=outlier_sd_thresh,
+        units=panel_units,
+        trace_count_label=trace_count_label,
+        extra_title_bits=extra_title_bits,
+        source_mode="lwf",
+        view_pre_secs=pre_secs,
+        view_post_secs=post_secs,
+    )
+    if contrast_axis != "none":
+        panel_keys = [panel for panel in panel_keys if all(len(contrast_groups[panel][gl]) > 0 for gl in group_levels)]
+        if not panel_keys:
+            raise RuntimeError("The selected contrast did not leave two non-empty groups to compare.")
+        contrast_stats = {}
+        contrast_group_summaries = {}
+        for panel in panel_keys:
+            contrast_stats[panel] = _compute_two_group_pointwise_stats(
+                contrast_groups[panel][group_levels[0]],
+                contrast_groups[panel][group_levels[1]],
+            )
+            contrast_group_summaries[panel] = {}
+            for gl in group_levels:
+                group_result = _build_trace_result(
+                    {panel: contrast_groups[panel][gl]},
+                    {panel: []},
+                    {panel: t_grid_out[panel]},
+                    [panel],
+                    {panel: used_sr[panel]},
+                    summary_mode,
+                    annot_class=annot_label,
+                    n_events=len(contrast_groups[panel][gl]),
+                    transform_mode=transform_mode,
+                    units={panel: panel_units[panel]},
+                    trace_count_label=trace_count_label,
+                    extra_title_bits=[],
+                    source_mode="lwf",
+                    baseline_mode=baseline_mode,
+                    outlier_mode=outlier_mode,
+                    outlier_sd_thresh=outlier_sd_thresh,
+                    view_pre_secs=pre_secs,
+                    view_post_secs=post_secs,
+                )
+                contrast_group_summaries[panel][gl] = group_result
+        result["channels"] = panel_keys
+        result["traces"] = {panel: traces_out[panel] for panel in panel_keys}
+        result["t_grid"] = {panel: t_grid_out[panel] for panel in panel_keys}
+        result["sr"] = {panel: used_sr[panel] for panel in panel_keys}
+        result["units"] = {panel: panel_units[panel] for panel in panel_keys}
+        result["contrast"] = {
+            "axis": contrast_axis,
+            "labels": group_levels,
+            "title": contrast_title,
+            "layout": str(contrast.get("layout", "stacked")),
+            "groups": contrast_group_summaries,
+            "stats": contrast_stats,
+            "unit_note": "Tests are descriptive only; without per-ID averaging, waves from the same ID are not independent.",
         }
+        if average_by_id:
+            result["contrast"]["unit_label"] = "ID means"
+        else:
+            result["contrast"]["unit_label"] = "waves"
+    return result
+
+
+def _load_lwf_folder(directory: str, recursive: bool = False):
+    dataset = load_lwf_directory(directory, recursive=recursive)
+    return dataset, format_lwf_summary(dataset), format_lwf_summary_compact(dataset)
+
+
+def _make_select_button(label: str, slot):
+    btn = QPushButton(label)
+    btn.setFixedWidth(44)
+    btn.clicked.connect(slot)
+    return btn
+
+
+def _safe_window_floor(seconds: float) -> float:
+    if not np.isfinite(seconds) or seconds <= 0:
+        return 0.0
+    return float(np.floor(seconds * 10.0) / 10.0)
+
+
+def _read_binary_covariates(path: str) -> tuple[pd.DataFrame, list[str]]:
+    df = pd.read_csv(path, sep=None, engine="python")
+    if df.shape[1] < 2:
+        raise ValueError("Covariate file must have at least two columns: ID and one binary variable.")
+    id_col = str(df.columns[0])
+    out = pd.DataFrame()
+    out["LWF_ID"] = df.iloc[:, 0].astype(str).str.strip()
+    if out["LWF_ID"].eq("").all():
+        raise ValueError("First covariate column must contain IDs.")
+
+    valid_cols = []
+    for col in df.columns[1:]:
+        series = df[col]
+        norm = series.astype(str).str.strip()
+        norm = norm.mask(norm.isin(["", "NA", "NaN", "nan"]))
+        numeric = pd.to_numeric(norm, errors="coerce")
+        bad = numeric[~numeric.isna() & ~numeric.isin([0, 1])]
+        if not bad.empty:
+            continue
+        out[str(col)] = numeric
+        valid_cols.append(str(col))
+    if not valid_cols:
+        raise ValueError("No usable binary covariate columns found. Expected only 0/1/NA values.")
+    out = out.dropna(subset=["LWF_ID"]).drop_duplicates(subset=["LWF_ID"], keep="last")
+    return out, valid_cols
 
 
 # ---------------------------------------------------------------------------
@@ -289,13 +946,21 @@ class WaveformTab(_ExplorerTab):
 
     _sig_ok  = QtCore.Signal(object)
     _sig_err = QtCore.Signal(str)
+    _sig_lwf_ok = QtCore.Signal(object, str)
+    _sig_lwf_err = QtCore.Signal(str)
 
     def __init__(self, ctrl, parent=None):
         super().__init__(ctrl, parent)
         self._last_result = None
+        self._lwf_data = None
+        self._lwf_covariates = None
+        self._lwf_covariate_path = ""
+        self._mode = "record"
         self._pending_units = {}
         self._sig_ok.connect(self._on_ok,  Qt.QueuedConnection)
         self._sig_err.connect(self._on_err, Qt.QueuedConnection)
+        self._sig_lwf_ok.connect(self._on_lwf_ok, Qt.QueuedConnection)
+        self._sig_lwf_err.connect(self._on_lwf_err, Qt.QueuedConnection)
         self._build_widget()
 
     # ------------------------------------------------------------------
@@ -310,6 +975,7 @@ class WaveformTab(_ExplorerTab):
         # row 1: annotation + channels
         row1 = QWidget(); rl1 = QHBoxLayout(row1)
         rl1.setContentsMargins(0,0,0,0); rl1.setSpacing(6)
+        row1.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
         btn_refresh = QPushButton("↻"); btn_refresh.setFixedWidth(30)
         btn_refresh.setToolTip("Reload channels/annotations from current record")
@@ -335,15 +1001,16 @@ class WaveformTab(_ExplorerTab):
         rl1.addStretch(1)
         rl1.addWidget(btn_refresh)
 
-        # row 2: window / alignment / baseline / render
-        row2 = QWidget(); rl2 = QHBoxLayout(row2)
+        # row 2: plot window / alignment / primary action
+        row2 = QWidget(); rl2 = QGridLayout(row2)
         rl2.setContentsMargins(0,0,0,0); rl2.setSpacing(6)
+        row2.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
         spin_pre = QDoubleSpinBox(); spin_pre.setRange(0, 300); spin_pre.setValue(2)
         spin_pre.setSuffix(" s"); spin_pre.setDecimals(1); spin_pre.setFixedWidth(72)
         spin_pre.setToolTip("Pre-event window (seconds)")
 
-        spin_post = QDoubleSpinBox(); spin_post.setRange(0, 300); spin_post.setValue(5)
+        spin_post = QDoubleSpinBox(); spin_post.setRange(0, 300); spin_post.setValue(2)
         spin_post.setSuffix(" s"); spin_post.setDecimals(1); spin_post.setFixedWidth(72)
         spin_post.setToolTip("Post-event window (seconds)")
 
@@ -352,9 +1019,33 @@ class WaveformTab(_ExplorerTab):
             combo_align.addItem(lbl, key)
         combo_align.setToolTip("Align traces to event start / midpoint / stop")
 
-        chk_baseline = QCheckBox("Baseline subtract")
-        chk_baseline.setToolTip("Subtract mean of pre-event window from each trace")
-        chk_baseline.setChecked(True)
+        combo_baseline = QComboBox(); combo_baseline.setFixedWidth(150)
+        combo_baseline.addItem("None", "none")
+        combo_baseline.addItem("Baseline subtract", "subtract")
+        combo_baseline.addItem("Normalize [-1,1]", "normalize")
+        combo_baseline.addItem("Baseline + normalize", "subtract_normalize")
+        combo_baseline.setCurrentIndex(combo_baseline.findData("subtract"))
+        combo_baseline.setToolTip(
+            "Center/scale each trace after any outlier handling. "
+            "Normalization rescales each waveform to [-1, 1]."
+        )
+
+        combo_outlier = QComboBox(); combo_outlier.setFixedWidth(110)
+        combo_outlier.addItem("No outliers", "none")
+        combo_outlier.addItem("Winsorize", "winsorize")
+        combo_outlier.addItem("Remove", "remove")
+        combo_outlier.setToolTip(
+            "Handle pointwise waveform outliers across traces before summary stats."
+        )
+
+        spin_outlier_sd = QDoubleSpinBox()
+        spin_outlier_sd.setRange(0.1, 20.0)
+        spin_outlier_sd.setDecimals(1)
+        spin_outlier_sd.setSingleStep(0.5)
+        spin_outlier_sd.setValue(3.0)
+        spin_outlier_sd.setSuffix(" SD")
+        spin_outlier_sd.setFixedWidth(86)
+        spin_outlier_sd.setToolTip("Outlier threshold in standard deviations")
 
         combo_transform = QComboBox(); combo_transform.setFixedWidth(105)
         combo_transform.addItem("Raw", "raw")
@@ -368,20 +1059,58 @@ class WaveformTab(_ExplorerTab):
         combo_summary.addItem("Variance", "variance")
         combo_summary.setToolTip("Summary statistic to plot across event-locked traces")
 
-        btn_render = QPushButton("Render"); btn_render.setFixedWidth(80)
+        chk_show_line = QCheckBox("Line")
+        chk_show_line.setChecked(True)
+        chk_show_line.setToolTip("Show the summary line (mean / median / variance)")
+
+        chk_show_band = QCheckBox("Band")
+        chk_show_band.setChecked(True)
+        chk_show_band.setToolTip("Show the summary band (CI / SD / quantiles)")
+
+        btn_render = QPushButton("Render"); btn_render.setFixedWidth(96)
+        btn_render.setMinimumHeight(30)
+        btn_render.setStyleSheet(RENDER_BUTTON_STYLE)
         btn_render.setToolTip("Extract signal windows and draw traces")
 
-        rl2.addWidget(QLabel("Pre:")); rl2.addWidget(spin_pre)
-        rl2.addWidget(QLabel("Post:")); rl2.addWidget(spin_post)
-        rl2.addWidget(QLabel("Align:")); rl2.addWidget(combo_align)
-        rl2.addWidget(QLabel("Value:")); rl2.addWidget(combo_transform)
-        rl2.addWidget(QLabel("Show:")); rl2.addWidget(combo_summary)
-        rl2.addWidget(chk_baseline)
-        rl2.addStretch(1); rl2.addWidget(btn_render)
+        rl2.addWidget(QLabel("View pre:"), 0, 0); rl2.addWidget(spin_pre, 0, 1)
+        rl2.addWidget(QLabel("View post:"), 0, 2); rl2.addWidget(spin_post, 0, 3)
+        rl2.addWidget(QLabel("Align:"), 0, 4); rl2.addWidget(combo_align, 0, 5)
+        rl2.setColumnStretch(6, 1)
 
-        # row 3: y-axis controls
-        row3 = QWidget(); rl3 = QHBoxLayout(row3)
-        rl3.setContentsMargins(0,0,0,0); rl3.setSpacing(6)
+        # row 3: display / preprocessing
+        row3 = QWidget(); rl3 = QVBoxLayout(row3)
+        rl3.setContentsMargins(0,0,0,0); rl3.setSpacing(4)
+        row3.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        display_row_a = QHBoxLayout()
+        display_row_a.setContentsMargins(0, 0, 0, 0)
+        display_row_a.setSpacing(6)
+        display_row_a.addWidget(QLabel("Transform:"))
+        display_row_a.addWidget(combo_transform)
+        display_row_a.addSpacing(10)
+        display_row_a.addWidget(QLabel("Summary:"))
+        display_row_a.addWidget(combo_summary)
+        display_row_a.addSpacing(8)
+        display_row_a.addWidget(chk_show_line)
+        display_row_a.addWidget(chk_show_band)
+        display_row_a.addStretch(1)
+        rl3.addLayout(display_row_a)
+
+        display_row_b = QHBoxLayout()
+        display_row_b.setContentsMargins(0, 0, 0, 0)
+        display_row_b.setSpacing(6)
+        display_row_b.addWidget(QLabel("Baseline:"))
+        display_row_b.addWidget(combo_baseline)
+        display_row_b.addSpacing(12)
+        display_row_b.addWidget(QLabel("Outliers:"))
+        display_row_b.addWidget(combo_outlier)
+        display_row_b.addWidget(spin_outlier_sd)
+        display_row_b.addStretch(1)
+        rl3.addLayout(display_row_b)
+
+        # row 4: y-axis controls
+        row4 = QWidget(); rl4 = QHBoxLayout(row4)
+        rl4.setContentsMargins(0,0,0,0); rl4.setSpacing(6)
+        row4.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
         chk_auto_ymin = QCheckBox("Auto min")
         chk_auto_ymin.setChecked(True)
@@ -405,12 +1134,357 @@ class WaveformTab(_ExplorerTab):
         spin_ymax.setEnabled(False)
         spin_ymax.setToolTip("Manual upper y-axis limit")
 
-        rl3.addWidget(QLabel("Y min:")); rl3.addWidget(spin_ymin)
-        rl3.addWidget(chk_auto_ymin)
-        rl3.addSpacing(12)
-        rl3.addWidget(QLabel("Y max:")); rl3.addWidget(spin_ymax)
-        rl3.addWidget(chk_auto_ymax)
-        rl3.addStretch(1)
+        chk_summary_only = QCheckBox("Summary only")
+        chk_summary_only.setToolTip(
+            "Hide individual traces and show only the selected summary. "
+            "Automatically locked on when too many traces are present."
+        )
+
+        rl4.addWidget(QLabel("Y min:")); rl4.addWidget(spin_ymin)
+        rl4.addWidget(chk_auto_ymin)
+        rl4.addSpacing(10)
+        rl4.addWidget(QLabel("Y max:")); rl4.addWidget(spin_ymax)
+        rl4.addWidget(chk_auto_ymax)
+        rl4.addSpacing(10)
+        rl4.addWidget(chk_summary_only)
+        rl4.addStretch(1)
+        rl4.addWidget(btn_render)
+
+        record_tab = QWidget()
+        record_layout = QVBoxLayout(record_tab)
+        record_layout.setContentsMargins(0, 0, 0, 0)
+        record_layout.setSpacing(2)
+        record_layout.addWidget(row1)
+        record_layout.addWidget(row2)
+        record_layout.addWidget(row3)
+        record_layout.addWidget(row4)
+        record_tab.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+
+        lwf_tab = QWidget()
+        lwf_layout = QVBoxLayout(lwf_tab)
+        lwf_layout.setContentsMargins(0, 0, 0, 0)
+        lwf_layout.setSpacing(2)
+
+        lwf_row1 = QWidget(); lwf_rl1 = QGridLayout(lwf_row1)
+        lwf_rl1.setContentsMargins(0, 0, 0, 0); lwf_rl1.setSpacing(6)
+        lwf_row1.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        btn_load_lwf = QPushButton("Load .lwf…")
+        btn_load_lwf.setToolTip("Load a folder of precomputed .lwf waveform shards")
+        chk_lwf_recursive = QCheckBox("Recursive")
+        chk_lwf_recursive.setToolTip("Recursively scan the selected folder for .lwf files")
+        btn_load_cov = QPushButton("Load covariates…")
+        btn_load_cov.setToolTip("Load an ID-level covariate file with first column = ID and binary 0/1/NA columns")
+        lab_cov = QLabel("No covariates loaded.")
+        lab_cov.setStyleSheet("QLabel { color:#8b949e; }")
+        lab_cov.setMinimumWidth(180)
+        combo_contrast = QComboBox()
+        combo_contrast.setFixedWidth(130)
+        combo_contrast.addItem("None", "none")
+        combo_contrast.addItem("ID group file", "id_group")
+        combo_contrast.addItem("CH", "CH")
+        combo_contrast.addItem("ANNOT", "ANNOT")
+        combo_contrast.addItem("TAG", "TAG")
+        combo_contrast.setToolTip("Select the single two-group contrast axis for pairwise comparison")
+        lab_cov_choice = QLabel("Covariate:")
+        combo_covariate = QComboBox()
+        combo_covariate.setMinimumWidth(150)
+        combo_covariate.setEnabled(False)
+        combo_covariate.setToolTip("Choose the binary ID covariate to define the 0 vs 1 contrast")
+        combo_contrast_layout = QComboBox()
+        combo_contrast_layout.setFixedWidth(92)
+        combo_contrast_layout.addItem("Stacked", "stacked")
+        combo_contrast_layout.addItem("Overlay", "overlay")
+        combo_contrast_layout.setToolTip("Show the two contrast groups as separate plots or overlaid in one plot")
+        lwf_rl1.addWidget(btn_load_lwf, 0, 0)
+        lwf_rl1.addWidget(chk_lwf_recursive, 0, 1)
+        lwf_rl1.addWidget(btn_load_cov, 0, 2)
+        lwf_rl1.addWidget(lab_cov, 0, 3)
+        lwf_rl1.addWidget(QLabel("Contrast:"), 0, 4)
+        lwf_rl1.addWidget(combo_contrast, 0, 5)
+        lwf_rl1.addWidget(lab_cov_choice, 0, 6)
+        lwf_rl1.addWidget(combo_covariate, 0, 7)
+        lwf_rl1.addWidget(combo_contrast_layout, 0, 8)
+        lwf_rl1.setColumnStretch(3, 1)
+
+        lwf_summary = QLabel("No .lwf dataset loaded.")
+        lwf_summary.setWordWrap(False)
+        lwf_summary.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        lwf_summary.setStyleSheet(
+            "QLabel { color:#c9d1d9; padding:3px 6px; border:1px solid #30363d; "
+            "border-radius:6px; background:#111827; }"
+        )
+        lwf_summary.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        lwf_summary.setMaximumHeight(28)
+
+        from .soappops import MultiSelectComboBox
+
+        lwf_row2 = QWidget(); lwf_rl2 = QGridLayout(lwf_row2)
+        lwf_rl2.setContentsMargins(0, 0, 0, 0); lwf_rl2.setSpacing(6)
+        lwf_row2.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        combo_lwf_ch = MultiSelectComboBox()
+        combo_lwf_ch.setMinimumWidth(130)
+        combo_lwf_ch.setMaximumWidth(220)
+        combo_lwf_ch.lineEdit().setPlaceholderText("Select channels")
+        btn_lwf_ch_all = _make_select_button("All", lambda: combo_lwf_ch.check_all())
+        btn_lwf_ch_none = _make_select_button("None", lambda: combo_lwf_ch.clear_all())
+        combo_lwf_ch_mode = QComboBox()
+        combo_lwf_ch_mode.addItem("Stratify", "stratify")
+        combo_lwf_ch_mode.addItem("Pool", "pool")
+        combo_lwf_ch_mode.setFixedWidth(88)
+        combo_lwf_ch_mode.setToolTip("Choose whether selected channels make separate panels or are pooled together")
+
+        combo_lwf_annot = MultiSelectComboBox()
+        combo_lwf_annot.setMinimumWidth(130)
+        combo_lwf_annot.setMaximumWidth(220)
+        combo_lwf_annot.lineEdit().setPlaceholderText("Select annotations")
+        btn_lwf_annot_all = _make_select_button("All", lambda: combo_lwf_annot.check_all())
+        btn_lwf_annot_none = _make_select_button("None", lambda: combo_lwf_annot.clear_all())
+        combo_lwf_annot_mode = QComboBox()
+        combo_lwf_annot_mode.addItem("Pool", "pool")
+        combo_lwf_annot_mode.addItem("Stratify", "stratify")
+        combo_lwf_annot_mode.setFixedWidth(88)
+        combo_lwf_annot_mode.setToolTip("Choose whether selected annotations are pooled or split into separate panels")
+
+        combo_lwf_tag = MultiSelectComboBox()
+        combo_lwf_tag.setMinimumWidth(120)
+        combo_lwf_tag.setMaximumWidth(200)
+        combo_lwf_tag.lineEdit().setPlaceholderText("Select tags")
+        btn_lwf_tag_all = _make_select_button("All", lambda: combo_lwf_tag.check_all())
+        btn_lwf_tag_none = _make_select_button("None", lambda: combo_lwf_tag.clear_all())
+        combo_lwf_tag_mode = QComboBox()
+        combo_lwf_tag_mode.addItem("Pool", "pool")
+        combo_lwf_tag_mode.addItem("Stratify", "stratify")
+        combo_lwf_tag_mode.setFixedWidth(88)
+        combo_lwf_tag_mode.setToolTip("Choose whether selected tags are pooled or split into separate panels")
+
+        combo_lwf_id = MultiSelectComboBox()
+        combo_lwf_id.setMinimumWidth(150)
+        combo_lwf_id.setMaximumWidth(240)
+        combo_lwf_id.lineEdit().setPlaceholderText("Select IDs")
+        btn_lwf_id_all = _make_select_button("All", lambda: combo_lwf_id.check_all())
+        btn_lwf_id_none = _make_select_button("None", lambda: combo_lwf_id.clear_all())
+
+        lwf_rl2.addWidget(QLabel("CH:"), 0, 0)
+        lwf_rl2.addWidget(combo_lwf_ch, 0, 1)
+        lwf_rl2.addWidget(btn_lwf_ch_all, 0, 2)
+        lwf_rl2.addWidget(btn_lwf_ch_none, 0, 3)
+        lwf_rl2.addWidget(combo_lwf_ch_mode, 0, 4)
+        lwf_rl2.addWidget(QLabel("Annot:"), 0, 5)
+        lwf_rl2.addWidget(combo_lwf_annot, 0, 6)
+        lwf_rl2.addWidget(btn_lwf_annot_all, 0, 7)
+        lwf_rl2.addWidget(btn_lwf_annot_none, 0, 8)
+        lwf_rl2.addWidget(combo_lwf_annot_mode, 0, 9)
+        lwf_rl2.addWidget(QLabel("Tag:"), 1, 0)
+        lwf_rl2.addWidget(combo_lwf_tag, 1, 1)
+        lwf_rl2.addWidget(btn_lwf_tag_all, 1, 2)
+        lwf_rl2.addWidget(btn_lwf_tag_none, 1, 3)
+        lwf_rl2.addWidget(combo_lwf_tag_mode, 1, 4)
+        lwf_rl2.addWidget(QLabel("ID:"), 1, 5)
+        lwf_rl2.addWidget(combo_lwf_id, 1, 6)
+        lwf_rl2.addWidget(btn_lwf_id_all, 1, 7)
+        lwf_rl2.addWidget(btn_lwf_id_none, 1, 8)
+        lwf_rl2.setColumnStretch(1, 1)
+        lwf_rl2.setColumnStretch(6, 1)
+
+        lwf_row4 = QWidget(); lwf_rl4 = QGridLayout(lwf_row4)
+        lwf_rl4.setContentsMargins(0, 0, 0, 0); lwf_rl4.setSpacing(6)
+        lwf_row4.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        spin_lwf_pre = QDoubleSpinBox(); spin_lwf_pre.setRange(0, 300); spin_lwf_pre.setValue(2)
+        spin_lwf_pre.setSuffix(" s"); spin_lwf_pre.setDecimals(1); spin_lwf_pre.setFixedWidth(72)
+        spin_lwf_pre.setToolTip("Pre-event window (seconds)")
+
+        spin_lwf_post = QDoubleSpinBox(); spin_lwf_post.setRange(0, 300); spin_lwf_post.setValue(2)
+        spin_lwf_post.setSuffix(" s"); spin_lwf_post.setDecimals(1); spin_lwf_post.setFixedWidth(72)
+        spin_lwf_post.setToolTip("Post-event window (seconds)")
+
+        combo_lwf_align = QComboBox(); combo_lwf_align.setFixedWidth(90)
+        for key, lbl in [("start","Start"), ("mid","Midpoint"), ("stop","Stop")]:
+            combo_lwf_align.addItem(lbl, key)
+        combo_lwf_align.setToolTip("Align traces to event start / midpoint / stop")
+
+        combo_lwf_transform = QComboBox(); combo_lwf_transform.setFixedWidth(105)
+        combo_lwf_transform.addItem("Raw", "raw")
+        combo_lwf_transform.addItem("Rectified", "rectified")
+        combo_lwf_transform.setToolTip("Apply a simple per-sample transform before summarizing")
+
+        combo_lwf_summary = QComboBox(); combo_lwf_summary.setFixedWidth(125)
+        combo_lwf_summary.addItem("Mean ± CI", "mean_ci")
+        combo_lwf_summary.addItem("Mean ± SD", "mean_sd")
+        combo_lwf_summary.addItem("Quantiles", "mean_quantiles")
+        combo_lwf_summary.addItem("Variance", "variance")
+        combo_lwf_summary.setToolTip("Summary statistic to plot across event-locked traces")
+
+        chk_lwf_show_line = QCheckBox("Line")
+        chk_lwf_show_line.setChecked(True)
+        chk_lwf_show_line.setToolTip("Show the summary line (mean / median / variance)")
+
+        chk_lwf_show_band = QCheckBox("Band")
+        chk_lwf_show_band.setChecked(True)
+        chk_lwf_show_band.setToolTip("Show the summary band (CI / SD / quantiles)")
+
+        combo_lwf_baseline = QComboBox(); combo_lwf_baseline.setFixedWidth(150)
+        combo_lwf_baseline.addItem("None", "none")
+        combo_lwf_baseline.addItem("Baseline subtract", "subtract")
+        combo_lwf_baseline.addItem("Normalize [-1,1]", "normalize")
+        combo_lwf_baseline.addItem("Baseline + normalize", "subtract_normalize")
+        combo_lwf_baseline.setCurrentIndex(combo_lwf_baseline.findData("subtract"))
+        combo_lwf_baseline.setToolTip(
+            "Center/scale each trace after any outlier handling. "
+            "Normalization rescales each waveform to [-1, 1]."
+        )
+
+        combo_lwf_outlier = QComboBox(); combo_lwf_outlier.setFixedWidth(110)
+        combo_lwf_outlier.addItem("No outliers", "none")
+        combo_lwf_outlier.addItem("Winsorize", "winsorize")
+        combo_lwf_outlier.addItem("Remove", "remove")
+        combo_lwf_outlier.setToolTip(
+            "Handle pointwise waveform outliers across traces before summary stats."
+        )
+
+        spin_lwf_outlier_sd = QDoubleSpinBox()
+        spin_lwf_outlier_sd.setRange(0.1, 20.0)
+        spin_lwf_outlier_sd.setDecimals(1)
+        spin_lwf_outlier_sd.setSingleStep(0.5)
+        spin_lwf_outlier_sd.setValue(3.0)
+        spin_lwf_outlier_sd.setSuffix(" SD")
+        spin_lwf_outlier_sd.setFixedWidth(86)
+        spin_lwf_outlier_sd.setToolTip("Outlier threshold in standard deviations")
+
+        chk_lwf_mean_by_id = QCheckBox("Average per ID")
+        chk_lwf_mean_by_id.setToolTip("Average single-wave traces within each individual before plotting and summarizing")
+
+        chk_lwf_summary_only = QCheckBox("Summary only")
+        chk_lwf_summary_only.setChecked(True)
+        chk_lwf_summary_only.setToolTip(
+            "Hide individual traces and show only the selected summary. "
+            "Automatically locked on when too many traces are present."
+        )
+
+        btn_render_lwf = QPushButton("Render"); btn_render_lwf.setFixedWidth(96)
+        btn_render_lwf.setMinimumHeight(30)
+        btn_render_lwf.setStyleSheet(RENDER_BUTTON_STYLE)
+        btn_render_lwf.setToolTip("Render a cohort waveform plot from the loaded .lwf dataset")
+
+        lwf_rl4.addWidget(QLabel("View pre:"), 0, 0); lwf_rl4.addWidget(spin_lwf_pre, 0, 1)
+        lwf_rl4.addWidget(QLabel("View post:"), 0, 2); lwf_rl4.addWidget(spin_lwf_post, 0, 3)
+        lwf_rl4.addWidget(QLabel("Align:"), 0, 4); lwf_rl4.addWidget(combo_lwf_align, 0, 5)
+        lwf_rl4.addWidget(chk_lwf_mean_by_id, 0, 6)
+        lwf_rl4.setColumnStretch(7, 1)
+
+        lwf_row5 = QWidget(); lwf_rl5 = QVBoxLayout(lwf_row5)
+        lwf_rl5.setContentsMargins(0, 0, 0, 0); lwf_rl5.setSpacing(4)
+        lwf_row5.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        lwf_display_row_a = QHBoxLayout()
+        lwf_display_row_a.setContentsMargins(0, 0, 0, 0)
+        lwf_display_row_a.setSpacing(6)
+        lwf_display_row_a.addWidget(QLabel("Transform:"))
+        lwf_display_row_a.addWidget(combo_lwf_transform)
+        lwf_display_row_a.addSpacing(10)
+        lwf_display_row_a.addWidget(QLabel("Summary:"))
+        lwf_display_row_a.addWidget(combo_lwf_summary)
+        lwf_display_row_a.addSpacing(8)
+        lwf_display_row_a.addWidget(chk_lwf_show_line)
+        lwf_display_row_a.addWidget(chk_lwf_show_band)
+        lwf_display_row_a.addWidget(chk_lwf_summary_only)
+        lwf_display_row_a.addStretch(1)
+        lwf_rl5.addLayout(lwf_display_row_a)
+
+        lwf_display_row_b = QHBoxLayout()
+        lwf_display_row_b.setContentsMargins(0, 0, 0, 0)
+        lwf_display_row_b.setSpacing(6)
+        lwf_display_row_b.addWidget(QLabel("Baseline:"))
+        lwf_display_row_b.addWidget(combo_lwf_baseline)
+        lwf_display_row_b.addSpacing(12)
+        lwf_display_row_b.addWidget(QLabel("Outliers:"))
+        lwf_display_row_b.addWidget(combo_lwf_outlier)
+        lwf_display_row_b.addWidget(spin_lwf_outlier_sd)
+        lwf_display_row_b.addStretch(1)
+        lwf_display_row_b.addWidget(btn_render_lwf)
+        lwf_rl5.addLayout(lwf_display_row_b)
+
+        lwf_layout.addWidget(lwf_row1)
+        lwf_layout.addWidget(lwf_row2)
+        lwf_layout.addWidget(lwf_row4)
+        lwf_layout.addWidget(lwf_row5)
+        lwf_layout.addWidget(lwf_summary)
+        lwf_tab.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+
+        mode_tabs = QTabWidget()
+        mode_tabs.addTab(record_tab, "Current Record")
+        mode_tabs.addTab(lwf_tab, "Loaded .lwf")
+        mode_tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        inspector_row = QWidget()
+        inspector_layout = QHBoxLayout(inspector_row)
+        inspector_layout.setContentsMargins(0, 0, 0, 0)
+        inspector_layout.setSpacing(6)
+        inspector_row.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        combo_view = QComboBox()
+        combo_view.setFixedWidth(120)
+        combo_view.addItem("Summary", "summary")
+        combo_view.addItem("Wave Inspector", "inspect")
+        combo_view.setToolTip("Switch between the population summary and a single-wave inspection view")
+
+        combo_feature = QComboBox()
+        combo_feature.setMinimumWidth(150)
+        combo_feature.setToolTip("Rank waves by this feature before selecting one with the slider")
+
+        combo_metric_source = QComboBox()
+        combo_metric_source.setFixedWidth(160)
+        combo_metric_source.addItem("Visible window", "visible")
+        combo_metric_source.addItem("Custom window", "custom")
+        combo_metric_source.addItem("Annotation interval", "annot")
+        combo_metric_source.setToolTip("Choose which segment is used to compute waveform-ranking metrics")
+
+        lab_metric_pre = QLabel("Metric pre:")
+        spin_metric_pre = QDoubleSpinBox()
+        spin_metric_pre.setRange(0, 300)
+        spin_metric_pre.setValue(2)
+        spin_metric_pre.setSuffix(" s")
+        spin_metric_pre.setDecimals(1)
+        spin_metric_pre.setFixedWidth(72)
+        spin_metric_pre.setToolTip("Custom pre-event interval used only for ranking metrics")
+
+        lab_metric_post = QLabel("Metric post:")
+        spin_metric_post = QDoubleSpinBox()
+        spin_metric_post.setRange(0, 300)
+        spin_metric_post.setValue(2)
+        spin_metric_post.setSuffix(" s")
+        spin_metric_post.setDecimals(1)
+        spin_metric_post.setFixedWidth(72)
+        spin_metric_post.setToolTip("Custom post-event interval used only for ranking metrics")
+
+        slider_wave = QSlider(Qt.Horizontal)
+        slider_wave.setMinimum(1)
+        slider_wave.setMaximum(1)
+        slider_wave.setValue(1)
+        slider_wave.setEnabled(False)
+        slider_wave.setToolTip("Select the wave rank within each panel after ordering by the chosen feature")
+
+        lab_wave = QLabel("Wave 1 / 1")
+        lab_wave.setMinimumWidth(92)
+        lab_wave.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        lab_wave.setStyleSheet("QLabel { color:#8b949e; }")
+
+        inspector_layout.addWidget(QLabel("View:"))
+        inspector_layout.addWidget(combo_view)
+        inspector_layout.addSpacing(8)
+        inspector_layout.addWidget(QLabel("Metrics:"))
+        inspector_layout.addWidget(combo_metric_source)
+        inspector_layout.addWidget(lab_metric_pre)
+        inspector_layout.addWidget(spin_metric_pre)
+        inspector_layout.addWidget(lab_metric_post)
+        inspector_layout.addWidget(spin_metric_post)
+        inspector_layout.addSpacing(8)
+        inspector_layout.addWidget(QLabel("Order by:"))
+        inspector_layout.addWidget(combo_feature)
+        inspector_layout.addSpacing(8)
+        inspector_layout.addWidget(QLabel("Wave:"))
+        inspector_layout.addWidget(slider_wave, 3)
+        inspector_layout.addWidget(lab_wave)
 
         # canvas host
         canvas_host = QFrame()
@@ -439,7 +1513,9 @@ class WaveformTab(_ExplorerTab):
         canvas_scroll.destroyed.connect(self._on_canvas_scroll_destroyed)
         canvas_scroll.viewport().installEventFilter(self)
 
-        outer.addWidget(row1); outer.addWidget(row2); outer.addWidget(row3); outer.addWidget(canvas_scroll, 1)
+        outer.addWidget(mode_tabs)
+        outer.addWidget(inspector_row)
+        outer.addWidget(canvas_scroll, 1)
 
         # store
         self._root        = root
@@ -450,22 +1526,255 @@ class WaveformTab(_ExplorerTab):
         self._combo_align = combo_align
         self._combo_transform = combo_transform
         self._combo_summary = combo_summary
-        self._chk_base    = chk_baseline
+        self._chk_show_line = chk_show_line
+        self._chk_show_band = chk_show_band
+        self._combo_baseline = combo_baseline
+        self._combo_outlier = combo_outlier
+        self._spin_outlier_sd = spin_outlier_sd
+        self._tabs_mode = mode_tabs
+        self._combo_view = combo_view
+        self._combo_metric_source = combo_metric_source
+        self._lab_metric_pre = lab_metric_pre
+        self._lab_metric_post = lab_metric_post
+        self._spin_metric_pre = spin_metric_pre
+        self._spin_metric_post = spin_metric_post
+        self._combo_feature = combo_feature
+        self._slider_wave = slider_wave
+        self._lab_wave = lab_wave
+        self._tab_record = record_tab
+        self._tab_lwf = lwf_tab
+        self._lab_lwf_summary = lwf_summary
+        self._lab_lwf_cov = lab_cov
+        self._lab_lwf_cov_choice = lab_cov_choice
+        self._chk_lwf_recursive = chk_lwf_recursive
+        self._combo_lwf_contrast = combo_contrast
+        self._combo_lwf_covariate = combo_covariate
+        self._combo_lwf_contrast_layout = combo_contrast_layout
+        self._combo_lwf_ch = combo_lwf_ch
+        self._combo_lwf_annot = combo_lwf_annot
+        self._combo_lwf_tag = combo_lwf_tag
+        self._combo_lwf_id = combo_lwf_id
+        self._combo_lwf_ch_mode = combo_lwf_ch_mode
+        self._combo_lwf_annot_mode = combo_lwf_annot_mode
+        self._combo_lwf_tag_mode = combo_lwf_tag_mode
+        self._spin_lwf_pre = spin_lwf_pre
+        self._spin_lwf_post = spin_lwf_post
+        self._combo_lwf_align = combo_lwf_align
+        self._combo_lwf_transform = combo_lwf_transform
+        self._combo_lwf_summary = combo_lwf_summary
+        self._chk_lwf_show_line = chk_lwf_show_line
+        self._chk_lwf_show_band = chk_lwf_show_band
+        self._combo_lwf_baseline = combo_lwf_baseline
+        self._combo_lwf_outlier = combo_lwf_outlier
+        self._spin_lwf_outlier_sd = spin_lwf_outlier_sd
+        self._chk_lwf_mean_by_id = chk_lwf_mean_by_id
+        self._chk_lwf_summary_only = chk_lwf_summary_only
         self._chk_auto_ymin = chk_auto_ymin
         self._chk_auto_ymax = chk_auto_ymax
+        self._chk_summary_only = chk_summary_only
         self._spin_ymin   = spin_ymin
         self._spin_ymax   = spin_ymax
 
         # wire
         btn_refresh.clicked.connect(self.refresh_controls)
+        btn_load_lwf.clicked.connect(self._load_lwf_trigger)
+        btn_load_cov.clicked.connect(self._load_lwf_covariates_trigger)
         btn_render.clicked.connect(self._render_trigger)
+        btn_render_lwf.clicked.connect(self._render_lwf_trigger)
+        mode_tabs.currentChanged.connect(self._on_mode_tab_changed)
+        combo_contrast.currentIndexChanged.connect(self._on_lwf_contrast_changed)
         chk_auto_ymin.toggled.connect(self._on_y_limit_toggle)
         chk_auto_ymax.toggled.connect(self._on_y_limit_toggle)
+        combo_view.currentIndexChanged.connect(self._on_inspector_control_changed)
+        combo_metric_source.currentIndexChanged.connect(self._on_inspector_control_changed)
+        spin_metric_pre.valueChanged.connect(self._on_inspector_control_changed)
+        spin_metric_post.valueChanged.connect(self._on_inspector_control_changed)
+        combo_feature.currentIndexChanged.connect(self._on_inspector_control_changed)
+        slider_wave.valueChanged.connect(self._on_inspector_control_changed)
+        chk_summary_only.toggled.connect(self._redraw_cached)
+        chk_lwf_summary_only.toggled.connect(self._redraw_cached)
+        chk_show_line.toggled.connect(self._redraw_cached)
+        chk_show_band.toggled.connect(self._redraw_cached)
+        chk_lwf_show_line.toggled.connect(self._redraw_cached)
+        chk_lwf_show_band.toggled.connect(self._redraw_cached)
         spin_ymin.valueChanged.connect(self._redraw_cached)
         spin_ymax.valueChanged.connect(self._redraw_cached)
         self._save_btn = QPushButton("Export…"); self._save_btn.setFixedWidth(80)
         rl1.addWidget(self._save_btn)
         self._save_btn.clicked.connect(self._save_figure)
+        self._set_mode("record")
+        self._on_lwf_contrast_changed()
+        self._update_inspector_controls(None)
+        QTimer.singleShot(0, self._sync_mode_tab_height)
+
+    def _set_mode(self, mode: str):
+        self._mode = mode
+        tabs = getattr(self, "_tabs_mode", None)
+        if mode == "lwf":
+            if tabs is not None:
+                tabs.setCurrentWidget(self._tab_lwf)
+        else:
+            if tabs is not None:
+                tabs.setCurrentWidget(self._tab_record)
+
+    def _on_mode_tab_changed(self, _index: int):
+        tabs = getattr(self, "_tabs_mode", None)
+        if tabs is None:
+            return
+        current = tabs.currentWidget()
+        if current is self._tab_lwf:
+            self._set_mode("lwf")
+        else:
+            self._set_mode("record")
+        self._sync_mode_tab_height()
+
+    def _sync_mode_tab_height(self):
+        tabs = getattr(self, "_tabs_mode", None)
+        if tabs is None:
+            return
+        current = tabs.currentWidget()
+        if current is None:
+            return
+        current.adjustSize()
+        page_height = max(current.sizeHint().height(), current.minimumSizeHint().height())
+        tabbar = tabs.tabBar()
+        tabbar_height = tabbar.sizeHint().height() if tabbar is not None else 0
+        frame = tabs.style().pixelMetric(QtWidgets.QStyle.PM_DefaultFrameWidth, None, tabs)
+        total = page_height + tabbar_height + (frame * 2) + 4
+        tabs.setMinimumHeight(total)
+        tabs.setMaximumHeight(total)
+
+    def _set_lwf_filter_items(self, combo, values):
+        labels = [str(v) for v in values if str(v)]
+        combo.set_items(labels, checked_labels=labels)
+
+    def _on_lwf_contrast_changed(self, *_):
+        contrast = str(getattr(self, "_combo_lwf_contrast", QComboBox()).currentData() or "none")
+        combo_cov = getattr(self, "_combo_lwf_covariate", None)
+        lab_cov = getattr(self, "_lab_lwf_cov_choice", None)
+        combo_layout = getattr(self, "_combo_lwf_contrast_layout", None)
+        if combo_cov is not None:
+            combo_cov.setEnabled(contrast == "id_group" and combo_cov.count() > 0)
+            combo_cov.setVisible(contrast == "id_group")
+        if lab_cov is not None:
+            lab_cov.setVisible(contrast == "id_group")
+        if combo_layout is not None:
+            combo_layout.setEnabled(contrast != "none")
+        if contrast in {"CH", "ANNOT", "TAG"}:
+            axis_combos = {
+                "CH": getattr(self, "_combo_lwf_ch_mode", None),
+                "ANNOT": getattr(self, "_combo_lwf_annot_mode", None),
+                "TAG": getattr(self, "_combo_lwf_tag_mode", None),
+            }
+            for axis, combo in axis_combos.items():
+                if combo is None:
+                    continue
+                target = "stratify" if axis == contrast else "pool"
+                idx = combo.findData(target)
+                if idx >= 0 and combo.currentIndex() != idx:
+                    combo.setCurrentIndex(idx)
+        elif contrast == "id_group":
+            for name in ("_combo_lwf_ch_mode", "_combo_lwf_annot_mode", "_combo_lwf_tag_mode"):
+                combo = getattr(self, name, None)
+                if combo is None:
+                    continue
+                idx = combo.findData("pool")
+                if idx >= 0 and combo.currentIndex() != idx:
+                    combo.setCurrentIndex(idx)
+
+    def _load_lwf_covariates_trigger(self):
+        path, _ = open_file_name(
+            self._root,
+            "Select ID Covariate File",
+            file_filter="Delimited text (*.txt *.tsv *.csv);;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            cov_df, cols = _read_binary_covariates(path)
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self._root, "Waveform .lwf", str(e))
+            return
+        self._lwf_covariates = cov_df
+        self._lwf_covariate_path = path
+        self._combo_lwf_covariate.clear()
+        self._combo_lwf_covariate.addItems(cols)
+        self._lab_lwf_cov.setText(f"Covariates: {path} ({len(cols)} binary fields)")
+        self._on_lwf_contrast_changed()
+
+    def _lwf_common_window(self, dataset, align_to: str = "mid"):
+        waves_df = dataset.waves
+        channels_df = dataset.channels
+        if waves_df.empty or channels_df.empty:
+            return 0.0, 0.0
+
+        common_pre = None
+        common_post = None
+        valid = 0
+        for row in waves_df.itertuples(index=False):
+            if align_to == "start":
+                center_sec = float(row.ANNOT_START_SEC)
+            elif align_to == "stop":
+                center_sec = float(row.ANNOT_STOP_SEC)
+            else:
+                center_sec = 0.5 * (float(row.ANNOT_START_SEC) + float(row.ANNOT_STOP_SEC))
+            for block in row.BLOCKS.values():
+                if block is None or block.n <= 0:
+                    continue
+                left = float(center_sec - float(block.data_start_sec))
+                right = float(float(block.data_stop_sec) - center_sec)
+                if not np.isfinite(left) or not np.isfinite(right):
+                    continue
+                valid += 1
+                common_pre = left if common_pre is None else min(common_pre, left)
+                common_post = right if common_post is None else min(common_post, right)
+
+        if valid == 0:
+            return 0.0, 0.0
+        return max(0.0, float(common_pre or 0.0)), max(0.0, float(common_post or 0.0))
+
+    def _populate_lwf_controls(self, dataset):
+        waves_df = dataset.waves
+        channels_df = dataset.channels
+        files_df = dataset.files
+        ch_values = sorted(channels_df["CH"].dropna().astype(str).unique().tolist()) if not channels_df.empty else []
+        annot_values = sorted(waves_df["ANNOT"].dropna().astype(str).unique().tolist()) if not waves_df.empty else []
+        tag_values = sorted(files_df["TAG"].dropna().astype(str).unique().tolist()) if not files_df.empty else []
+        id_values = sorted(files_df["LWF_ID"].dropna().astype(str).unique().tolist()) if not files_df.empty else []
+        self._set_lwf_filter_items(self._combo_lwf_ch, ch_values)
+        self._set_lwf_filter_items(self._combo_lwf_annot, annot_values)
+        self._set_lwf_filter_items(self._combo_lwf_tag, tag_values)
+        self._set_lwf_filter_items(self._combo_lwf_id, id_values)
+        common_pre, common_post = self._lwf_common_window(
+            dataset,
+            align_to=str(self._combo_lwf_align.currentData() or "mid"),
+        )
+        self._spin_lwf_pre.setValue(_safe_window_floor(common_pre))
+        self._spin_lwf_post.setValue(_safe_window_floor(common_post))
+
+    def _validate_lwf_contrast(self, filters, strategies):
+        contrast = str(self._combo_lwf_contrast.currentData() or "none")
+        if contrast == "none":
+            return {"axis": "none"}
+
+        if contrast == "id_group":
+            if self._lwf_covariates is None or self._combo_lwf_covariate.count() == 0:
+                raise RuntimeError("Load a binary ID covariate file before using ID-group contrast.")
+            cov = str(self._combo_lwf_covariate.currentText()).strip()
+            if not cov:
+                raise RuntimeError("Select a binary ID covariate for the contrast.")
+            return {"axis": "id_group", "covariate": cov}
+
+        if strategies.get(contrast) != "stratify":
+            raise RuntimeError(f"Set {contrast} to Stratify to use it as the contrast axis.")
+        other_axes = {"CH", "ANNOT", "TAG"} - {contrast}
+        for axis in other_axes:
+            if strategies.get(axis) == "stratify":
+                raise RuntimeError("Only one of CH / ANNOT / TAG may be stratified when contrast testing is enabled.")
+        levels = [str(x) for x in filters.get(contrast, [])]
+        if len(levels) != 2:
+            raise RuntimeError(f"{contrast} contrast requires exactly two selected levels.")
+        return {"axis": contrast, "levels": levels}
 
     def _set_canvas_height(self, nrows: int | None = None):
         """Let stacked waveform plots grow vertically and scroll instead of clipping."""
@@ -490,7 +1799,17 @@ class WaveformTab(_ExplorerTab):
     # ------------------------------------------------------------------
 
     def refresh_controls(self):
-        """Repopulate annotation and channel combos from ctrl.p."""
+        """Repopulate annotation/channel combos and reset display mode."""
+        if self._mode != "lwf":
+            self._set_mode("record")
+        self._refresh_ann_ch()
+
+    def _refresh_ann_ch(self):
+        """Update annotation and channel combo contents without changing display mode.
+
+        Called both from refresh_controls (tab switch) and from sig_results_changed
+        (command completed while waveform tab is already visible).
+        """
         p = getattr(self.ctrl, "p", None)
         if p is None:
             return
@@ -546,6 +1865,7 @@ class WaveformTab(_ExplorerTab):
     # ------------------------------------------------------------------
 
     def _render_trigger(self):
+        self._set_mode("record")
         p = getattr(self.ctrl, "p", None)
         if p is None:
             QtWidgets.QMessageBox.warning(self._root, "Waveform",
@@ -574,26 +1894,34 @@ class WaveformTab(_ExplorerTab):
         pre      = float(self._spin_pre.value())
         post     = float(self._spin_post.value())
         align_to = self._combo_align.currentData()
-        baseline = self._chk_base.isChecked()
+        baseline_mode = str(self._combo_baseline.currentData() or "subtract")
+        outlier_mode = str(self._combo_outlier.currentData() or "none")
+        outlier_sd_thresh = float(self._spin_outlier_sd.value())
         transform_mode = self._combo_transform.currentData()
         summary_mode = self._combo_summary.currentData()
         ns       = float(getattr(self.ctrl, "ns", 0.0))
         self._pending_units = self._get_channel_units(chs)
 
         fut = self.ctrl._exec.submit(
-            _extract_traces, p, ns, ann, chs, pre, post, align_to, baseline,
-            transform_mode, summary_mode)
+            _extract_traces, p, ns, ann, chs, pre, post, align_to, baseline_mode,
+            outlier_mode, outlier_sd_thresh, transform_mode, summary_mode)
         def _done(_f=fut):
             try:
                 self._sig_ok.emit(_f.result())
-            except Exception:
-                self._sig_err.emit(traceback.format_exc())
+            except Exception as e:
+                if isinstance(e, RuntimeError):
+                    self._sig_err.emit(str(e))
+                else:
+                    self._sig_err.emit(traceback.format_exc())
         fut.add_done_callback(_done)
 
     def _on_ok(self, result):
         try:
-            result["units"] = dict(self._pending_units)
+            units = dict(result.get("units", {}))
+            units.update(self._pending_units)
+            result["units"] = units
             self._last_result = result
+            self._update_inspector_controls(result)
             self._draw(result)
         finally:
             self._pending_units = {}
@@ -602,8 +1930,145 @@ class WaveformTab(_ExplorerTab):
     def _on_err(self, tb_str):
         try:
             self._pending_units = {}
+            msg = tb_str[:800]
+            if "No waveform segments matched the requested window and filters." in tb_str:
+                msg = (
+                    "No waveform segments matched the requested window and filters.\n\n"
+                    "The selected CH / ANNOT / TAG / ID combination may be valid, but the "
+                    "requested Pre/Post window or alignment may exceed what was stored in "
+                    "the .lwf files. Try a smaller window or load files generated with a wider dump window."
+                )
             QtWidgets.QMessageBox.critical(
-                self._root, "Waveform error", tb_str[:800])
+                self._root, "Waveform error", msg)
+        finally:
+            self._end_work()
+
+    def _load_lwf_trigger(self):
+        folder = existing_directory(self._root, "Select .lwf Folder")
+        if not folder:
+            return
+        if not self._start_work("Loading .lwf waveforms…"):
+            return
+        recursive = bool(self._chk_lwf_recursive.isChecked())
+        fut = self.ctrl._exec.submit(_load_lwf_folder, folder, recursive)
+
+        def _done(_f=fut):
+            try:
+                dataset, summary_full, summary_compact = _f.result()
+                self._sig_lwf_ok.emit(dataset, summary_full + "\n\n__COMPACT__\n" + summary_compact)
+            except Exception as e:
+                if isinstance(e, ValueError):
+                    self._sig_lwf_err.emit(str(e))
+                else:
+                    self._sig_lwf_err.emit(traceback.format_exc())
+
+        fut.add_done_callback(_done)
+
+    def _on_lwf_ok(self, dataset, summary: str):
+        try:
+            if "\n\n__COMPACT__\n" in summary:
+                summary_full, summary_compact = summary.split("\n\n__COMPACT__\n", 1)
+            else:
+                summary_full, summary_compact = summary, summary
+            self._lwf_data = dataset
+            self._populate_lwf_controls(dataset)
+            self._set_mode("lwf")
+            self._lab_lwf_summary.setText(summary_compact)
+            self._update_inspector_controls(None)
+            self._sync_mode_tab_height()
+            self._render_empty(summary_compact)
+            print(summary_full)
+            QtWidgets.QMessageBox.information(self._root, "Waveform .lwf", summary_full)
+        finally:
+            self._end_work()
+
+    def _render_lwf_trigger(self):
+        self._set_mode("lwf")
+        if self._lwf_data is None:
+            QtWidgets.QMessageBox.warning(
+                self._root, "Waveform .lwf",
+                "Load a .lwf dataset before rendering cohort waveforms."
+            )
+            return
+        filters = {
+            "CH": self._combo_lwf_ch.checked_items(),
+            "ANNOT": self._combo_lwf_annot.checked_items(),
+            "TAG": self._combo_lwf_tag.checked_items(),
+            "ID": self._combo_lwf_id.checked_items(),
+        }
+        strategies = {
+            "CH": str(self._combo_lwf_ch_mode.currentData() or "stratify"),
+            "ANNOT": str(self._combo_lwf_annot_mode.currentData() or "pool"),
+            "TAG": str(self._combo_lwf_tag_mode.currentData() or "pool"),
+        }
+        if any(len(v) == 0 for v in filters.values()):
+            QtWidgets.QMessageBox.warning(
+                self._root, "Waveform .lwf",
+                "Select at least one CH, ANNOT, TAG, and ID."
+            )
+            return
+        try:
+            contrast = self._validate_lwf_contrast(filters, strategies)
+        except RuntimeError as e:
+            QtWidgets.QMessageBox.warning(self._root, "Waveform .lwf", str(e))
+            return
+        contrast["layout"] = str(self._combo_lwf_contrast_layout.currentData() or "stacked")
+        strategies["CONTRAST"] = contrast
+        if contrast.get("axis") == "id_group":
+            strategies["CONTRAST"]["covariates"] = self._lwf_covariates
+        _, _, y_limits_valid = self._get_y_limits()
+        if not y_limits_valid:
+            QtWidgets.QMessageBox.warning(
+                self._root, "Waveform",
+                "Manual Y-axis minimum must be smaller than maximum."
+            )
+            return
+        if not self._start_work("Rendering cohort waveforms…"):
+            return
+
+        fut = self.ctrl._exec.submit(
+            _extract_lwf_traces,
+            self._lwf_data,
+            filters,
+            strategies,
+            float(self._spin_lwf_pre.value()),
+            float(self._spin_lwf_post.value()),
+            self._combo_lwf_align.currentData(),
+            str(self._combo_lwf_baseline.currentData() or "subtract"),
+            str(self._combo_lwf_outlier.currentData() or "none"),
+            float(self._spin_lwf_outlier_sd.value()),
+            self._combo_lwf_transform.currentData(),
+            self._combo_lwf_summary.currentData(),
+            bool(self._chk_lwf_mean_by_id.isChecked()),
+        )
+
+        def _done(_f=fut):
+            try:
+                self._sig_ok.emit(_f.result())
+            except Exception as e:
+                if isinstance(e, RuntimeError):
+                    self._sig_err.emit(str(e))
+                else:
+                    self._sig_err.emit(traceback.format_exc())
+
+        fut.add_done_callback(_done)
+
+    def _on_lwf_err(self, tb_str):
+        try:
+            msg = "Could not load .lwf waveform data."
+            if "uses .lwf version" in tb_str and "expects version 2" in tb_str:
+                msg = (
+                    "These .lwf files were written with an unsupported format version.\n\n"
+                    "Please regenerate them with the current Luna WAVEFORMS command "
+                    "and then load the folder again."
+                )
+            elif "No .lwf files found" in tb_str:
+                msg = "No .lwf files were found in the selected folder."
+            elif "Not a directory:" in tb_str:
+                msg = "The selected path is not a directory."
+            elif "Invalid .lwf magic" in tb_str:
+                msg = "The selected folder contains files that are not valid .lwf waveform shards."
+            QtWidgets.QMessageBox.critical(self._root, "Waveform .lwf", msg)
         finally:
             self._end_work()
 
@@ -630,6 +2095,407 @@ class WaveformTab(_ExplorerTab):
                 return
             self._draw(self._last_result)
 
+    def _on_inspector_control_changed(self, *_):
+        self._update_inspector_controls(self._last_result)
+        self._redraw_cached()
+
+    def _inspector_mode(self):
+        combo = getattr(self, "_combo_view", None)
+        if combo is None:
+            return "summary"
+        return str(combo.currentData() or "summary")
+
+    def _metric_window_config(self, result=None):
+        combo = getattr(self, "_combo_metric_source", None)
+        spin_pre = getattr(self, "_spin_metric_pre", None)
+        spin_post = getattr(self, "_spin_metric_post", None)
+        source = "visible" if combo is None else str(combo.currentData() or "visible")
+        custom_pre = float(spin_pre.value()) if spin_pre is not None else 0.0
+        custom_post = float(spin_post.value()) if spin_post is not None else 0.0
+        if result is not None and source == "visible":
+            custom_pre = float(result.get("view_pre_secs", custom_pre))
+            custom_post = float(result.get("view_post_secs", custom_post))
+        return source, custom_pre, custom_post
+
+    def _sync_metric_window_controls(self, result=None):
+        combo = getattr(self, "_combo_metric_source", None)
+        spin_pre = getattr(self, "_spin_metric_pre", None)
+        spin_post = getattr(self, "_spin_metric_post", None)
+        lab_pre = getattr(self, "_lab_metric_pre", None)
+        lab_post = getattr(self, "_lab_metric_post", None)
+        if combo is None or spin_pre is None or spin_post is None:
+            return
+        source, _, _ = self._metric_window_config(result)
+        show_custom = source == "custom"
+        for widget in (spin_pre, spin_post, lab_pre, lab_post):
+            if widget is not None:
+                widget.setVisible(show_custom)
+                widget.setEnabled(show_custom)
+
+    def _metric_features_for_result(self, result):
+        source, custom_pre, custom_post = self._metric_window_config(result)
+        cache = result.setdefault("_metric_feature_cache", {})
+        cache_key = (source, round(float(custom_pre), 4), round(float(custom_post), 4))
+        if cache_key in cache:
+            return cache[cache_key]
+
+        trace_meta = result.get("trace_meta", {})
+        traces = result.get("traces", {})
+        t_grid = result.get("t_grid", {})
+        sr_map = result.get("sr", {})
+        channels = list(result.get("channels", []))
+
+        if source == "visible":
+            feature_maps = {
+                ch: [dict(meta.get("features", {}) or {}) for meta in trace_meta.get(ch, [])]
+                for ch in channels
+            }
+            feature_names = list(result.get("feature_names", []))
+        else:
+            feature_maps = {}
+            feature_names = [key for key, _ in INSPECTOR_LOCAL_FEATURES]
+            for ch in channels:
+                sr = float(sr_map.get(ch, np.nan))
+                ch_t = np.asarray(t_grid.get(ch, []), dtype=float)
+                ch_maps = []
+                for trace, meta in zip(traces.get(ch, []), trace_meta.get(ch, [])):
+                    mask = _metric_window_mask(ch_t, meta, source, custom_pre, custom_post)
+                    seg = np.asarray(trace, dtype=float)[mask] if mask.size else np.asarray([], dtype=float)
+                    ch_maps.append(_compute_local_trace_features(seg, sr=sr))
+                feature_maps[ch] = ch_maps
+
+        payload = {
+            "source": source,
+            "custom_pre": custom_pre,
+            "custom_post": custom_post,
+            "feature_names": feature_names,
+            "feature_maps": feature_maps,
+            "label": _metric_window_label(source, custom_pre, custom_post),
+        }
+        cache[cache_key] = payload
+        return payload
+
+    def _update_inspector_controls(self, result):
+        combo_feature = getattr(self, "_combo_feature", None)
+        slider = getattr(self, "_slider_wave", None)
+        lab_wave = getattr(self, "_lab_wave", None)
+        combo_view = getattr(self, "_combo_view", None)
+        combo_metric = getattr(self, "_combo_metric_source", None)
+        if combo_feature is None or slider is None or lab_wave is None or combo_view is None:
+            return
+
+        combo_feature.blockSignals(True)
+        slider.blockSignals(True)
+        self._sync_metric_window_controls(result)
+
+        if result is None:
+            combo_feature.clear()
+            combo_feature.setEnabled(False)
+            slider.setMinimum(1)
+            slider.setMaximum(1)
+            slider.setValue(1)
+            slider.setEnabled(False)
+            lab_wave.setText("Wave 1 / 1")
+            combo_view.setEnabled(False)
+            if combo_metric is not None:
+                combo_metric.setEnabled(False)
+            combo_feature.blockSignals(False)
+            slider.blockSignals(False)
+            return
+
+        combo_view.setEnabled(True)
+        if combo_metric is not None:
+            combo_metric.setEnabled(True)
+        if result.get("contrast"):
+            combo_view.setEnabled(False)
+            combo_feature.clear()
+            combo_feature.setEnabled(False)
+            slider.setMinimum(1)
+            slider.setMaximum(1)
+            slider.setValue(1)
+            slider.setEnabled(False)
+            lab_wave.setText("Wave 1 / 1")
+            if combo_metric is not None:
+                combo_metric.setEnabled(False)
+            combo_feature.blockSignals(False)
+            slider.blockSignals(False)
+            return
+
+        metric_payload = self._metric_features_for_result(result)
+        feature_names = list(metric_payload.get("feature_names", []))
+        current_key = str(combo_feature.currentData() or "")
+        combo_feature.clear()
+        for key in feature_names:
+            combo_feature.addItem(_feature_label(key), key)
+        if combo_feature.count():
+            idx = combo_feature.findData(current_key)
+            combo_feature.setCurrentIndex(idx if idx >= 0 else 0)
+        selected_key = str(combo_feature.currentData() or "")
+
+        feature_maps = metric_payload.get("feature_maps", {})
+        channels = [ch for ch in result.get("channels", []) if len(feature_maps.get(ch, [])) > 0]
+        common_n = min(
+            (
+                sum(
+                    1
+                    for features in feature_maps.get(ch, [])
+                    if np.isfinite(features.get(selected_key, np.nan))
+                )
+                for ch in channels
+            ),
+            default=0,
+        )
+        slider.setMinimum(1)
+        slider.setMaximum(max(1, common_n))
+        if slider.value() > max(1, common_n):
+            slider.setValue(max(1, common_n))
+        combo_feature.setEnabled(combo_view.currentData() == "inspect" and combo_feature.count() > 0 and common_n > 0)
+        slider.setEnabled(combo_view.currentData() == "inspect" and common_n > 0)
+        lab_wave.setText(f"Wave {slider.value()} / {max(1, common_n)}")
+
+        combo_feature.blockSignals(False)
+        slider.blockSignals(False)
+
+    def _set_summary_only_locked(self, locked: bool):
+        chk = getattr(self, "_chk_summary_only", None)
+        if chk is None:
+            return
+        chk.blockSignals(True)
+        if locked:
+            chk.setChecked(True)
+            chk.setEnabled(False)
+            chk.setToolTip(
+                f"Summary-only mode is required when a channel has more than "
+                f"{TRACE_SUMMARY_THRESHOLD} traces."
+            )
+        else:
+            chk.setEnabled(True)
+            chk.setToolTip(
+                "Hide individual traces and show only the selected summary. "
+                "Automatically locked on when too many traces are present."
+            )
+        chk.blockSignals(False)
+
+    def _summary_only_checkbox_for_result(self, result):
+        if result.get("source_mode") == "lwf":
+            return getattr(self, "_chk_lwf_summary_only", None)
+        return getattr(self, "_chk_summary_only", None)
+
+    def _summary_component_state_for_result(self, result):
+        if result.get("source_mode") == "lwf":
+            line_chk = getattr(self, "_chk_lwf_show_line", None)
+            band_chk = getattr(self, "_chk_lwf_show_band", None)
+        else:
+            line_chk = getattr(self, "_chk_show_line", None)
+            band_chk = getattr(self, "_chk_show_band", None)
+        return (
+            True if line_chk is None else bool(line_chk.isChecked()),
+            True if band_chk is None else bool(band_chk.isChecked()),
+        )
+
+    def _set_summary_only_locked_for_result(self, result, locked: bool):
+        chk = self._summary_only_checkbox_for_result(result)
+        if chk is None:
+            return
+        chk.blockSignals(True)
+        if locked:
+            chk.setChecked(True)
+            chk.setEnabled(False)
+            chk.setToolTip(
+                f"Summary-only mode is required when a channel has more than "
+                f"{TRACE_SUMMARY_THRESHOLD} traces."
+            )
+        else:
+            chk.setEnabled(True)
+            chk.setToolTip(
+                "Hide individual traces and show only the selected summary. "
+                "Automatically locked on when too many traces are present."
+            )
+        chk.blockSignals(False)
+
+    def _draw_waveform_axis(self, ax, label, t_vals, trace_list, summary_payload, *,
+                             data_key=None,
+                             units, color, summary_mode, summary_only_requested,
+                             show_summary_line, show_summary_band, show_xlabel,
+                             y_min, y_max):
+        data_key = label if data_key is None else data_key
+        ax.set_facecolor(BG)
+        n_traces = len(trace_list)
+        summary_only = summary_only_requested or n_traces > TRACE_SUMMARY_THRESHOLD
+        if not summary_only:
+            if n_traces <= 10:
+                trace_alpha = 0.75
+                trace_width = 1.2
+            elif n_traces <= 50:
+                trace_alpha = 0.45
+                trace_width = 0.9
+            elif n_traces <= 250:
+                trace_alpha = 0.22
+                trace_width = 0.55
+            else:
+                trace_alpha = 0.15
+                trace_width = 0.4
+            for seg in trace_list:
+                ax.plot(t_vals, seg, color=color, linewidth=trace_width, alpha=trace_alpha)
+
+        mean_d = summary_payload["mean"]
+        ci_lo = summary_payload["ci_lo"]
+        ci_hi = summary_payload["ci_hi"]
+        std_d = summary_payload.get("std", {})
+        var_d = summary_payload.get("var", {})
+        median_d = summary_payload.get("median", {})
+        q05_d = summary_payload.get("q05", {})
+        q25_d = summary_payload.get("q25", {})
+        q75_d = summary_payload.get("q75", {})
+        q95_d = summary_payload.get("q95", {})
+
+        if summary_mode == "variance":
+            vals = var_d.get(data_key)
+            if vals is not None and show_summary_line:
+                ax.plot(t_vals, vals, color=color, linewidth=2.0, alpha=0.95)
+        elif summary_mode == "mean_quantiles":
+            if show_summary_band and q05_d.get(data_key) is not None and q95_d.get(data_key) is not None:
+                ax.fill_between(t_vals, q05_d[data_key], q95_d[data_key], color=color, alpha=0.12, linewidth=0)
+            if show_summary_band and q25_d.get(data_key) is not None and q75_d.get(data_key) is not None:
+                ax.fill_between(t_vals, q25_d[data_key], q75_d[data_key], color=color, alpha=0.24, linewidth=0)
+            if show_summary_line and median_d.get(data_key) is not None:
+                ax.plot(t_vals, median_d[data_key], color=color, linewidth=2.0, alpha=0.95)
+            if summary_only and show_summary_line and data_key in mean_d:
+                ax.plot(t_vals, mean_d[data_key], color="#ffffff", linewidth=0.8, alpha=0.65)
+        elif summary_mode == "mean_sd":
+            if show_summary_band and std_d.get(data_key) is not None:
+                ax.fill_between(t_vals, mean_d[data_key] - std_d[data_key], mean_d[data_key] + std_d[data_key], color=color, alpha=0.22)
+            if show_summary_line and data_key in mean_d:
+                ax.plot(t_vals, mean_d[data_key], color=color, linewidth=1.8)
+        else:
+            if show_summary_band and data_key in ci_lo and data_key in ci_hi:
+                ax.fill_between(t_vals, ci_lo[data_key], ci_hi[data_key], color=color, alpha=0.25)
+            if show_summary_line and data_key in mean_d:
+                ax.plot(t_vals, mean_d[data_key], color=color, linewidth=1.8)
+
+        ax.axvline(0, color="#ffffff", lw=0.7, ls="--", alpha=0.55)
+        ax.axhline(0, color=GRID, lw=0.4, alpha=0.7)
+        if len(t_vals) >= 2:
+            ax.set_xlim(float(t_vals[0]), float(t_vals[-1]))
+        ylabel = units or ""
+        if summary_mode == "variance" and ylabel:
+            ylabel = f"{ylabel}^2"
+        self._style_ax(ax, title=label, ylabel=ylabel)
+        if y_min is not None or y_max is not None:
+            ax.set_ylim(bottom=y_min, top=y_max)
+        if show_xlabel:
+            ax.set_xlabel("Time relative to event (s)", color=FG, fontsize=8)
+        else:
+            ax.set_xticklabels([])
+
+    def _draw_contrast_axis(self, ax, label, t_vals, stats_payload, *, show_xlabel):
+        ax.set_facecolor(BG)
+        ax.plot(t_vals, stats_payload["mean_diff"], color="#f9844a", linewidth=1.8, label="Mean diff")
+        ax.axvline(0, color="#ffffff", lw=0.7, ls="--", alpha=0.55)
+        ax.axhline(0, color="#e5e7eb", lw=1.1, ls="--", alpha=0.95, zorder=0)
+        ax2 = ax.twinx()
+        ax2.plot(t_vals, stats_payload["neglogp"], color="#90be6d", linewidth=1.0, alpha=0.8, label="-log10(p)")
+        if len(t_vals) >= 2:
+            ax.set_xlim(float(t_vals[0]), float(t_vals[-1]))
+        self._style_ax(ax, title=f"{label} | difference / stats", ylabel="Mean diff")
+        ax2.tick_params(axis="y", colors=FG, labelsize=7)
+        ax2.spines["right"].set_color(GRID)
+        ax2.set_ylabel("-log10(p)", color=FG, fontsize=8)
+        if show_xlabel:
+            ax.set_xlabel("Time relative to event (s)", color=FG, fontsize=8)
+        else:
+            ax.set_xticklabels([])
+
+    def _draw_overlay_contrast_axis(self, ax, label, t_vals, group_labels, group_payloads, *,
+                                    units, summary_mode, summary_only_requested,
+                                    show_summary_line, show_summary_band, show_xlabel,
+                                    y_min, y_max):
+        colors = ["#4cc9f0", "#f9844a"]
+        ax.set_facecolor(BG)
+        for idx, gl in enumerate(group_labels):
+            payload = group_payloads[gl]
+            self._draw_waveform_axis(
+                ax,
+                f"{label} | {gl}",
+                t_vals,
+                payload["traces"][label],
+                payload,
+                data_key=label,
+                units=units,
+                color=colors[idx % len(colors)],
+                summary_mode=summary_mode,
+                summary_only_requested=summary_only_requested,
+                show_summary_line=show_summary_line,
+                show_summary_band=show_summary_band,
+                show_xlabel=show_xlabel,
+                y_min=y_min,
+                y_max=y_max,
+            )
+        self._style_ax(ax, title=f"{label} | {group_labels[0]} vs {group_labels[1]}", ylabel=units or "")
+
+    def _inspector_selection_for_panel(self, result, panel_label):
+        trace_list = list(result.get("traces", {}).get(panel_label, []))
+        trace_meta = list(result.get("trace_meta", {}).get(panel_label, []))
+        if not trace_list or not trace_meta:
+            return None
+        metric_payload = self._metric_features_for_result(result)
+        feature_maps = metric_payload.get("feature_maps", {})
+        panel_features = list(feature_maps.get(panel_label, []))
+        feature_key = str(getattr(self, "_combo_feature", QComboBox()).currentData() or "")
+        if not feature_key:
+            return None
+        ranked = []
+        for idx, (trace, meta, features) in enumerate(zip(trace_list, trace_meta, panel_features)):
+            value = features.get(feature_key, np.nan)
+            ranked.append((idx, value, meta, trace))
+        ranked = [item for item in ranked if np.isfinite(item[1])]
+        if not ranked:
+            return None
+        ranked.sort(key=lambda item: item[1])
+        slider = getattr(self, "_slider_wave", None)
+        rank = 0 if slider is None else max(0, min(len(ranked) - 1, int(slider.value()) - 1))
+        idx, value, meta, trace = ranked[rank]
+        return {
+            "index": idx,
+            "rank": rank + 1,
+            "count": len(ranked),
+            "value": float(value),
+            "meta": meta,
+            "trace": np.asarray(trace, dtype=float),
+            "feature_key": feature_key,
+            "metric_label": str(metric_payload.get("label", "")),
+        }
+
+    def _draw_inspector_axis(self, ax, label, t_vals, selection, *, units, color, show_xlabel, y_min, y_max):
+        ax.set_facecolor(BG)
+        trace = selection["trace"]
+        meta = selection["meta"]
+        feature_key = selection["feature_key"]
+        feature_label = _feature_label(feature_key)
+        title = (
+            f"{label} | {_feature_label(feature_key)}={selection['value']:.3g} | "
+            f"wave {selection['rank']}/{selection['count']}"
+        )
+        if selection.get("metric_label"):
+            title += f" | {selection['metric_label']}"
+        if meta.get("lwf_id"):
+            title += f" | ID={meta['lwf_id']}"
+        elif meta.get("instance"):
+            title += f" | inst={meta['instance']}"
+        ax.plot(t_vals, trace, color=color, linewidth=2.0, alpha=0.98)
+        ax.fill_between(t_vals, 0.0, trace, color=color, alpha=0.10)
+        ax.axvline(0, color="#ffffff", lw=0.7, ls="--", alpha=0.55)
+        ax.axhline(0, color=GRID, lw=0.4, alpha=0.7)
+        if len(t_vals) >= 2:
+            ax.set_xlim(float(t_vals[0]), float(t_vals[-1]))
+        self._style_ax(ax, title=title, ylabel=units or "")
+        if y_min is not None or y_max is not None:
+            ax.set_ylim(bottom=y_min, top=y_max)
+        if show_xlabel:
+            ax.set_xlabel("Time relative to event (s)", color=FG, fontsize=8)
+        else:
+            ax.set_xticklabels([])
+
     def _draw(self, result):
         channels  = result["channels"]
         t_grid    = result["t_grid"]
@@ -646,28 +2512,65 @@ class WaveformTab(_ExplorerTab):
         q95_d     = result.get("q95", {})
         transform_mode = result.get("transform_mode", "raw")
         summary_mode = result.get("summary_mode", "mean_ci")
+        baseline_mode = result.get("baseline_mode", "subtract")
+        outlier_mode = result.get("outlier_mode", "none")
+        outlier_sd_thresh = result.get("outlier_sd_thresh", np.nan)
         n_ev      = result["n_events"]
         ann_cls   = result["annot_class"]
         units     = result.get("units", {})
+        trace_count_label = result.get("trace_count_label", "events")
+        extra_title_bits = result.get("extra_title_bits", [])
+        summary_only_chk = self._summary_only_checkbox_for_result(result)
+        show_summary_line, show_summary_band = self._summary_component_state_for_result(result)
+        inspect_mode = self._inspector_mode() == "inspect" and not result.get("contrast")
 
+        contrast = result.get("contrast")
         chs_with_data = [ch for ch in channels if ch in mean_d]
+        forced_summary_only = any(
+            len(traces.get(ch, [])) > TRACE_SUMMARY_THRESHOLD
+            for ch in chs_with_data
+        )
+        self._set_summary_only_locked_for_result(result, forced_summary_only)
+        summary_only_requested = (
+            forced_summary_only
+            or summary_mode == "variance"
+            or (summary_only_chk.isChecked() if summary_only_chk is not None else False)
+        )
+
         if not chs_with_data:
             self._set_canvas_height()
             self._render_empty("No signal data extracted.\n"
                                "Check that channels are loaded and event times are valid.")
             return
 
-        n = len(chs_with_data)
+        contrast_layout = str(contrast.get("layout", "stacked")) if contrast else "stacked"
+        n = len(chs_with_data) * ((2 if contrast_layout == "overlay" else 3) if contrast else 1)
         canvas = self._ensure_canvas()
         self._set_canvas_height(n)
         fig = canvas.figure; fig.clear(); fig.patch.set_facecolor(BG)
 
         axes = fig.subplots(n, 1, squeeze=False)
-        fig.subplots_adjust(hspace=0.4, left=0.10, right=0.97,
+        fig.subplots_adjust(hspace=0.4, left=0.10, right=0.94,
                             top=0.90, bottom=0.10)
-        title_bits = [f"'{ann_cls}'", f"({n_ev} events)"]
+        title_bits = [f"'{ann_cls}'", f"({n_ev} {trace_count_label})"]
+        title_bits.extend([str(bit) for bit in extra_title_bits if bit])
+        if contrast:
+            title_bits.append(contrast.get("title", "two-group contrast"))
+            title_bits.append(contrast_layout)
+            title_bits.append(f"unit={contrast.get('unit_label', trace_count_label)}")
         if transform_mode == "rectified":
             title_bits.append("rectified")
+        if baseline_mode == "normalize":
+            title_bits.append("norm[-1,1]")
+        elif baseline_mode == "subtract_normalize":
+            title_bits.append("baseline + norm[-1,1]")
+        elif baseline_mode == "subtract":
+            title_bits.append("baseline")
+        if outlier_mode != "none" and np.isfinite(outlier_sd_thresh):
+            title_bits.append(f"{outlier_mode}@{outlier_sd_thresh:g}SD")
+        if inspect_mode:
+            title_bits.append("wave inspector")
+            title_bits.append(self._metric_features_for_result(result).get("label", ""))
         if summary_mode == "variance":
             title_bits.append("variance")
         elif summary_mode == "mean_sd":
@@ -681,67 +2584,79 @@ class WaveformTab(_ExplorerTab):
         colors = ["#4cc9f0", "#f9844a", "#06d6a0", "#a78bfa",
                   "#ffd166", "#f72585", "#90be6d", "#ff6b6b"]
 
-        for ch_idx, ch in enumerate(chs_with_data):
-            ch_t_grid = t_grid.get(ch) if isinstance(t_grid, dict) else t_grid
-            if ch_t_grid is None or len(ch_t_grid) == 0:
-                continue
-            ax  = axes[ch_idx][0]
-            col = colors[ch_idx % len(colors)]
-            ax.set_facecolor(BG)
-            n_traces = len(traces.get(ch, []))
-            summary_only = n_traces > TRACE_SUMMARY_THRESHOLD or summary_mode == "variance"
-
-            if not summary_only:
-                # Individual traces (very transparent)
-                for seg in traces.get(ch, []):
-                    ax.plot(ch_t_grid, seg, color=col, linewidth=0.4, alpha=0.15)
-
-            if summary_mode == "variance":
-                v = var_d.get(ch)
-                if v is not None:
-                    ax.plot(ch_t_grid, v, color=col, linewidth=2.0, alpha=0.95)
-            elif summary_mode == "mean_quantiles":
-                q05 = q05_d.get(ch)
-                q25 = q25_d.get(ch)
-                q75 = q75_d.get(ch)
-                q95 = q95_d.get(ch)
-                med = median_d.get(ch)
-                if q05 is not None and q95 is not None:
-                    ax.fill_between(ch_t_grid, q05, q95, color=col, alpha=0.12, linewidth=0)
-                if q25 is not None and q75 is not None:
-                    ax.fill_between(ch_t_grid, q25, q75, color=col, alpha=0.24, linewidth=0)
-                if med is not None:
-                    ax.plot(ch_t_grid, med, color=col, linewidth=2.0, alpha=0.95)
-                if summary_only and ch in mean_d:
-                    ax.plot(ch_t_grid, mean_d[ch], color="#ffffff", linewidth=0.8, alpha=0.65)
-            elif summary_mode == "mean_sd":
-                m = mean_d[ch]
-                sd = std_d.get(ch)
-                if sd is not None:
-                    ax.fill_between(ch_t_grid, m - sd, m + sd, color=col, alpha=0.22)
-                ax.plot(ch_t_grid, m, color=col, linewidth=1.8)
-            else:
-                m = mean_d[ch]
-                lo = ci_lo[ch]
-                hi = ci_hi[ch]
-                ax.fill_between(ch_t_grid, lo, hi, color=col, alpha=0.25)
-                ax.plot(ch_t_grid, m, color=col, linewidth=1.8)
-
-            # Event-onset line
-            ax.axvline(0, color="#ffffff", lw=0.7, ls="--", alpha=0.55)
-            ax.axhline(0, color=GRID, lw=0.4, alpha=0.7)
-            if len(ch_t_grid) >= 2:
-                ax.set_xlim(float(ch_t_grid[0]), float(ch_t_grid[-1]))
-
-            ylabel = units.get(ch, "")
-            if summary_mode == "variance" and ylabel:
-                ylabel = f"{ylabel}^2"
-            self._style_ax(ax, title=ch, ylabel=ylabel)
-            if y_min is not None or y_max is not None:
-                ax.set_ylim(bottom=y_min, top=y_max)
-            if ch_idx < n - 1:
-                ax.set_xticklabels([])
-            else:
-                ax.set_xlabel("Time relative to event (s)", color=FG, fontsize=8)
+        if contrast:
+            group_labels = contrast["labels"]
+            for idx, ch in enumerate(chs_with_data):
+                ch_t_grid = t_grid.get(ch) if isinstance(t_grid, dict) else t_grid
+                if ch_t_grid is None or len(ch_t_grid) == 0:
+                    continue
+                g0 = contrast["groups"][ch][group_labels[0]]
+                g1 = contrast["groups"][ch][group_labels[1]]
+                if contrast_layout == "overlay":
+                    base = idx * 2
+                    self._draw_overlay_contrast_axis(
+                        axes[base][0], ch, ch_t_grid, group_labels,
+                        {group_labels[0]: g0, group_labels[1]: g1},
+                        units=units.get(ch, ""), summary_mode=summary_mode,
+                        summary_only_requested=summary_only_requested, show_summary_line=show_summary_line,
+                        show_summary_band=show_summary_band, show_xlabel=False, y_min=y_min, y_max=y_max,
+                    )
+                    self._draw_contrast_axis(
+                        axes[base + 1][0], ch, ch_t_grid, contrast["stats"][ch],
+                        show_xlabel=(idx == len(chs_with_data) - 1),
+                    )
+                else:
+                    base = idx * 3
+                    self._draw_waveform_axis(
+                        axes[base][0], f"{ch} | {group_labels[0]}", ch_t_grid, g0["traces"][ch], g0,
+                        data_key=ch,
+                        units=units.get(ch, ""), color=colors[idx % len(colors)], summary_mode=summary_mode,
+                        summary_only_requested=summary_only_requested, show_summary_line=show_summary_line,
+                        show_summary_band=show_summary_band, show_xlabel=False, y_min=y_min, y_max=y_max,
+                    )
+                    self._draw_waveform_axis(
+                        axes[base + 1][0], f"{ch} | {group_labels[1]}", ch_t_grid, g1["traces"][ch], g1,
+                        data_key=ch,
+                        units=units.get(ch, ""), color=colors[(idx + 1) % len(colors)], summary_mode=summary_mode,
+                        summary_only_requested=summary_only_requested, show_summary_line=show_summary_line,
+                        show_summary_band=show_summary_band, show_xlabel=False, y_min=y_min, y_max=y_max,
+                    )
+                    self._draw_contrast_axis(
+                        axes[base + 2][0], ch, ch_t_grid, contrast["stats"][ch],
+                        show_xlabel=(idx == len(chs_with_data) - 1),
+                    )
+            note = contrast.get("unit_note", "")
+            if note:
+                fig.text(0.5, 0.01, note, ha="center", va="bottom", color="#8b949e", fontsize=7)
+        else:
+            for ch_idx, ch in enumerate(chs_with_data):
+                ch_t_grid = t_grid.get(ch) if isinstance(t_grid, dict) else t_grid
+                if ch_t_grid is None or len(ch_t_grid) == 0:
+                    continue
+                if inspect_mode:
+                    selection = self._inspector_selection_for_panel(result, ch)
+                    if selection is None:
+                        self._draw_waveform_axis(
+                            axes[ch_idx][0], ch, ch_t_grid, traces.get(ch, []), result,
+                            units=units.get(ch, ""), color=colors[ch_idx % len(colors)], summary_mode=summary_mode,
+                            summary_only_requested=True, show_summary_line=show_summary_line,
+                            show_summary_band=show_summary_band, show_xlabel=(ch_idx == len(chs_with_data) - 1),
+                            y_min=y_min, y_max=y_max,
+                        )
+                    else:
+                        self._draw_inspector_axis(
+                            axes[ch_idx][0], ch, ch_t_grid, selection,
+                            units=units.get(ch, ""), color=colors[ch_idx % len(colors)],
+                            show_xlabel=(ch_idx == len(chs_with_data) - 1),
+                            y_min=y_min, y_max=y_max,
+                        )
+                else:
+                    self._draw_waveform_axis(
+                        axes[ch_idx][0], ch, ch_t_grid, traces.get(ch, []), result,
+                        units=units.get(ch, ""), color=colors[ch_idx % len(colors)], summary_mode=summary_mode,
+                        summary_only_requested=summary_only_requested, show_summary_line=show_summary_line,
+                        show_summary_band=show_summary_band, show_xlabel=(ch_idx == len(chs_with_data) - 1),
+                        y_min=y_min, y_max=y_max,
+                    )
 
         canvas.draw()

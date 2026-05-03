@@ -309,7 +309,7 @@ class DropSignalsMixin:
             if effective_keep:
                 cmd = "SIGNALS keep=" + ",".join(effective_keep)
                 try:
-                    self.p.eval(cmd)
+                    self.p.eval_lunascope(cmd)
                 except Exception as e:
                     errors.append(f"{cmd}\n  → {e}")
 
@@ -318,7 +318,7 @@ class DropSignalsMixin:
             if effective_drop_annots:
                 cmd = "DROP-ANNOTS annot=" + ",".join(effective_drop_annots)
                 try:
-                    self.p.eval(cmd)
+                    self.p.eval_lunascope(cmd)
                 except Exception as e:
                     errors.append(f"{cmd}\n  → {e}")
 

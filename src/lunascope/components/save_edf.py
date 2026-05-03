@@ -511,7 +511,7 @@ class SaveEDFMixin:
             if not line:
                 continue
             try:
-                self.p.eval(line)
+                self.p.eval_lunascope(line)
             except Exception as e:
                 errors.append(f"{line}\n  → {e}")
 

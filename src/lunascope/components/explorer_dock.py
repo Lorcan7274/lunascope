@@ -25,24 +25,26 @@
 #  --------------------------------------------------------------------
 
 """
-Ctrl+E  →  floating "Explorer" dock with four tabbed panels:
+Ctrl+E  →  floating "Explorer" dock with tabbed panels:
 
     1  Annotations  – cohort-level annotation explorer (PETH, overlap, …)
     2  Hypnoscope   – staging grid across all subjects aligned by time
     3  Waveforms    – peri-event signal traces for the current record
     4  Plotter      – generic scatter / line / bar / histogram for output tables
+    5  Assoc        – GPA / group-level association analyses
+    6  Topo         – EEG topographic maps (Results + Live animated player)
 """
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QDockWidget, QTabWidget
 
-from ..helpers import screen_clamp
+from ..helpers import screen_clamp, AuxiliaryWindow
 
 
 class ExplorerMixin:
     """Mixin that creates and owns the tabbed Explorer dock."""
 
-    _EXPLORER_FLOAT_SIZE = (1320, 840)
+    _EXPLORER_FLOAT_SIZE = (1120, 840)
 
     # ------------------------------------------------------------------
     # Initialisation (called from Controller.__init__)
@@ -54,18 +56,15 @@ class ExplorerMixin:
         from .explorer_hypnoscope import HypnoscopeTab
         from .explorer_waveform   import WaveformTab
         from .explorer_event_decomp import EventDecompTab
+        from .explorer_two_channel_dynamics import TwoChannelDynamicsTab
         from .explorer_plotter    import PlotterTab
+        from .explorer_gpa        import GPATab
+        from .explorer_topo       import TopoTab
+        from .explorer_harmonizer import HarmonizerTab
 
         # ---- dock shell -----------------------------------------------
-        dock = QDockWidget("Explorer", self.ui)
+        dock = AuxiliaryWindow("Explorer", self.ui)
         dock.setObjectName("dock_explorer")
-        dock.setAllowedAreas(
-            Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea | Qt.BottomDockWidgetArea
-        )
-        from PySide6.QtWidgets import QDockWidget as _DW
-        dock.setFeatures(
-            _DW.DockWidgetMovable | _DW.DockWidgetFloatable | _DW.DockWidgetClosable
-        )
         dock.setWindowFlag(Qt.WindowMinimizeButtonHint, True)
         dock.setWindowFlag(Qt.WindowMaximizeButtonHint, True)
         dock.visibilityChanged.connect(self._explorer_on_visibility)
@@ -80,26 +79,39 @@ class ExplorerMixin:
         self._tab_hscope = HypnoscopeTab(self)
         self._tab_wave   = WaveformTab(self)
         self._tab_event_decomp = EventDecompTab(self)
+        self._tab_two_channel = TwoChannelDynamicsTab(self)
         self._tab_plot   = PlotterTab(self)
+        self._tab_gpa    = GPATab(self)
+        self._tab_topo   = TopoTab(self)
+        self._tab_harm   = HarmonizerTab(self)
 
-        tabs.addTab(self._tab_annot.widget(),  "Annotations")
-        tabs.addTab(self._tab_hscope.widget(), "Hypnoscope")
-        tabs.addTab(self._tab_wave.widget(),   "Waveforms")
-        tabs.addTab(self._tab_plot.widget(),   "Plotter")
+        tabs.addTab(self._tab_harm.widget(),       "Harmonizer")   # 0
+        tabs.addTab(self._tab_annot.widget(),      "Annotations")  # 1
+        tabs.addTab(self._tab_hscope.widget(),     "Hypnoscope")   # 2
+        tabs.addTab(self._tab_wave.widget(),       "Waveforms")    # 3
+        tabs.addTab(self._tab_two_channel.widget(), "Player")      # 4  (hidden)
+        tabs.addTab(self._tab_plot.widget(),       "Plotter")      # 5
+        tabs.addTab(self._tab_gpa.widget(),        "Assoc")        # 6
+        tabs.addTab(self._tab_topo.widget(),       "Topo")         # 7  (hidden)
+
+        tabs.setTabVisible(4, False)   # Player
+        tabs.setTabVisible(7, False)   # Topo
 
         tabs.currentChanged.connect(self._explorer_tab_changed)
 
         dock.setWidget(tabs)
-        self.ui.addDockWidget(Qt.RightDockWidgetArea, dock)
 
         # Make accessible from controller.ui for View-menu toggle
         self.ui.dock_explorer = dock
 
         self._explorer_dock = dock
         self._explorer_tabs = tabs
+        self._explorer_has_positioned = False
 
-        # Auto-refresh plotter whenever results are repopulated
+        # Auto-refresh results/annotation lists whenever a command completes
         self.sig_results_changed.connect(self._tab_plot.refresh_tables)
+        self.sig_results_changed.connect(self._tab_topo.refresh_tables)
+        self.sig_results_changed.connect(self._tab_wave._refresh_ann_ch)
 
     # ------------------------------------------------------------------
     # Visibility / tab-switch callbacks
@@ -107,28 +119,41 @@ class ExplorerMixin:
 
     def _explorer_on_visibility(self, visible):
         if not visible:
+            try:
+                from lunapi import gpa_clear_cache
+                gpa_clear_cache()
+            except Exception:
+                pass
             return
         dock = self._explorer_dock
-        if not dock.isFloating():
-            dock.setFloating(True)
-        w, h = screen_clamp(*self._EXPLORER_FLOAT_SIZE)
-        if dock.width() < w or dock.height() < h:
+        if not self._explorer_has_positioned:
+            w, h = screen_clamp(*self._EXPLORER_FLOAT_SIZE)
             dock.resize(w, h)
         try:
-            pg  = self.ui.frameGeometry()
-            ctr = pg.center()
-            rect = dock.frameGeometry()
-            rect.moveCenter(ctr)
-            top_left = rect.topLeft()
-            if top_left.y() < pg.top():
-                top_left.setY(pg.top())
-            dock.move(top_left)
+            if not self._explorer_has_positioned:
+                pg  = self.ui.frameGeometry()
+                ctr = pg.center()
+                rect = dock.frameGeometry()
+                rect.moveCenter(ctr)
+                top_left = rect.topLeft()
+                if top_left.y() < pg.top():
+                    top_left.setY(pg.top())
+                dock.move(top_left)
         except Exception:
             pass
+        self._explorer_has_positioned = True
 
     def _explorer_tab_changed(self, idx):
         """Refresh context-sensitive controls when switching tabs."""
-        if idx == 2:   # Waveforms tab: reload channels/annotations
+        if idx == 0:     # Harmonizer tab
+            self._tab_harm.refresh_controls()
+        elif idx == 1:   # Annotations tab: reload from Dock 4 unless cache is pinned
+            self._tab_annot.refresh_controls()
+        elif idx == 3:   # Waveforms tab: reload channels/annotations
             self._tab_wave.refresh_controls()
-        elif idx == 3: # Plotter tab: reload available result tables
+        elif idx == 4:   # Two-channel tab (hidden): reload channel list
+            self._tab_two_channel.refresh_controls()
+        elif idx == 5:   # Plotter tab: reload available result tables
             self._tab_plot.refresh_tables()
+        elif idx == 7:   # Topo tab (hidden): sync results table list
+            self._tab_topo.refresh_tables()
