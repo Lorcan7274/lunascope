@@ -1,34 +1,86 @@
 ---
 title: 'The Luna ecosystem: integrated tools for sleep signal visualization and analysis'
+
 tags:
-  - Python
   - sleep
   - polysomnography
-  - EEG
-  - signal visualization
-  - NSRR
+  - electroencephalography
+  - sleep staging
+  - biomedical signal processing
+  - neurophysiology
+  - visualization
+  - Python
+  - C++
+  - open source software
+
+
 authors:
-  - name: Lorcan Purcell
+  - name: Lorcan C. Purcell
     orcid: 0000-0000-0000-0000
+    email: lorcan7274@gmail.com
     corresponding: true
     affiliation: 1
-  - name: Nataliia Kozhemiako
+
+  - name: Tejas Karkera
     orcid: 0000-0000-0000-0000
+    email: tkarkera@mgh.harvard.edu
     affiliation: 2
-  - name: Shaun M. Purcell
+
+  - name: Senthil Palanivelu
     orcid: 0000-0000-0000-0000
-    affiliation: "1, 3"
+    email: senthil.palanivelu@tarento.com
+    affiliation: 3
+
+  - name: Shyamal Agarwal
+    orcid: 0000-0000-0000-0000
+    email: agarwal.shy@northeastern.edu
+    affiliation: 3
+  
+  - name: Christopher Mow
+    orcid: 0000-0002-6450-4959
+    email: cmow1@mgb.org
+    affiliation: 4
+
+  - name: Nataliia Kozhemiako
+    orcid: 0000-0002-6450-4959
+    email: nkozhemiako@bwh.harvard.edu
+    affiliation: 3
+    
+  - name: Shaun M. Purcell
+    orcid: 0000-0002-7402-5812
+    corresponding: true
+    email: shaun.purcell@nyspi.columbia.edu
+    affiliation: "5, 6"
+    
 affiliations:
-  - name: Department of Psychiatry, Columbia University Irving Medical Center and New York State Psychiatric Institute, New York, NY, United States
+
+  - name: Northfield Mount Hermon School, Mount Hermon, MA, United States
     index: 1
-    ror: 03m8km719
+
   - name: Division of Sleep and Circadian Disorders, Brigham and Women's Hospital, Harvard Medical School, Boston, MA, United States
     index: 2
     ror: 04b6nzv94
-  - name: "[Confirm additional affiliation]"
+
+  - name: Department of Psychiatry, Brigham and Women's Hospital, Harvard Medical School, Boston, MA, United States
     index: 3
-date: "[SET DATE BEFORE SUBMISSION]"
+    ror: 04b6nzv94
+
+  - name: Mass General Brigham Enterprise Research IS, Boston, MA, United States
+    index: 4
+    ror: 04py2rh25
+
+  - name: Department of Psychiatry, Columbia University Irving Medical Center, New York, NY, United States
+    index: 5
+    ror: 03m8km719
+
+  - name: New York State Psychiatric Institute, New York, NY, United States 
+    index: 6
+    ror: 04aqjf708
+
+date: 30 April 2026
+
 bibliography: paper.bib
+
 ---
 
 # Summary
@@ -39,18 +91,18 @@ field has long been constrained by proprietary data formats,
 closed-source algorithms, and a relative lack of open, scalable tools
 that support both large cohort analyses and detailed inspection of
 individual recordings. The Luna ecosystem is an open-source sleep
-analysis stack built around the Luna C/C++ library [@Purcell:2024], its
-Python interface (`lunapi`), and Lunascope, an interactive desktop
+analysis stack built around the Luna C/C++ library, its Python
+interface (`lunapi`), and Lunascope, an interactive desktop
 application for visualization, annotation, and review. Scripted and
-graphical workflows therefore operate on the same underlying data model
-and command set. Lunascope provides a synchronized multi-channel viewer
-with hypnogram display, spectral summaries, annotation handling,
-automated sleep staging, cohort-level exploration, multiday actigraphy
-views, and direct access to the National Sleep Research Resource
-[NSRR, the NHLBI National Sleep Research Resource, https://sleepdata.org;
-@Zhang:2018]. An embedded scripting console exposes Luna's
-command language inside the application, allowing users to move between
-visual inspection and programmatic analysis within a single session.
+graphical workflows operate on a common data model and command set.
+Lunascope provides a synchronized multichannel
+viewer with hypnogram display, spectral summaries, annotation
+handling, automated sleep staging, cohort-level exploration, multiday
+actigraphy views, and direct access to the National Sleep Research
+Resource (NSRR). An embedded scripting console exposes Luna's command
+language inside the application, allowing users
+to move between visual inspection and programmatic analysis within a
+single session.
 
 # Statement of need
 
@@ -59,60 +111,52 @@ central to sleep research. Large-scale datasets hosted by the NSRR
 have made thousands of whole-night recordings freely available,
 enabling population-level studies of sleep architecture, spindle
 activity, slow oscillations, and EEG-derived biomarkers
-[@Purcell:2017; @Kozhemiako:2022a; @Kozhemiako:2023]. These analyses
+[@purcell2017; @kozhemiako2022slope; @kozhemiako2024]. These analyses
 increasingly rely on open-source tools that can process recordings at
 scale, but many sleep researchers, clinicians, and trainees lack
 fluency with terminal-based or notebook-based workflows, and existing
 graphical tools for sleep data often emphasize either signal viewing or
 analysis rather than both within a reproducible open-source workflow.
 
-Luna is also part of the broader NSRR analytical ecosystem: in
-addition to sharing data, the NSRR has supported the use of common
-open-source tools for sleep research, and Luna has been used within
-NSRR analysis workflows. Lunascope builds on that connection by
-providing desktop access to Luna-based methods, while its Moonbeam
-module imports NSRR data directly into the same environment used for
-visualization, review, and downstream analysis.
-
 The Luna/`lunapi`/Lunascope stack was developed to bridge this gap.
 Luna provides a reusable analytical core, `lunapi` makes that core
 available in Python for notebooks and batch workflows, and Lunascope
 adds an interactive environment for review and exploratory analysis.
 This architecture supports both large-scale computation and detailed
-inspection of individual recordings using the same library, data model,
-and command language. Luna has been used as the primary analytic
+inspection of individual recordings within one analytical framework.
+Luna has been used as the primary
+analytic platform in studies analyzing over 10,000 PSG recordings
+across multiple cohorts in work by our group [@purcell2017;
+@djonlagic2021; @kozhemiako2022slope; @kozhemiako2022;
+@kozhemiako2024] and others [@adra2022;@hanif2025;@lokhandwala2025].
+Lunascope brings those methods into an interactive graphical workflow.
 
-platform in studies analyzing over 10,000 PSG recordings across
-multiple cohorts [@Purcell:2017; @Kozhemiako:2022a;
-@Kozhemiako:2022b; @Kozhemiako:2023], and Lunascope brings those
-methods into an interactive graphical workflow.
+Luna is also part of the broader US National Heart, Lung, and Blood
+Institute NSRR [@nsrr; @zhang2018] analytical ecosystem: in
+addition to sharing data, the NSRR has supported the use of common
+open-source tools for sleep research, and Luna has been used within
+NSRR analysis workflows. Lunascope includes a Moonbeam module that
+imports NSRR data directly into the environment used for
+visualization, review, and downstream analysis.
+
 
 # Relationship to existing tools
 
 Existing software relevant to PSG analysis reflects different design
-goals and usage contexts. EDFbrowser [@vanBeelen:2010] is a mature and
-widely used EDF viewer, well suited for manual signal inspection, but
+goals and usage contexts. EDFbrowser [@edfbrowser] is a mature and
+widely used viewer, well suited for manual signal inspection, but
 it is primarily a viewing application rather than an integrated
-sleep-analysis environment. Wonambi provides sleep-oriented
-functionality, including sleep scoring and event detection, but it is
-not designed around a shared analytical engine spanning command-line,
-Python, and GUI workflows, nor around cohort-scale exploration or
-direct repository integration. The Snooz Toolbox
-(https://github.com/SnoozToolbox/snooz-toolbox) similarly emphasizes
-open PSG analysis workflows and cohort-oriented processing, but is not
-centered on a single analytical engine shared across command-line,
-Python, and interactive review contexts. EEGLAB [@Delorme:2004] is a
-general EEG
-analysis environment, but it is MATLAB-based, oriented primarily toward
-EEG/ERP workflows, and does not provide a dedicated PSG review
-environment or native sleep-analysis pipeline. MNE-Python is a powerful
-electrophysiology toolkit, but it is a programming library rather than
-a standalone application, so users must assemble their own PSG
-visualization, annotation, and cohort workflows. YASA [@Vallat:2021]
-provides accessible Python implementations of several sleep-analysis
-algorithms, including staging and spindle detection, but it is designed
-for scripted and notebook-based analysis rather than persistent
-interactive review or integrated cohort exploration. Commercial PSG
+sleep-analysis environment. Broader EEG ecosystems such as EEGLAB
+[@Delorme:2004] and MNE-Python [@gramfort2013] are powerful and widely
+used, but they are general electrophysiology frameworks rather than
+dedicated PSG review environments. Sleep-focused research tools
+including YASA [@vallat2021], Wonambi [@wonambi], SleepTrip
+[@cox2024sleeptrip], the Snooz Toolbox [@snooztoolbox], and SleepEEGpy
+[@sleepeegpy2025] support useful scripted workflows for staging,
+detection, preprocessing, or artifact cleaning, but they tend to
+emphasize individual pipelines or high-level wrapper layers rather than
+a shared analytical engine spanning command-line, Python, and
+interactive desktop review. Commercial PSG
 review systems support clinical scoring and reporting, but are
 typically closed-source, proprietary, and difficult to adapt for
 reproducible research pipelines or large-scale open-data workflows.
@@ -122,55 +166,67 @@ algorithmic sleep analysis, and cohort-scale data exploration into
 different environments. This separation creates friction for
 reproducible research: visual review, scripted analysis, annotation
 management, and population-level summaries often occur in disconnected
-tools with different data assumptions. To our knowledge, relatively few
-open tools aim to combine interactive PSG visualization, access to a
-mature sleep-analysis engine, cohort-level workflows, annotation
-support, and scripted analysis within one reproducible environment.
+tools with different data assumptions. The Luna ecosystem was
+developed to reduce this separation by combining a scalable
+sleep-analysis engine, Python access through `lunapi`, an interactive
+desktop application for PSG review and annotation, cohort-level
+exploration tools, and direct workflows for NSRR-hosted data.
 
-The Luna ecosystem was developed to reduce this separation. The Luna
-C/C++ library provides the shared analytical engine, `lunapi` provides
-Python access to the same recordings, commands, and result structures,
-and Lunascope provides the interactive application layer for review,
-annotation, staging, and visualization. The main contribution of this
-work is the integration of a scalable sleep-analysis engine, Python
-access through `lunapi`, an interactive desktop application for PSG
-review and annotation, cohort-level exploration tools, and direct
-workflows for NSRR-hosted data.
+Many existing tools also concentrate on narrower task domains such as
+staging, visualization, or selected spindle, spectral, or
+preprocessing pipelines, whereas Luna spans a broader analytical
+range, including dataset manipulation with full support for gapped 
+recordings; interval-level annotation handling; multi-day and
+actigraphy-based analyses; linear modeling; multivariate statistical
+approaches; neurobiological age prediction; high-density EEG support,
+including interpolation, connectivity, and EEG microstate analysis;
+and multiple spectral methods, including Welch, multitaper, wavelet,
+Hilbert, and IRASA-based analyses.
 
 # Software design
 
-The software stack is organized in three layers. Luna, implemented in
-C/C++, provides the analysis engine and command set for sleep signal
-processing. It supports EDF/EDF+ inputs together with XML and Luna
-annotation formats, and spans EDF manipulation and restructuring,
-including workflows that accept ASCII TSV input to generate EDF/EDF+,
-signal processing, spectral analysis, masking and epoching, event
-detection, automated staging, multichannel decomposition,
-physiological summary measures, actigraphy, and prediction workflows
-including neurobiological age models. The native API exposes
-recordings and derived data as `Eigen` arrays and matrices, evaluates
-the same domain-specific Luna scripting language used at the command
-line, and includes embedded command metadata that can be queried
-programmatically. Some modeling components, including automated staging
-and related prediction workflows, build on external numerical libraries
-such as LightGBM. Luna also supports association modeling, including
-linear-model and permutation-based inference using approaches such as
-Freedman--Lane, implemented with efficient `Eigen`-based matrix
-algebra.
+The software stack is organized in three layers. Luna,
+implemented in C/C++, provides the analysis engine and command set for
+sleep signal processing. It supports European Data Format (EDF/EDF+) inputs [@kemp1992edf;
+@kemp2003edfplus; @edfplus_site] together with XML and Luna annotation
+formats; the latter was designed as a simple tab-delimited
+representation that can accommodate clock-time or elapsed-time
+encodings, interval durations or change points, and associated
+metadata, making it relatively easy to import annotations from other
+domains. It also includes EDF manipulation and restructuring
+workflows, including support for generating EDF/EDF+ from ASCII TSV
+input. The native API exposes recordings and derived data as `Eigen`
+[@eigenweb] arrays and matrices, evaluates the same domain-specific
+Luna scripting language used at the command line, and includes
+embedded command metadata that can be queried programmatically. Some
+time/frequency analyses and modeling components, including automated
+staging and related prediction workflows, build on external numerical
+libraries such as FFTW3 [@frigo2005fftw3] and LightGBM
+[@ke2017lightgbm]. Luna also supports association modeling, including
+linear-model and permutation-based inference implemented with
+efficient `Eigen`-based matrix algebra.  Figure 1 gives an overview
+of the core Luna tools, the scope of primary functions, and examples
+of the visual Lunascope interface.
+
+![Figure 1. Overview of the Luna & Lunascope. A. The family of Luna tools. B. Schematic
+of core domains of functionality in Luna. C. Visualization in Lunascope.
+\label{fig:overview}](figure1c.png)
 
 `lunapi` exposes that engine to Python, allowing the same recording
 objects and commands to be used in scripts, notebooks, and other
 applications. It supports single-recording and project-level workflows,
 including sample-list construction, command execution across cohorts,
-and structured retrieval of Luna result tables into Python objects.
+and structured retrieval of Luna result tables as Python objects.
 
 Luna's output system is designed to separate computation from
 presentation. The same command outputs can be emitted to standard
-output, written to SQLite-backed result stores that can be queried as
+output, written to SQLite-backed [@sqlite] result stores that can be queried as
 virtual TSV-like tables, returned to Python as structured objects,
 consumed in R-facing workflows, displayed in Qt tables within
 Lunascope, or written as compressed text tables for larger results.
-This common output model helps preserve comparable results across
+Luna also retains a legacy R interface that, although not a primary
+distribution target, provides direct integration between R workflows
+and the Luna analysis environment. This output model helps preserve comparable results across
 command-line, scripted, and interactive settings.
 
 Lunascope is implemented in Python (3.9--3.14) using PySide6 (Qt 6)
@@ -179,24 +235,32 @@ Luna command available at the command line is also available within the
 desktop application. A native desktop application was chosen over a
 web-based or Jupyter-embedded approach because PSG recordings are
 typically large (hundreds of megabytes), multi-channel, and require
-responsive pan/zoom interaction across hours of data. Luna already
+responsive pan/zoom interaction across hours of data. `lunapi` already
 provides a lighter-weight embedded viewer (`scope`) for JupyterLab;
 Lunascope is the more full-featured desktop environment within the same
 ecosystem.
 
-The interface is organized as synchronized docks around a central
+The Lunascope interface is organized as synchronized docks around a central
 signal viewer. Docks can be shown, hidden, detached, repositioned, or
 tabbed, and the layout persists across launches. Several modules ---
 including Moonbeam, the Explorer, and the Annotator --- operate as
 floating windows. Full application state can be saved and restored via
-`.lss` session files, preserving window geometry, dock placement, text
-buffers, control states, and the selected sample-list row.
+session files.
 
 Within Lunascope, the viewer is tightly coupled to the Luna data model
 rather than operating as a passive display layer. Signals and
 annotations are attached through `lunapi`, can be inspected at multiple
 timescales, and can be queried or modified in the same session that
-executes Luna commands. For efficient navigation of long recordings,
+executes Luna commands. Changes made in the visual annotation editor, for
+example, are immediately propagated back to the underlying Luna data
+model. Conversely, signals or annotations created or modified through
+Luna commands executed in the Lunascope console are immediately reflected
+in the viewer.
+
+More generally, interval-level annotations are
+treated as first-class objects within Luna, and arbitrary expressions
+can be evaluated against those intervals, their metadata, and the
+underlying signals. For efficient navigation of long recordings,
 Lunascope maintains rendered, decimated signal caches and summary
 envelopes for broad time windows while preserving access to the
 underlying sample-level data. This supports interactive measurement,
@@ -209,7 +273,7 @@ returns structured result tables, so graphical and scripted analyses
 share one command language. The command browser and output tables use
 Luna's embedded documentation metadata to expose parameter and variable
 descriptions inside the application. Moonbeam provides direct access to
-NSRR studies and imports recordings into the same analytic context used
+NSRR studies and imports recordings into the analytic context used
 for interactive review. The Explorer extends the single-recording
 viewer to cohort-level displays, including hypnogram alignment
 (`Hypnoscope`), annotation summaries, waveform displays, and table-based
@@ -219,28 +283,13 @@ rendered trace modulation by derived signal properties, allowing Luna
 outputs to be inspected as part of the visual workflow rather than only
 as exported tables.
 
-The broader Luna ecosystem is also designed for embarrassingly
-parallelizable workflows, including high-performance computing
+In contrast, the command-line Luna tool is designed to support
+embarrassingly parallel workflows, including high-performance computing
 environments in which many recordings are processed independently. In
 that setting, per-job outputs can be written separately and later
-combined with tools such as `destrat`, which compiles result tables
+combined with Luna tools such as `destrat`, which compiles result tables
 across many files produced by distributed runs.
 
-Lunascope is distributed via PyPI and as standalone macOS and Windows
-binaries built via GitHub Actions. Within the broader stack, `lunapi`
-also supports direct Python use independent of the GUI, while Luna
-remains available for command-line workflows. Data loading in Lunascope
-supports single EDFs (with automatic annotation file discovery),
-annotation-only files, Luna sample lists, recording folders with
-automatic sample-list construction, and saved sessions. A configuration
-file system controls signal and annotation ordering, coloring, Y-axis
-limits, dock visibility defaults, and signal modulation rules,
-separate from Luna parameter files.
-
-![Overview of the Lunascope interface, showing the spectrogram (top), 
-multi-channel signal viewer (center), POPS automated staging with 
-hypnodensity (bottom left), structured output tables (bottom center), 
-and signal/annotation management panels.\label{fig:overview}](pb1.png)
 
 
 # Research impact statement
@@ -250,37 +299,48 @@ batch analysis, scripted exploration, and interactive review. Within
 the Purcell laboratory, Lunascope is used for PSG review, quality
 assessment, and exploratory analysis in projects that also rely on
 Luna's analytical pipeline, including work on sleep EEG spectral
-variation [@Kozhemiako:2022a], neurodevelopmental sleep architecture
-[@Kozhemiako:2023], and the GRINS schizophrenia neurophysiology
-consortium [@Wang:2024; @Kozhemiako:2022b]. This integration is
-particularly relevant for training and reproducibility because the same
+variation [@kozhemiako2022slope], neurodevelopmental sleep architecture
+[@kozhemiako2024], and the GRINS schizophrenia neurophysiology
+consortium [@Wang:2024; @murphy2024; @kozhemiako2022]. This is
+particularly relevant for training and reproducibility because
 operations can be accessed through the command line, Python, and the
-desktop application. The software is available at
-https://github.com/Lorcan7274/lunascope with documentation at
-https://zzz-luna.org/lunascope/. Luna documentation is available at
-https://zzz.nyspi.org/luna/ and the Luna source repository at
-https://github.com/remnrem/luna.
+desktop application.
+
+
+# Availability
+
+The primary entry point for the Luna ecosystem is https://zzz.nyspi.org/luna/.
+Lunascope is distributed via PyPI [@lunascope_pypi] and as standalone macOS and Windows
+binaries built via GitHub Actions.  The software is available at the
+Lunascope source repository [@lunascope_repo], with user documentation
+available separately [@lunascope_docs]. Luna documentation is
+available online [@luna_docs], and includes extensive method-oriented
+documentation, worked examples and vignettes, and detailed
+descriptions of command options and outputs. Luna and `lunapi` are
+also distributed as Docker containers, and `lunapi` is accompanied by
+interactive notebooks and tutorials [@lunapi_notebooks]. We have also
+developed an extensive six-part walkthrough [@luna_walkthrough], built
+around 20 hd-EEG recordings available through the NSRR Luna/GRINS
+dataset [@luna_grins_dataset]. The Luna source repository is also
+publicly available [@luna_repo].
+
 
 # AI usage disclosure
 
-Generative AI tools (Claude, Anthropic) were used to assist in drafting
-and editing the text of this manuscript, and during software
-development to help refactor code, generate help-related functions and
-documentation, and assist with use of the Qt library. All content and
-code were reviewed, verified, and revised by the authors.
+Generative AI tools (Claude, Anthropic and Codex, OpenAI) were used to
+assist in editing and formatting the text of this manuscript, and
+during software development, primarily to help refactor code, generate
+help-related functions and documentation, and assist with use of the
+Qt library in Lunascope.  All content and code were reviewed,
+verified, and revised by the authors.
 
 # Acknowledgements
 
-Luna development is supported by NIH grants NHLBI R01HL146339, NHLBI
-R21HL145492, NIMH R03 MH108908 (PI: S.M. Purcell), NHLBI R35HL135818,
-and NHLBI R24HL114473 (PI: S. Redline).
+Luna development is supported by grants/contracts to S. M. Purcell (as
+either PI or MPI) from NIH/NHLBI (R01HL146339, R21HL145492,
+75N92019C00011 and OT2HL67310-01), NIH/NIMH (MH108908),
+the Wellcome Trust (227108/Z/23/Z) as well as support from
+the Stanley Center for Psychiatric Research (Broad Institute).
+
 
 # References
-
-
-
-
-
-
-
-
