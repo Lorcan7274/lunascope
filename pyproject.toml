@@ -52,6 +52,14 @@ dependencies = [
   "truststore>=0.10; sys_platform == 'darwin'"
 ]
 
+[project.optional-dependencies]
+test = [
+  "pytest>=7",
+  "pytest-qt>=4.2",
+  "pytest-mock>=3.10",
+  "scipy>=1.10",
+]
+
 [project.urls]
 Homepage = "https://zzz.nyspi.org/lunascope/"
 Documentation = "https://zzz.nyspi.org/lunascope/"
@@ -64,3 +72,19 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 lunascope = ["ui/*.ui"]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+addopts = [
+  "-ra",
+  "--strict-markers",
+  "--strict-config",
+]
+markers = [
+  "qt: tests that require a Qt event loop (run under offscreen platform)",
+  "slow: tests that take noticeable wall time",
+]
+filterwarnings = [
+  "ignore::DeprecationWarning:pkg_resources.*",
+]
