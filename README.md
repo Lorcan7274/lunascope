@@ -1,219 +1,179 @@
-# lunascope
+# Lunascope
 
-A viewer and frontend for Luna (http://zzz.nyspi.org/luna/)
+**An interactive desktop application for sleep signal visualization, annotation, and analysis — built on the [Luna](http://zzz.nyspi.org/luna/) ecosystem.**
 
-Requirements:
+![Lunascope interface](paper/figure1c.png)
 
- - Python 3.9 - 3.14
+---
 
- - Compatible with CPython: PyPy not supported.
+## Statement of Need
 
- - Depends on [lunapi](https://pypi.org/project/lunapi/), the Python
-   version of the core [Luna](https://zzz.nyspi.org/luna/) library. This binary
-   package is tested and supported on macOS (Intel and Apple Silicon), Linux (x86_64), and
-   Windows 10/11 (x86_64) with Python 3.9 – 3.14.  Other platforms or
-   Python versions may build successfully [from source](https://github.com/remnrem/luna-api)
-   but are not officially supported.
+Computational analysis of polysomnographic (PSG) recordings has become central to sleep research, yet a practical gap exists between large-scale scripted pipelines and the detailed visual review that quality assessment and exploratory analysis require. Existing tools tend to separate signal viewing, algorithmic analysis, and cohort-scale exploration into different environments, creating friction for reproducible research.
 
+Lunascope bridges this gap. It is a native desktop application that puts Luna's full analytical engine — the same one used in command-line and Python workflows — behind an interactive graphical interface. Signals, annotations, and derived outputs can be inspected, modified, and re-analyzed within a single session, with changes propagated immediately between the visual layer and the underlying data model.
 
-## Standalone Binaries (no Python required)
+Lunascope is aimed at sleep researchers, clinical scientists, and trainees who need to review PSG recordings, manage annotations, run automated staging, or explore cohort-level summaries without leaving the graphical environment — while remaining able to drop into scripted or batch analysis at any point.
 
-Pre-built standalone apps for macOS and Windows are available from the
-[Latest Build release](https://github.com/Lorcan7274/lunascope/releases/tag/latest-build)
-— no Python installation needed.
+---
 
-### macOS
+## Features
 
-1. Download `Lunascope.app.zip` and unzip it.
-2. Move `Lunascope.app` to your **Applications** folder (or anywhere you like).
-3. **First launch only:** macOS will block the app because it is not from the App Store.
-   Right-click (or Control-click) `Lunascope.app` and choose **Open**, then click **Open**
-   in the dialog that appears. You only need to do this once; subsequent double-clicks will
-   work normally.
+- **Synchronized multichannel viewer** — pan and zoom across hours of EEG, EMG, EOG, and other channels with responsive decimated rendering
+- **Hypnogram display** — color-coded sleep staging synchronized with the signal viewer
+- **Spectral summaries** — per-channel power spectra and spectrograms updated on the fly
+- **Annotation editor** — create, edit, and delete interval annotations; changes are immediately reflected in Luna's data model
+- **Automated sleep staging** — POPS and SOAP models accessible directly from the interface
+- **Cohort-level Explorer** — Hypnoscope alignment, annotation summaries, waveform displays, and table-based plots across a sample list
+- **Moonbeam NSRR module** — import recordings directly from the National Sleep Research Resource into the analysis context
+- **Embedded scripting console** — execute any Luna command and receive structured result tables without leaving the application
+- **Command browser** — searchable Luna command and parameter reference with embedded documentation
+- **Multiday / actigraphy views** — support for EDF+D gapped recordings and long-form waveform review
+- **Session save/restore** — full application state (layout, loaded files, annotations) persists across launches
 
-   If you see *"Lunascope.app" will damage your computer* and no Open option appears,
-   run this once in Terminal to remove the quarantine flag:
-   ```
-   xattr -dr com.apple.quarantine /path/to/Lunascope.app
-   ```
+---
 
-### Windows
+## Worked Example
 
-1. Download `Lunascope-Windows.zip` and unzip it (right-click → **Extract All**).
-2. Open the extracted `Lunascope.dist` folder and double-click **Lunascope.exe**.
-3. **First launch only:** Windows SmartScreen may show a blue *"Windows protected your PC"*
-   dialog because the app is not code-signed. Click **More info**, then **Run anyway**.
+The following shows a typical exploratory session using the Python interface (`lunapi`) alongside Lunascope, using a single EDF recording.
 
-> **Note:** These binaries are unsigned. Your browser or antivirus may warn you on
-> download — this is expected. The source code is fully open and auditable above.
+### 1. Install and launch
+
+```bash
+pip install lunascope
+lunascope
+```
+
+### 2. Load a recording via the console
+
+Open **Console** from the View menu and enter:
+
+```
+LOAD edf /path/to/recording.edf
+LOAD annot /path/to/recording.annot
+```
+
+Or use **File → Open EDF** to load through the GUI.
+
+### 3. Run automated staging
+
+In the console:
+
+```
+POPS
+```
+
+The predicted hypnogram appears immediately in the Hypnogram dock.
+
+### 4. Inspect a spectral summary
+
+Select a channel in the signal viewer, then open **Spectral** from the View menu. The power spectrum for the current epoch is displayed and updates as you navigate.
+
+### 5. Export results
+
+```
+WRITE-ANNOTS file=out.annot
+```
+
+Or use **File → Save Annotations** to export the current annotation set.
+
+### Using `lunapi` in Python / notebooks
+
+```python
+import lunapi as lp
+
+p = lp.inst()
+p.attach_edf("/path/to/recording.edf")
+p.attach_annot("/path/to/recording.annot")
+
+# Run a Luna command and retrieve results as a DataFrame
+p.eval("PSD sig=EEG dB=T")
+df = p.table("PSD", "CH_F")
+print(df.head())
+```
+
+Full documentation, vignettes, and interactive notebooks are available at [zzz.nyspi.org/luna/](https://zzz.nyspi.org/luna/).
 
 ---
 
 ## Installation
 
-`lunascope` is distributed via PyPI:
+### Standalone binaries (no Python required)
 
-```bash
-pip install lunascope
-```
+Pre-built apps for macOS and Windows are available from the
+[Latest Build release](https://github.com/Lorcan7274/lunascope/releases/tag/latest-build).
 
-After installation, you can launch it from the command line:
-
-```bash
-lunascope
-```
-
-or equivalently:
-
-```bash
-python -m lunascope
-```
-
----
-
-## Recommended: Use a Virtual Environment
-
-It is strongly recommended to install `lunascope` into a virtual environment rather than into your system Python.
-
-### Option 1 — Using `venv` (Standard Python)
-
-Create and activate a virtual environment:
-
-**macOS / Linux**
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-```
+**macOS**
+1. Download `Lunascope.app.zip` and unzip it.
+2. Move `Lunascope.app` to **Applications** (or anywhere).
+3. First launch: right-click → **Open** to bypass Gatekeeper, then click **Open**. If you see *"will damage your computer"* with no Open option, run once in Terminal:
+   ```
+   xattr -dr com.apple.quarantine /path/to/Lunascope.app
+   ```
 
 **Windows**
-```bash
-python -m venv .venv
-.venv\Scripts\activate
-```
+1. Download `Lunascope-Windows.zip` and unzip it.
+2. Open the `Lunascope.dist` folder and double-click **Lunascope.exe**.
+3. First launch: click **More info → Run anyway** if SmartScreen appears.
 
-Then install:
+> These binaries are unsigned. Browser or antivirus warnings are expected. The source is fully open and auditable here.
+
+### From PyPI
 
 ```bash
 pip install lunascope
-```
-
-Run:
-
-```bash
 lunascope
 ```
 
-To leave the environment:
+**Using a virtual environment (recommended)**
 
 ```bash
-deactivate
+python3 -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install lunascope
+lunascope
 ```
 
----
-
-### Option 2 — Using `pipx` (Recommended for CLI Apps)
-
-If you prefer to install `lunascope` as an isolated application:
+**Using pipx**
 
 ```bash
 pipx install lunascope
-```
-
-Then run:
-
-```bash
 lunascope
 ```
 
-`pipx` keeps the application isolated from your main Python
-installation and avoids dependency conflicts. This is often the
-simplest option if you are not otherwise managing environments.
+### Requirements
 
----
+- Python 3.9–3.14 (CPython; PyPy not supported)
+- Supported platforms: macOS (Intel & Apple Silicon), Linux (x86_64), Windows 10/11 (x86_64)
+- On macOS with Homebrew Python, use a virtual environment or `pipx` to avoid the "externally managed environment" error.
+- On Windows, install Python from python.org and check **"Add Python to PATH"**.
 
-## Python vs `python3`
-
-On some systems:
-
-- `python` may refer to Python 2 (older systems)
-- `python3` refers to Python 3
-
-Check your version:
+### Updating / uninstalling
 
 ```bash
-python --version
-```
-
-or:
-
-```bash
-python3 --version
-```
-
-Use whichever command reports Python **3.9–3.14**.
-
-Similarly for pip:
-
-```bash
-pip3 install lunascope
-```
-
-or more explicitly:
-
-```bash
-python3 -m pip install lunascope
-```
-
-Using `python -m pip` ensures you install into the correct interpreter.
-
----
-
-## Platform Notes
-
-- Supported platforms: macOS (Intel & Apple Silicon), Linux (x86_64), Windows 10/11 (x86_64).
-- On macOS with Homebrew Python, you may see an “externally managed environment” error. In that case, use a virtual environment or `pipx`.
-- On Windows, install Python from python.org and ensure **“Add Python to PATH”** is checked during installation.
-
----
-
-## First Launch
-
-The first time you run `lunascope`, startup may take longer while dependencies and components initialize. Subsequent launches are typically much faster.
-
----
-
-## Updating
-
-If installed with pip:
-
-```bash
-pip install --upgrade lunascope
-```
-
-If installed with pipx:
-
-```bash
+pip install --upgrade lunascope   # upgrade
+pip uninstall lunascope           # remove
+# or with pipx:
 pipx upgrade lunascope
-```
-
----
-
-## Uninstalling
-
-With pip:
-
-```bash
-pip uninstall lunascope
-```
-
-With pipx:
-
-```bash
 pipx uninstall lunascope
 ```
 
 ---
 
-## Questions
+## Documentation
 
-Please write to `luna.remnrem@gmail.com`.
+| Resource | URL |
+|---|---|
+| Luna ecosystem | https://zzz.nyspi.org/luna/ |
+| Lunascope docs | https://zzz.nyspi.org/luna/lunascope/ |
+| lunapi notebooks | https://github.com/remnrem/luna-api/tree/main/notebooks |
+| NSRR | https://sleepdata.org |
+
+---
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on bug reports, feature requests, and pull requests.
+
+## Questions / Support
+
+Open an issue on GitHub or write to `luna.remnrem@gmail.com`.
