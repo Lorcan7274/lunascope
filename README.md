@@ -2,7 +2,7 @@
 
 **An interactive desktop application for sleep signal visualization, annotation, and analysis — built on the [Luna](http://zzz.nyspi.org/luna/) ecosystem.**
 
-![Lunascope interface](paper/figure1c.png)
+![Lunascope interface](paper/figure1c_web.webp)
 
 ---
 
