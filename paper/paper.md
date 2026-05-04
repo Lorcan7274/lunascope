@@ -85,12 +85,11 @@ bibliography: paper.bib
 
 # Summary
 
-Sleep physiology generates rich, high-dimensional signals that are
-central to understanding brain function, aging, and disease, yet the
-field has long been constrained by proprietary data formats,
-closed-source algorithms, and a relative lack of open, scalable tools
-that support both large cohort analyses and detailed inspection of
-individual recordings. The Luna ecosystem is an open-source sleep
+Sleep physiology generates rich, high-dimensional signals central to
+understanding brain function, aging, and disease, yet the field has
+long been constrained by proprietary formats, closed-source
+algorithms, and limited open, scalable tools spanning both
+large-cohort analysis and detailed inspection of individual recordings. The Luna ecosystem is an open-source sleep
 analysis stack built around the Luna C/C++ library, its Python
 interface (`lunapi`), and Lunascope, an interactive desktop
 application for visualization, annotation, and review. Scripted and
@@ -122,8 +121,6 @@ The Luna/`lunapi`/Lunascope stack was developed to bridge this gap.
 Luna provides a reusable analytical core, `lunapi` makes that core
 available in Python for notebooks and batch workflows, and Lunascope
 adds an interactive environment for review and exploratory analysis.
-This architecture supports both large-scale computation and detailed
-inspection of individual recordings within one analytical framework.
 Luna has been used as the primary
 analytic platform in studies analyzing over 10,000 PSG recordings
 across multiple cohorts in work by our group [@purcell2017;
@@ -189,11 +186,8 @@ The software stack is organized in three layers. Luna,
 implemented in C/C++, provides the analysis engine and command set for
 sleep signal processing. It supports European Data Format (EDF/EDF+) inputs [@kemp1992edf;
 @kemp2003edfplus; @edfplus_site] together with XML and Luna annotation
-formats; the latter was designed as a simple tab-delimited
-representation that can accommodate clock-time or elapsed-time
-encodings, interval durations or change points, and associated
-metadata, making it relatively easy to import annotations from other
-domains. It also includes EDF manipulation and restructuring
+formats; the latter uses a simple tab-delimited format supporting
+clock-time or elapsed-time encodings, interval durations, and metadata. It also includes EDF manipulation and restructuring
 workflows, including support for generating EDF/EDF+ from ASCII TSV
 input. The native API exposes recordings and derived data as `Eigen`
 [@eigenweb] arrays and matrices, evaluates the same domain-specific
@@ -204,7 +198,7 @@ staging and related prediction workflows, build on external numerical
 libraries such as FFTW3 [@frigo2005fftw3] and LightGBM
 [@ke2017lightgbm]. Luna also supports association modeling, including
 linear-model and permutation-based inference implemented with
-efficient `Eigen`-based matrix algebra.  Figure 1 gives an overview
+efficient `Eigen`-based matrix algebra.  \autoref{fig:overview} gives an overview
 of the core Luna tools, the scope of primary functions, and examples
 of the visual Lunascope interface.
 
@@ -220,25 +214,22 @@ and structured retrieval of Luna result tables as Python objects.
 
 Luna's output system is designed to separate computation from
 presentation. The same command outputs can be emitted to standard
-output, written to SQLite-backed [@sqlite] result stores that can be queried as
+output, written to SQLite-backed [@sqlite] result stores queryable as
 virtual TSV-like tables, returned to Python as structured objects,
-consumed in R-facing workflows, displayed in Qt tables within
-Lunascope, or written as compressed text tables for larger results.
-Luna also retains a legacy R interface that, although not a primary
-distribution target, provides direct integration between R workflows
-and the Luna analysis environment. This output model helps preserve comparable results across
+displayed in Qt tables within Lunascope, or written as compressed
+text tables. Luna also retains a legacy R interface for direct
+integration with R workflows. This output model helps preserve comparable results across
 command-line, scripted, and interactive settings.
 
 Lunascope is implemented in Python (3.9--3.14) using PySide6 (Qt 6)
 and pyqtgraph as the graphical layer on top of `lunapi`, meaning every
 Luna command available at the command line is also available within the
 desktop application. A native desktop application was chosen over a
-web-based or Jupyter-embedded approach because PSG recordings are
-typically large (hundreds of megabytes), multi-channel, and require
-responsive pan/zoom interaction across hours of data. `lunapi` already
-provides a lighter-weight embedded viewer (`scope`) for JupyterLab;
-Lunascope is the more full-featured desktop environment within the same
-ecosystem.
+web-based approach because PSG recordings are typically large,
+multi-channel, and require responsive pan/zoom interaction across
+hours of data. `lunapi` provides a lighter-weight embedded viewer
+(`scope`) for JupyterLab; Lunascope is the more full-featured desktop
+environment within the same ecosystem.
 
 The Lunascope interface is organized as synchronized docks around a central
 signal viewer. Docks can be shown, hidden, detached, repositioned, or
@@ -283,12 +274,9 @@ rendered trace modulation by derived signal properties, allowing Luna
 outputs to be inspected as part of the visual workflow rather than only
 as exported tables.
 
-In contrast, the command-line Luna tool is designed to support
-embarrassingly parallel workflows, including high-performance computing
-environments in which many recordings are processed independently. In
-that setting, per-job outputs can be written separately and later
-combined with Luna tools such as `destrat`, which compiles result tables
-across many files produced by distributed runs.
+The command-line Luna tool supports embarrassingly parallel
+high-performance computing workflows, with per-job outputs combined
+using `destrat`, which compiles result tables across distributed runs.
 
 
 
@@ -301,10 +289,7 @@ assessment, and exploratory analysis in projects that also rely on
 Luna's analytical pipeline, including work on sleep EEG spectral
 variation [@kozhemiako2022slope], neurodevelopmental sleep architecture
 [@kozhemiako2024], and the GRINS schizophrenia neurophysiology
-consortium [@Wang:2024; @murphy2024; @kozhemiako2022]. This is
-particularly relevant for training and reproducibility because
-operations can be accessed through the command line, Python, and the
-desktop application.
+consortium [@Wang:2024; @murphy2024; @kozhemiako2022].
 
 
 # Availability
@@ -314,9 +299,8 @@ Lunascope is distributed via PyPI [@lunascope_pypi] and as standalone macOS and 
 binaries built via GitHub Actions.  The software is available at the
 Lunascope source repository [@lunascope_repo], with user documentation
 available separately [@lunascope_docs]. Luna documentation is
-available online [@luna_docs], and includes extensive method-oriented
-documentation, worked examples and vignettes, and detailed
-descriptions of command options and outputs. Luna and `lunapi` are
+available online [@luna_docs], including worked examples, vignettes,
+and detailed descriptions of command options and outputs. Luna and `lunapi` are
 also distributed as Docker containers, and `lunapi` is accompanied by
 interactive notebooks and tutorials [@lunapi_notebooks]. We have also
 developed an extensive six-part walkthrough [@luna_walkthrough], built
