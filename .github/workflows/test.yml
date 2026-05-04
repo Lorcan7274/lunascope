@@ -43,10 +43,25 @@ jobs:
             libxcb-xinerama0 libxcb-xkb1 libxkbcommon0 \
             libfontconfig1
 
-      - name: Install lunascope and test deps
+      - name: Install runtime and test dependencies
+        # ``lunapi`` is only published for the lunascope release version on
+        # some platforms; the test suite is Qt/numeric-only and does not
+        # import it, so install everything else explicitly and then add the
+        # package itself with --no-deps.
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ".[test]"
+          python -m pip install \
+            "PySide6>=6.10,<6.11" \
+            "pyqtgraph>=0.13.7,<0.14" \
+            "numpy>=2.0,<3" \
+            "pandas>=2.2,<3" \
+            "matplotlib>=3.8,<4" \
+            "psutil>=5.9" \
+            "pytest>=7" \
+            "pytest-qt>=4.2" \
+            "pytest-mock>=3.10" \
+            "scipy>=1.10"
+          python -m pip install -e . --no-deps
 
       - name: Run pytest
         run: |
