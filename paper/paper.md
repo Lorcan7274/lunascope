@@ -16,28 +16,23 @@ tags:
 
 authors:
   - name: Lorcan C. Purcell
-    orcid: 0000-0000-0000-0000
     email: lorcan7274@gmail.com
     corresponding: true
     affiliation: 1
 
   - name: Tejas Karkera
-    orcid: 0000-0000-0000-0000
     email: tkarkera@mgh.harvard.edu
     affiliation: 2
 
   - name: Senthil Palanivelu
-    orcid: 0000-0000-0000-0000
     email: senthil.palanivelu@tarento.com
     affiliation: 3
 
   - name: Shyamal Agarwal
-    orcid: 0000-0000-0000-0000
     email: agarwal.shy@northeastern.edu
     affiliation: 3
   
   - name: Christopher Mow
-    orcid: 0000-0002-6450-4959
     email: cmow1@mgb.org
     affiliation: 4
 

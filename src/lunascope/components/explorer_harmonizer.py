@@ -835,8 +835,8 @@ class HarmonizerTab(_ExplorerTab):
             row_names = [row_names[i] for i in row_order]
             col_ids   = [col_ids[i]   for i in col_order]
 
-        model = _PresenceModel(row_names, col_ids, mat)
-        self._view_presence.setModel(model)
+        self._presence_model = _PresenceModel(row_names, col_ids, mat)
+        self._view_presence.setModel(self._presence_model)
         self._view_presence.selectionModel().selectionChanged.connect(
             self._on_presence_selection_changed
         )
@@ -876,12 +876,13 @@ class HarmonizerTab(_ExplorerTab):
             QtWidgets.QStyle.PM_ScrollBarExtent, None, self._view_presence
         )
         min_visual_cols = 8
-        target_cols = max(int(n_cols), min_visual_cols)
-        target_w = vhdr_w + (target_cols * int(cell_px)) + scroll_w + frame_w + 6
-        actual_w = vhdr_w + (int(n_cols) * int(cell_px)) + scroll_w + frame_w + 6
-        width = max(target_w, actual_w)
+        # Keep the table scrollable instead of sizing the whole window to the
+        # full cohort width, which can become enormous for large sample lists.
+        max_visual_cols = 64
+        visible_cols = max(min_visual_cols, min(int(n_cols), max_visual_cols))
+        width = vhdr_w + (visible_cols * int(cell_px)) + scroll_w + frame_w + 6
         self._view_presence.setMinimumWidth(width)
-        self._view_presence.setMaximumWidth(width)
+        self._view_presence.setMaximumWidth(16777215)
 
     # ---- Channels tab --------------------------------------------------
 

@@ -31,28 +31,66 @@ from matplotlib import pyplot as plt
 @staticmethod
 def hypno(ss, e=None, ax=None, *, title=None, xsize=20, ysize=2, clear=True):
     """Plot a hypnogram into an existing Axes if provided."""
-    ssn = lp.stgn(ss)
+    from matplotlib import colors as mcolors
+    ssn = np.array(lp.stgn(ss), dtype=float)
     if e is None:
         e = np.arange(len(ssn), dtype=float)
     e = e / 120.0
 
-    created = False
     if ax is None:
         fig, ax = plt.subplots(figsize=(xsize, ysize))
-        created = True
     elif clear:
         ax.clear()
 
-    ax.plot(e, ssn, color='gray', linewidth=0.5, zorder=2)
-    ax.scatter(e, ssn, c=lp.stgcol(ss), s=10, zorder=3)
+    # Detect background brightness so guide colours adapt to dark/light themes
+    try:
+        bg_rgb = mcolors.to_rgb(ax.get_facecolor())
+        lum = 0.299*bg_rgb[0] + 0.587*bg_rgb[1] + 0.114*bg_rgb[2]
+        dark_bg = lum < 0.3
+    except Exception:
+        dark_bg = False
+
+    guide_col  = '#4a4a4a' if dark_bg else '#d0d0d0'
+    back_col   = '#888888' if dark_bg else '#b8b8b8'
+    vtrans_col = '#5c5c5c' if dark_bg else '#aaaaaa'
+
+    # Five guide lines — one per stage, aligned with the actual hypnogram track
+    for y in [-3, -2, -1, 0, 1]:
+        ax.axhline(y, color=guide_col, linewidth=0.5, zorder=1)
+
+    n = len(e)
+    ep_dur = float(e[1] - e[0]) if n > 1 else 1.0 / 120.0
+    colors = lp.stgcol(ss)
+
+    # Backline: wide neutral step so dark stages (e.g. N3) stay visible
+    for i in range(n):
+        y = ssn[i]
+        if np.isfinite(y):
+            ax.plot([e[i], e[i] + ep_dur], [y, y],
+                    color=back_col, linewidth=9.0, solid_capstyle='butt', zorder=2)
+
+    # Coloured stage segments on top
+    for i in range(n):
+        y = ssn[i]
+        if np.isfinite(y):
+            ax.plot([e[i], e[i] + ep_dur], [y, y],
+                    color=colors[i], linewidth=5.5, solid_capstyle='butt', zorder=3)
+
+    # Vertical transitions between stages
+    for i in range(n - 1):
+        y0, y1 = ssn[i], ssn[i + 1]
+        if np.isfinite(y0) and np.isfinite(y1) and y0 != y1:
+            ax.plot([e[i] + ep_dur, e[i] + ep_dur], [y0, y1],
+                    color=vtrans_col, linewidth=1.0, zorder=2)
+
     ax.set_ylabel('Sleep stage')
     ax.set_xlabel('Time (hrs)')
     ax.set_ylim(-3.5, 2.5)
-    ax.set_xlim(0, float(np.nanmax(e)))
+    ax.set_xlim(0, float(np.nanmax(e)) + ep_dur)
     ax.set_yticks([-3, -2, -1, 0, 1, 2], labels=['N3','N2','N1','R','W','?'])
     if title:
         ax.set_title(title)
-    return ax  # caller decides whether to draw
+    return ax
 
 @staticmethod
 def spec(ss, e=None, ax=None, *, title=None, xsize=20, ysize=2, clear=True):
