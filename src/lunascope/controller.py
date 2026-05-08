@@ -720,6 +720,7 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         
         # initiate graphs
         self.curves = [ ]
+        self.fill_curves = [ ]
         self.y0_curves = [ ]
         self.y_curves = [ ] 
         self.sigmod_curves = [ ]

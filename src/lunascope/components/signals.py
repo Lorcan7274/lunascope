@@ -1212,7 +1212,63 @@ class SignalsMixin:
         self._update_pg1_simple()
         if hasattr(self, "_psd_overlay_on_new_data"):
             self._psd_overlay_on_new_data()
-        
+    
+    def _is_pp_channel(self, ch) -> bool:
+        return bool(getattr(self, "cfg_pp_style", True)) and isinstance(ch, str) and ch.startswith("PP_")
+
+    def _channel_uses_pp_display(self, ch) -> bool:
+        return self._is_pp_channel(ch)
+
+    def _channel_uses_pp_fill(self, ch, sigmods=None) -> bool:
+        if not self._channel_uses_pp_display(ch):
+            return False
+        if sigmods is None:
+            return True
+        return ch not in sigmods
+
+    def _resolve_channel_phys_range(self, ch, values=None):
+        if ch in self.cmap_fixed_min:
+            return float(self.cmap_fixed_min[ch]), float(self.cmap_fixed_max[ch])
+        if self._channel_uses_pp_display(ch):
+            return 0.0, 1.0
+        if values is None:
+            raise ValueError("values are required when no fixed or PP range applies")
+        return float(np.min(values)), float(np.max(values))
+
+    def _pp_fill_brush(self, color):
+        qcolor = pg.mkColor(color)
+        qcolor.setAlpha(96)
+        return pg.mkBrush(qcolor)
+
+    def _resolved_signal_color(self, ch, fallback):
+        if ch in getattr(self, "cmap", {}):
+            return self.cmap[ch]
+        if self._channel_uses_pp_display(ch):
+            suffix = ch[3:]
+            if suffix in getattr(self, "stgcols_hex", {}):
+                return self.stgcols_hex[suffix]
+        return fallback
+
+    def _set_signal_curve_pen(self, idx, color):
+        if idx < 0 or idx >= len(getattr(self, "curves", [])):
+            return
+        lw = float(getattr(self, "cfg_line_weight", 1.0))
+        self.curves[idx].setPen(pg.mkPen(color, width=lw, cosmetic=True))
+
+    def _set_fill_curve_brush(self, idx, color):
+        if idx < 0 or idx >= len(getattr(self, "fill_curves", [])):
+            return
+        self.fill_curves[idx].setBrush(self._pp_fill_brush(color))
+
+    def _set_pp_fill_curve(self, idx, x, y, band_lo, enabled):
+        if idx < 0 or idx >= len(getattr(self, "fill_curves", [])):
+            return
+        curve = self.fill_curves[idx]
+        if not enabled or x is None or y is None or len(x) == 0 or len(y) == 0:
+            curve.setData([], [])
+            return
+        curve.setFillLevel(float(band_lo))
+        curve.setData(x, y)
 
 
 
@@ -1262,6 +1318,10 @@ class SignalsMixin:
             pi.removeItem(curve)
         self.y0_curves.clear()
 
+        for curve in self.fill_curves:
+            pi.removeItem(curve)
+        self.fill_curves.clear()
+
         for curve in self.y_curves:
             pi.removeItem(curve)
         self.y_curves.clear()
@@ -1288,7 +1348,13 @@ class SignalsMixin:
         for i in range(nchan):
             pen = pg.mkPen( self.colors[i], width= self.cfg_line_weight , cosmetic=True )
             c = _fast_curve(pen)
+            fill = _fast_curve(None)
+            fill.setZValue(c.zValue() - 1)
+            fill.setBrush(self._pp_fill_brush(self.colors[i]))
+            fill.setFillLevel(0.0)
+            pi.addItem(fill)
             pi.addItem(c)
+            self.fill_curves.append(fill)
             self.curves.append(c)
 
         #
@@ -1443,6 +1509,10 @@ class SignalsMixin:
             if ch in self.cmap_fixed_min:
                 self.ss.fix_physical_scale( ch , self.cmap_fixed_min[ch] , self.cmap_fixed_max[ch] )
                 ch_set.append( ch )
+            elif self._channel_uses_pp_display(ch):
+                lo, hi = self._resolve_channel_phys_range(ch)
+                self.ss.fix_physical_scale(ch, lo, hi)
+                ch_set.append(ch)
             
         # use empirical vals (default) 
         if self.ui.radio_empiric.isChecked():
@@ -1526,6 +1596,10 @@ class SignalsMixin:
             pi.removeItem(curve)
         self.y0_curves.clear()
 
+        for curve in self.fill_curves:
+            pi.removeItem(curve)
+        self.fill_curves.clear()
+
         for curve in self.y_curves:
             pi.removeItem(curve)
         self.y_curves.clear()
@@ -1606,8 +1680,12 @@ class SignalsMixin:
 
             # y0 lines
             curve_slot = nchan - idx - 1
-            curve_color = self.colors[curve_slot] if curve_slot < len(self.colors) else 'gray'
+            base_color = self.colors[curve_slot] if curve_slot < len(self.colors) else 'gray'
+            curve_color = self._resolved_signal_color(ch, base_color)
+            self._set_signal_curve_pen(curve_slot, curve_color)
+            self._set_fill_curve_brush(curve_slot, curve_color)
             self._set_y0_curve_pen(idx, curve_color)
+            self._set_pp_fill_curve(curve_slot, None, None, 0.0, enabled=False)
                                     
             # y-lines
             if ch in self.cmap_ylines_idx:
@@ -1639,6 +1717,13 @@ class SignalsMixin:
             ylim = self.ss.get_window_phys_range( ch )
             band0 = self.ss.get_scaled_y(ch, ylim[0])
             band1 = self.ss.get_scaled_y(ch, ylim[1])
+            self._set_pp_fill_curve(
+                curve_slot,
+                x,
+                y,
+                min(band0, band1),
+                enabled=self._channel_uses_pp_fill(ch, sigmods),
+            )
             if self.cfg_show_zero_line:
                 y0 = self.ss.get_scaled_y(ch, 0)
                 band_lo = min(band0, band1)
@@ -1659,6 +1744,7 @@ class SignalsMixin:
                 y_scaled=y,
                 zero_scaled=self.ss.get_scaled_y(ch, 0),
                 color=curve_color,
+                is_pp=self._channel_uses_pp_display(ch),
                 srv=self.ss,
             )
             if self.show_labels:
@@ -1672,6 +1758,8 @@ class SignalsMixin:
         for i in range(nchan, len(self.curves)):
             self.curves[i].setData([], [])
             self.y0_curves[i].setData([], [])
+            if i < len(self.fill_curves):
+                self.fill_curves[i].setData([], [])
         for i in range(sigmod_idx, len(self.sigmod_curves)):
             self.sigmod_curves[i].setData([], [])
 
@@ -1859,8 +1947,12 @@ class SignalsMixin:
         for ch in chs:
             # signals
             d = self.p.slice( self.p.s2i( [ ( x1 , x2 ) ] ) , chs = ch , time = True )[1]
-            curve_color = self.colors[idx] if idx < len(self.colors) else 'gray'
+            base_color = self.colors[idx] if idx < len(self.colors) else 'gray'
+            curve_color = self._resolved_signal_color(ch, base_color)
+            self._set_signal_curve_pen(idx, curve_color)
+            self._set_fill_curve_brush(idx, curve_color)
             self._set_y0_curve_pen(idx, curve_color)
+            self._set_pp_fill_curve(idx, None, None, 0.0, enabled=False)
             # no data, e.g. in gap?
             if len(d) == 0:
                 if idx < len(self.y0_curves):
@@ -1874,11 +1966,7 @@ class SignalsMixin:
                 y = self.filter_signal( y , ch, ( self.fmap[ch] , self.srs[ ch ] ) )
             y_phys_filt = y.copy()   # physical units, post-filter — used by PSD overlay
             # need to scale manually: to 0/1, either empirically, or from fixed
-            if ch in self.cmap_fixed_min:
-                mn = self.cmap_fixed_min[ch]
-                mx = self.cmap_fixed_max[ch]
-            else:
-                mn, mx = min(y), max(y)
+            mn, mx = self._resolve_channel_phys_range(ch, y)
             if mx > mn: y = (y - mn) / (mx - mn)
             else: y = y - y
             # --> to grid value
@@ -1886,6 +1974,13 @@ class SignalsMixin:
             y = ybase + y * h 
             # plot
             self.curves[idx].setData(x, y)
+            self._set_pp_fill_curve(
+                idx,
+                x,
+                y,
+                ybase,
+                enabled=self._channel_uses_pp_fill(ch),
+            )
             if self.cfg_show_zero_line:
                 if mx > mn:
                     y0 = ybase + ((0.0 - mn) / (mx - mn)) * h
@@ -1908,6 +2003,7 @@ class SignalsMixin:
                 y_phys=y_phys_filt,
                 zero_scaled=(ybase + ((0.0 - mn) / (mx - mn)) * h) if mx > mn else (ybase + 0.5 * h),
                 color=curve_color,
+                is_pp=self._channel_uses_pp_display(ch),
             )
             # labels
             ylim = [ mn , mx ] 
@@ -1919,6 +2015,8 @@ class SignalsMixin:
 
         for i in range(idx, len(self.y0_curves)):
             self.y0_curves[i].setData([], [])
+        for i in range(idx, len(self.fill_curves)):
+            self.fill_curves[i].setData([], [])
 
         # annots (from ssa)
         aidx = 0
@@ -2143,7 +2241,7 @@ class SignalsMixin:
         for line in self._pg1_probe_band_lines:
             line.setPen(pg.mkPen(band_col, width=1, style=QtCore.Qt.DotLine, cosmetic=True))
 
-    def _cache_pg1_channel_band(self, ch, band_lo, band_hi, phys_lo, phys_hi, x=None, y_scaled=None, y_phys=None, zero_scaled=None, color=None, srv=None):
+    def _cache_pg1_channel_band(self, ch, band_lo, band_hi, phys_lo, phys_hi, x=None, y_scaled=None, y_phys=None, zero_scaled=None, color=None, is_pp=False, srv=None):
         x_arr = np.asarray(x, dtype=float) if x is not None else np.empty(0, dtype=float)
         y_scaled_arr = np.asarray(y_scaled, dtype=float) if y_scaled is not None else np.empty(0, dtype=float)
         y_phys_arr = np.asarray(y_phys, dtype=float) if y_phys is not None else None
@@ -2178,6 +2276,7 @@ class SignalsMixin:
             "y_scaled": y_scaled_arr,
             "y_phys": y_phys_arr,
             "color": color,
+            "is_pp": bool(is_pp),
             "_peak_cache": None,
             "srv": srv,
         })

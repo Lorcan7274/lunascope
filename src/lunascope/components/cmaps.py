@@ -104,6 +104,7 @@ _CMAP_DEFAULT_TEXT = """\
 %  [par] global settings
 %  line-weight = 1      (float)
 %  show-lines  = Y      (Y/N)
+%  pp-style    = Y      (Y/N)
 %  na-token    = NA
 %  table-allow-empty = N
 %  day-anchor  = 12     (0-23)
@@ -163,6 +164,12 @@ _CMAP_DEFAULT_TEXT = """\
 %  f:    bandpass Hz
 %  mod:  sigmod + palette
 %
+%  Channels with exact prefix PP_ are treated as posterior
+%  probabilities when pp-style=Y:
+%   - auto scale to 0..1 unless explicit ylim= is set
+%   - lightly fill under trace using the trace colour
+%   - default stage colours for PP_N1/PP_N2/PP_N3/PP_R/PP_W...
+%
 %  [ann] annotation colours
 %  label [col=C]
 %  Stage cols (W N1 N2 N3 R ..)
@@ -202,6 +209,7 @@ class CMapsMixin:
         self.cmap_use_na_for_empty = True
         self.cmap_na_token = "NA"
         self.cfg_day_anchor = 12
+        self.cfg_pp_style = True
 
         # show reference text on first load (when widget is still empty)
         if not self.ui.txt_cmap.toPlainText().strip():
@@ -267,6 +275,7 @@ class CMapsMixin:
         self.cfg_line_weight = 1;
 
         self.cfg_show_zero_line = True;
+        self.cfg_pp_style = True
 
         if 'line-weight' in self.cfg['par']:
             self.cfg_line_weight = float( self.cfg['par']['line-weight'] )
@@ -281,6 +290,13 @@ class CMapsMixin:
                 self.cfg_show_zero_line = True
             else:
                 self.cfg_show_zero_line = False
+
+        if 'pp-style' in self.cfg['par']:
+            t = self.cfg['par']['pp-style']
+            if t == "1" or t == "Y" or t == "T":
+                self.cfg_pp_style = True
+            else:
+                self.cfg_pp_style = False
 
         # copy/save tbls: treatment of empty values
         if 'table-allow-empty' in self.cfg['par']:
@@ -669,6 +685,7 @@ class CMapsMixin:
         sigs = _checked_names_from_view(self.ui.tbl_desc_signals, ["CH"])
         nchan = len(sigs)
         self.colors = [pg.intColor(i, hues=nchan) for i in range(nchan)]
+        self.colors = self._update_pp_signal_cols(self.colors, sigs)
         anns = _checked_names_from_view(self.ui.tbl_desc_annots, ["ANNOT", "CLASS"])
         nanns = len( anns )
         self.acolors = [pg.intColor(i, hues=nanns) for i in range(nanns)]
@@ -678,8 +695,10 @@ class CMapsMixin:
     def _set_white_palette(self):        
         self.palset = 'white'
         self.ui.pg1.setBackground('#E0E0E0')
-        nchan = len(_checked_names_from_view(self.ui.tbl_desc_signals, ["CH"]))
+        sigs = _checked_names_from_view(self.ui.tbl_desc_signals, ["CH"])
+        nchan = len(sigs)
         self.colors = ['#101010'] * nchan
+        self.colors = self._update_pp_signal_cols(self.colors, sigs)
         anns = _checked_names_from_view(self.ui.tbl_desc_annots, ["ANNOT", "CLASS"])
         nanns = len( anns )
         self.acolors = ['#101010'] * nanns
@@ -689,8 +708,10 @@ class CMapsMixin:
     def _set_muted_palette(self):
         self.palset = 'muted'
         self.ui.pg1.setBackground('#D0C0D0')
-        nchan = len(_checked_names_from_view(self.ui.tbl_desc_signals, ["CH"]))
+        sigs = _checked_names_from_view(self.ui.tbl_desc_signals, ["CH"])
+        nchan = len(sigs)
         self.colors = ['#403020'] * nchan
+        self.colors = self._update_pp_signal_cols(self.colors, sigs)
         anns = _checked_names_from_view(self.ui.tbl_desc_annots, ["ANNOT", "CLASS"])
         nanns = len( anns )
         self.acolors = ['#403020'] * nanns
@@ -700,8 +721,10 @@ class CMapsMixin:
     def _set_black_palette(self):
         self.palset = 'black'
         self.ui.pg1.setBackground('#101010')
-        nchan = len(_checked_names_from_view(self.ui.tbl_desc_signals, ["CH"]))
+        sigs = _checked_names_from_view(self.ui.tbl_desc_signals, ["CH"])
+        nchan = len(sigs)
         self.colors = ['#E0E0E0'] * nchan
+        self.colors = self._update_pp_signal_cols(self.colors, sigs)
         anns = _checked_names_from_view(self.ui.tbl_desc_annots, ["ANNOT", "CLASS"])
         nanns = len( anns )
         self.acolors = ['#E0E0E0'] * nanns
@@ -711,8 +734,10 @@ class CMapsMixin:
     def _set_random_palette(self):
         self.palset = 'random'
         self.ui.pg1.setBackground('#101010')
-        nchan = len(_checked_names_from_view(self.ui.tbl_desc_signals, ["CH"]))
+        sigs = _checked_names_from_view(self.ui.tbl_desc_signals, ["CH"])
+        nchan = len(sigs)
         self.colors = random_darkbg_colors( nchan )
+        self.colors = self._update_pp_signal_cols(self.colors, sigs)
         anns = _checked_names_from_view(self.ui.tbl_desc_annots, ["ANNOT", "CLASS"])
         nanns = len( anns )
         self.acolors = random_darkbg_colors( nanns )
@@ -723,8 +748,10 @@ class CMapsMixin:
         self.palset = 'user'
         self.c1, self.c2 = pick_two_colors()
         self.ui.pg1.setBackground(self.c1)
-        nchan = len(_checked_names_from_view(self.ui.tbl_desc_signals, ["CH"]))
+        sigs = _checked_names_from_view(self.ui.tbl_desc_signals, ["CH"])
+        nchan = len(sigs)
         self.colors = [self.c2] * nchan
+        self.colors = self._update_pp_signal_cols(self.colors, sigs)
         anns = _checked_names_from_view(self.ui.tbl_desc_annots, ["ANNOT", "CLASS"])
         nanns = len( anns )
         self.acolors = [self.c2] * nanns
@@ -736,8 +763,10 @@ class CMapsMixin:
         # assume self.c1 and self.c2 already set
         #self.c1, self.c2 = pick_two_colors()
         self.ui.pg1.setBackground(self.c1)
-        nchan = len(_checked_names_from_view(self.ui.tbl_desc_signals, ["CH"]))
+        sigs = _checked_names_from_view(self.ui.tbl_desc_signals, ["CH"])
+        nchan = len(sigs)
         self.colors = [self.c2] * nchan
+        self.colors = self._update_pp_signal_cols(self.colors, sigs)
         anns = _checked_names_from_view(self.ui.tbl_desc_annots, ["ANNOT", "CLASS"])
         nanns = len( anns )
         self.acolors = [self.c2] * nanns
@@ -756,6 +785,7 @@ class CMapsMixin:
         nchan = len( chs )
         # set signal colors
         self.colors = override_colors(self.colors, chs, self.cmap)
+        self.colors = self._update_pp_signal_cols(self.colors, chs)
         # and annots
         anns = _checked_names_from_view(self.ui.tbl_desc_annots, ["ANNOT", "CLASS"])
         if self.cmap_rlist:
@@ -773,6 +803,30 @@ class CMapsMixin:
                 updated.append(self.cmap[a_i])
             else:
                 updated.append(self.stgcols_hex.get(a_i, p_i))
+        return updated
+
+    def _pp_stage_from_channel(self, ch):
+        if not bool(getattr(self, "cfg_pp_style", True)):
+            return None
+        if not isinstance(ch, str) or not ch.startswith("PP_"):
+            return None
+        suffix = ch[3:]
+        if suffix in self.stgcols_hex:
+            return suffix
+        return None
+
+    def _update_pp_signal_cols(self, pal, chs):
+        updated = []
+        explicit = getattr(self, "cmap", {})
+        for ch_i, p_i in zip(chs, pal):
+            if ch_i in explicit:
+                updated.append(explicit[ch_i])
+                continue
+            stage = self._pp_stage_from_channel(ch_i)
+            if stage is not None:
+                updated.append(self.stgcols_hex.get(stage, p_i))
+            else:
+                updated.append(p_i)
         return updated
 
     
@@ -819,6 +873,10 @@ class CMapsMixin:
         lw = float(getattr(self, "cfg_line_weight", 1.0))
         for c, col in zip(self.curves, self.colors):
             c.setPen(pg.mkPen(col, width=lw, cosmetic=True))
+        for c, col in zip(getattr(self, "fill_curves", []), self.colors):
+            qcolor = pg.mkColor(col)
+            qcolor.setAlpha(48)
+            c.setBrush(pg.mkBrush(qcolor))
         for c, col in zip(self.sigmod_curves, self.sigmod_curve_colors):
             c.setPen(pg.mkPen(col, width=lw, cosmetic=True))
         for c, col in zip(self.annot_curves, self.acolors):

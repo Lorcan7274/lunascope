@@ -148,12 +148,12 @@ class TutorialMixin:
             return
 
         # ── 5. Find s.lst ─────────────────────────────────────────────
-        matches = list(dest_path.rglob("s.lst"))
+        matches = list(tutorial_subdir.rglob("s.lst"))
         if not matches:
             QMessageBox.information(
                 self.ui,
                 "Tutorial Downloaded",
-                f"Tutorial extracted to:\n{dest_path}\n\n"
+                f"Tutorial extracted to:\n{tutorial_subdir}\n\n"
                 "No s.lst sample-list file was found in the archive.",
             )
             return
@@ -170,14 +170,14 @@ class TutorialMixin:
             QMessageBox.information(
                 self.ui,
                 "Tutorial Downloaded",
-                f"Tutorial extracted to:\n{dest_path}\n\n"
+                f"Tutorial extracted to:\n{tutorial_subdir}\n\n"
                 f"Sample list loaded from:\n{slist_path}",
             )
         except Exception as exc:
             QMessageBox.warning(
                 self.ui,
                 "Tutorial Downloaded",
-                f"Tutorial extracted to:\n{dest_path}\n\n"
+                f"Tutorial extracted to:\n{tutorial_subdir}\n\n"
                 f"s.lst found at:\n{slist_path}\n\n"
                 f"Could not load it automatically:\n{exc}",
             )

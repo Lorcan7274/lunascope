@@ -93,7 +93,14 @@ def get_annot_color(cls: str, classes: List[str]) -> str:
 # Cohort compilation
 # ---------------------------------------------------------------------------
 
-def compile_cohort(proj, ids: List[str], exclude_classes=None, progress_cb=None) -> dict:
+def compile_cohort(
+    proj,
+    ids: List[str],
+    exclude_classes=None,
+    progress_cb=None,
+    current_instance=None,
+    current_id: Optional[str] = None,
+) -> dict:
     """Iterate over *ids* and collect annotation events from each subject.
 
     Designed to run in a background thread.  Modifies the project's current
@@ -119,12 +126,17 @@ def compile_cohort(proj, ids: List[str], exclude_classes=None, progress_cb=None)
     subjects = []
     all_classes: set = set()
 
+    live_id = str(current_id) if current_id is not None else None
+
     for id_str in ids:
-        try:
-            p = proj.inst(id_str)
-        except Exception as e:
-            print(f"[AnnotExplorer] Cannot attach {id_str!r}: {e}")
-            continue
+        if current_instance is not None and live_id is not None and str(id_str) == live_id:
+            p = current_instance
+        else:
+            try:
+                p = proj.inst(id_str)
+            except Exception as e:
+                print(f"[AnnotExplorer] Cannot attach {id_str!r}: {e}")
+                continue
 
         # ---- recording duration ----------------------------------------
         dur = 0.0

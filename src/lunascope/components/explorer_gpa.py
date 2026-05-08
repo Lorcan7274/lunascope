@@ -42,6 +42,7 @@ import zipfile
 
 import numpy as np
 import pandas as pd
+from scipy import special, stats
 
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import Qt, QTimer, QSortFilterProxyModel, QRegularExpression
@@ -131,6 +132,25 @@ def _coerce_numeric_series(series):
     return pd.to_numeric(series, errors="coerce")
 
 
+def _binary_level_values(values, atol: float = 1e-8, rtol: float = 1e-8):
+    """Return the low/high levels if *values* are effectively binary, else None."""
+    arr = np.asarray(values, dtype=float)
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return None
+    uniq = np.unique(arr)
+    if uniq.size < 2:
+        return None
+    lo = float(np.min(uniq))
+    hi = float(np.max(uniq))
+    if np.isclose(lo, hi, atol=atol, rtol=rtol):
+        return None
+    mask = np.isclose(arr, lo, atol=atol, rtol=rtol) | np.isclose(arr, hi, atol=atol, rtol=rtol)
+    if not np.all(mask):
+        return None
+    return lo, hi
+
+
 class _GpaResultsSortProxy(QSortFilterProxyModel):
     """Sort GPA result columns numerically whenever numeric sort data exists."""
 
@@ -203,6 +223,207 @@ def _rtables_to_dfs(raw):
             df = pd.DataFrame(data).T
             df.columns = cols
             out[key] = df
+    return out
+
+
+def _unique_preserve(values):
+    seen = set()
+    out = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+    return out
+
+
+def _fmt_float(value):
+    try:
+        if value is None or np.isnan(value):
+            return ""
+    except TypeError:
+        pass
+    return f"{float(value):.4g}"
+
+
+def _rank_select_predictors(df: pd.DataFrame, names, roles):
+    """Keep the largest stable full-rank subset, preserving input order."""
+    kept_names = []
+    kept_roles = []
+    kept_cols = []
+    dropped = []
+    current = np.ones((len(df), 1), dtype=float)
+    current_rank = np.linalg.matrix_rank(current)
+
+    for name, role in zip(names, roles):
+        col = pd.to_numeric(df[name], errors="coerce").to_numpy(dtype=float)
+        if len(col) == 0 or np.nanstd(col) <= 1e-12:
+            dropped.append((name, "constant"))
+            continue
+        trial = np.column_stack([current, col])
+        trial_rank = np.linalg.matrix_rank(trial)
+        if trial_rank <= current_rank:
+            dropped.append((name, "collinear"))
+            continue
+        kept_names.append(name)
+        kept_roles.append(role)
+        kept_cols.append(col)
+        current = trial
+        current_rank = trial_rank
+
+    return kept_names, kept_roles, kept_cols, dropped
+
+
+def _fit_linear_terms(y, design):
+    n_obs, n_terms = design.shape
+    if n_obs <= n_terms:
+        raise ValueError("Need more complete cases than model parameters for linear regression.")
+    beta, *_ = np.linalg.lstsq(design, y, rcond=None)
+    resid = y - design @ beta
+    dof = n_obs - n_terms
+    rss = float(np.dot(resid, resid))
+    sigma2 = rss / max(dof, 1)
+    xtx_inv = np.linalg.pinv(design.T @ design)
+    se = np.sqrt(np.clip(np.diag(sigma2 * xtx_inv), 0.0, None))
+    stat = np.divide(beta, se, out=np.full_like(beta, np.nan), where=se > 0)
+    pvals = 2.0 * stats.t.sf(np.abs(stat), dof)
+    return {
+        "coef": beta,
+        "se": se,
+        "stat": stat,
+        "p": pvals,
+        "stat_label": "T",
+        "model_type": "linear",
+    }
+
+
+def _fit_logistic_terms(y, design, max_iter=100, tol=1e-8):
+    n_obs, n_terms = design.shape
+    if n_obs <= n_terms:
+        raise ValueError("Need more complete cases than model parameters for logistic regression.")
+
+    beta = np.zeros(n_terms, dtype=float)
+    converged = False
+    hess = None
+
+    for _ in range(max_iter):
+        eta = design @ beta
+        p = np.clip(special.expit(eta), 1e-8, 1 - 1e-8)
+        w = np.clip(p * (1 - p), 1e-8, None)
+        z = eta + (y - p) / w
+        xtw = design.T * w
+        hess = xtw @ design
+        rhs = xtw @ z
+        beta_new = np.linalg.pinv(hess) @ rhs
+        if np.max(np.abs(beta_new - beta)) < tol:
+            beta = beta_new
+            converged = True
+            break
+        beta = beta_new
+
+    if not converged:
+        raise ValueError("Logistic regression did not converge.")
+
+    cov = np.linalg.pinv(hess)
+    se = np.sqrt(np.clip(np.diag(cov), 0.0, None))
+    stat = np.divide(beta, se, out=np.full_like(beta, np.nan), where=se > 0)
+    pvals = 2.0 * stats.norm.sf(np.abs(stat))
+    return {
+        "coef": beta,
+        "se": se,
+        "stat": stat,
+        "p": pvals,
+        "stat_label": "Z",
+        "model_type": "logistic",
+    }
+
+
+def _fit_joint_model_frame(df: pd.DataFrame, x_var: str, y_vars, z_vars):
+    """Fit X ~ Y + Z from an already-fetched raw GPA data slice."""
+    y_vars = _unique_preserve([str(v) for v in y_vars if str(v).strip()])
+    z_vars = _unique_preserve([str(v) for v in z_vars if str(v).strip()])
+    requested = _unique_preserve([x_var] + y_vars + z_vars)
+
+    missing_cols = [col for col in requested if col not in df.columns]
+    out = {
+        "table": pd.DataFrame(columns=["TERM", "ROLE", "BETA", "SE", "STAT", "P"]),
+        "warnings": [],
+        "active_y": list(y_vars),
+        "active_z": list(z_vars),
+        "x_var": x_var,
+        "n_complete": 0,
+        "n_total": int(len(df)),
+        "model_type": "",
+        "binary_labels": None,
+        "missing_cols": missing_cols,
+    }
+    if missing_cols:
+        out["warnings"].append("Missing columns: " + ", ".join(missing_cols[:6]))
+
+    if x_var not in df.columns:
+        out["error"] = f"Missing dependent variable: {x_var}"
+        return out
+
+    use_cols = [col for col in requested if col in df.columns]
+    work = df[use_cols].copy()
+    for col in use_cols:
+        work[col] = pd.to_numeric(work[col], errors="coerce")
+    work = work.dropna()
+    out["n_complete"] = int(len(work))
+    if work.empty:
+        out["error"] = "No complete cases available for the current X/Y/Z set."
+        return out
+
+    x_vals = work[x_var].to_numpy(dtype=float)
+    binary_levels = _binary_level_values(x_vals)
+    is_binary = binary_levels is not None
+    if is_binary:
+        lo, hi = binary_levels
+        y_target = np.isclose(x_vals, hi, atol=1e-8, rtol=1e-8).astype(float)
+        out["binary_labels"] = (lo, hi)
+    else:
+        y_target = x_vals
+
+    term_names = []
+    term_roles = []
+    for role, values in (("Y", y_vars), ("Z", z_vars)):
+        for value in values:
+            if value == x_var or value not in work.columns:
+                continue
+            term_names.append(value)
+            term_roles.append(role)
+
+    kept_names, kept_roles, kept_cols, dropped = _rank_select_predictors(work, term_names, term_roles)
+    for name, why in dropped:
+        out["warnings"].append(f"Dropped {name} ({why})")
+
+    if not kept_names:
+        out["error"] = "No usable predictors remain after filtering missing or collinear terms."
+        return out
+
+    design = np.column_stack([np.ones(len(work), dtype=float)] + kept_cols)
+    try:
+        if is_binary:
+            fit = _fit_logistic_terms(y_target, design)
+        else:
+            fit = _fit_linear_terms(y_target, design)
+    except ValueError as exc:
+        out["error"] = str(exc)
+        return out
+
+    terms = ["Intercept"] + kept_names
+    roles = ["Intercept"] + kept_roles
+    stat_label = fit["stat_label"]
+    out["table"] = pd.DataFrame({
+        "TERM": terms,
+        "ROLE": roles,
+        "BETA": fit["coef"],
+        "SE": fit["se"],
+        "STAT": fit["stat"],
+        "P": fit["p"],
+    })
+    out["stat_label"] = stat_label
+    out["model_type"] = fit["model_type"]
     return out
 
 
@@ -391,6 +612,11 @@ class _VarPicker(QWidget):
         hdr.setContentsMargins(0, 0, 0, 0)
         lbl = QLabel(f"<b>{label}</b>")
         lbl.setStyleSheet(f"color:{FG}; font-size:11px;")
+        self._summary_lbl = QLabel("")
+        self._summary_lbl.setStyleSheet(f"color:#888; font-size:10px;")
+        self._summary_lbl.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self._summary_lbl.setMinimumWidth(0)
+        self._summary_lbl.setWordWrap(True)
         self._grp_combo = QComboBox()
         self._grp_combo.setFixedWidth(110)
         self._grp_combo.setToolTip("Filter by group")
@@ -423,6 +649,7 @@ class _VarPicker(QWidget):
         self._list.itemChanged.connect(self._on_item_changed)
 
         layout.addLayout(hdr)
+        layout.addWidget(self._summary_lbl)
         layout.addWidget(self._search)
         layout.addWidget(self._list, 1)
 
@@ -430,6 +657,9 @@ class _VarPicker(QWidget):
         btn_none.clicked.connect(self._clear_all)
         self._grp_combo.currentIndexChanged.connect(self._refilter)
         self._search.textChanged.connect(self._refilter)
+
+    def set_summary(self, text: str):
+        self._summary_lbl.setText(text or "")
 
     # ------------------------------------------------------------------
 
@@ -646,7 +876,8 @@ class GPATab(_ExplorerTab):
         self._col_assignments: dict = {}
         # entries currently displayed in the column table
         self._col_table_path: str | None = None
-        # rendered sub-table (X_Y, VAR, or X depending on GPA mode)
+        # currently displayed GPA results table
+        self._results_table_key: str | None = None
         self._active_result_df: pd.DataFrame | None = None
         # manifest and results proxy models
         self._manifest_proxy: QSortFilterProxyModel | None = None
@@ -661,6 +892,12 @@ class GPATab(_ExplorerTab):
         # Z variables from the most recent gpa_run (for partial scatter)
         self._last_gpa_z: list = []
         self._last_gpa_request: dict = {}
+        self._joint_mode = False
+        self._joint_fit_gen = 0
+        self._joint_xvar: str = ""
+        self._joint_yvars: list[str] = []
+        self._joint_zvars: list[str] = []
+        self._joint_result: dict | None = None
 
         self._render_timer = QTimer(self)
         self._render_timer.setSingleShot(True)
@@ -912,10 +1149,6 @@ class GPATab(_ExplorerTab):
         dat_row.addWidget(btn_dat_open); dat_row.addWidget(self._load_manifest_btn)
         lay.addLayout(dat_row)
 
-        self._desc_lbl = QLabel("")
-        self._desc_lbl.setStyleSheet(f"color:#888; font-size:10px;")
-        lay.addWidget(self._desc_lbl)
-
         # Variable pickers
         self._picker_x = _VarPicker("X  predictors")
         self._picker_y = _VarPicker("Y  outcomes")
@@ -1062,6 +1295,9 @@ class GPATab(_ExplorerTab):
         )
         self._analyze_status = QLabel("")
         self._analyze_status.setStyleSheet(f"color:#888; font-size:11px;")
+        self._analyze_status.setWordWrap(True)
+        self._analyze_status.setMaximumHeight(32)
+        self._analyze_status.setMinimumWidth(0)
         self._analyze_status.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         run_row.addWidget(self._run_btn)
         run_row.addWidget(self._analyze_status, 1)
@@ -1131,11 +1367,9 @@ class GPATab(_ExplorerTab):
         self._results_filter.setPlaceholderText("filter…")
         self._results_filter.setClearButtonEnabled(True)
         self._results_filter.setFixedWidth(150)
-        self._results_table_combo = QComboBox()
-        self._results_table_combo.setMinimumWidth(140)
         btn_export_r = QPushButton("Export…"); btn_export_r.setFixedWidth(70)
         hdr.addWidget(lbl)
-        hdr.addWidget(self._results_table_combo, 1)
+        hdr.addStretch(1)
         hdr.addWidget(self._results_filter)
         hdr.addWidget(btn_export_r)
         lay.addLayout(hdr)
@@ -1164,16 +1398,19 @@ class GPATab(_ExplorerTab):
         toggle_row.setContentsMargins(4, 2, 4, 0)
         self._scatter_raw_btn     = QPushButton("Raw")
         self._scatter_partial_btn = QPushButton("Partial")
-        for btn in (self._scatter_raw_btn, self._scatter_partial_btn):
+        self._joint_mode_btn      = QPushButton("Joint")
+        for btn in (self._scatter_raw_btn, self._scatter_partial_btn, self._joint_mode_btn):
             btn.setCheckable(True)
             btn.setFixedWidth(64)
             btn.setStyleSheet(
                 "QPushButton { padding:2px 6px; font-size:10px; border:1px solid #333; }"
                 "QPushButton:checked { background:#1e3a5f; color:#fff; border-color:#4cc9f0; }")
         self._scatter_raw_btn.setChecked(True)
-        toggle_row.addWidget(QLabel("Scatter:"))
+        self._joint_mode_btn.setEnabled(False)
+        toggle_row.addWidget(QLabel("View:"))
         toggle_row.addWidget(self._scatter_raw_btn)
         toggle_row.addWidget(self._scatter_partial_btn)
+        toggle_row.addWidget(self._joint_mode_btn)
         toggle_row.addStretch(1)
         self._scatter_toggle_widget = QWidget()
         self._scatter_toggle_widget.setLayout(toggle_row)
@@ -1186,7 +1423,11 @@ class GPATab(_ExplorerTab):
         canvas_host.layout().setContentsMargins(0, 0, 0, 0)
         canvas_host.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._canvas_host = canvas_host
-        canvas_outer_lay.addWidget(canvas_host, 1)
+        self._joint_host = self._build_joint_panel()
+        self._viz_stack = QStackedWidget()
+        self._viz_stack.addWidget(canvas_host)
+        self._viz_stack.addWidget(self._joint_host)
+        canvas_outer_lay.addWidget(self._viz_stack, 1)
 
         rsplit.addWidget(self._results_view)
         rsplit.addWidget(canvas_outer)
@@ -1196,14 +1437,78 @@ class GPATab(_ExplorerTab):
 
         btn_export_r.clicked.connect(
             lambda: save_table_as_tsv(self._results_view, self))
-        self._results_table_combo.currentIndexChanged.connect(
-            self._on_results_table_changed)
         self._results_filter.textChanged.connect(self._apply_results_filter)
         self._results_view.clicked.connect(self._on_result_row_clicked)
         self._scatter_raw_btn.clicked.connect(
             lambda: self._on_scatter_toggle(partial=False))
         self._scatter_partial_btn.clicked.connect(
             lambda: self._on_scatter_toggle(partial=True))
+        self._joint_mode_btn.clicked.connect(self._on_joint_mode_toggled)
+
+        return frame
+
+    def _build_joint_panel(self):
+        frame = QFrame()
+        frame.setFrameShape(QFrame.NoFrame)
+        lay = QVBoxLayout(frame)
+        lay.setContentsMargins(4, 4, 4, 4)
+        lay.setSpacing(4)
+
+        self._joint_status_lbl = QLabel("Joint model unavailable.")
+        self._joint_status_lbl.setWordWrap(True)
+        self._joint_status_lbl.setStyleSheet(f"color:{FG}; font-size:11px;")
+        lay.addWidget(self._joint_status_lbl)
+
+        action_row = QHBoxLayout()
+        self._joint_add_btn = QPushButton("Add selected Y")
+        self._joint_remove_btn = QPushButton("Remove selected Y")
+        self._joint_clear_btn = QPushButton("Clear Y")
+        self._joint_export_btn = QPushButton("Export…")
+        for btn in (self._joint_add_btn, self._joint_remove_btn, self._joint_clear_btn, self._joint_export_btn):
+            btn.setFixedHeight(24)
+        action_row.addWidget(self._joint_add_btn)
+        action_row.addWidget(self._joint_remove_btn)
+        action_row.addWidget(self._joint_clear_btn)
+        action_row.addStretch(1)
+        action_row.addWidget(self._joint_export_btn)
+        lay.addLayout(action_row)
+
+        mid = QSplitter(Qt.Horizontal)
+        mid.setHandleWidth(4)
+
+        y_frame = QFrame()
+        y_lay = QVBoxLayout(y_frame)
+        y_lay.setContentsMargins(0, 0, 0, 0)
+        y_lay.setSpacing(3)
+        y_lay.addWidget(QLabel("Active Y Predictors"))
+        self._joint_y_list = QListWidget()
+        self._joint_y_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        y_lay.addWidget(self._joint_y_list, 1)
+
+        coef_frame = QFrame()
+        coef_lay = QVBoxLayout(coef_frame)
+        coef_lay.setContentsMargins(0, 0, 0, 0)
+        coef_lay.setSpacing(3)
+        coef_lay.addWidget(QLabel("Coefficients"))
+        self._joint_table = QTableView()
+        self._joint_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._joint_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self._joint_table.setAlternatingRowColors(True)
+        self._joint_table.verticalHeader().setVisible(False)
+        self._joint_table.horizontalHeader().setStretchLastSection(True)
+        coef_lay.addWidget(self._joint_table, 1)
+
+        mid.addWidget(y_frame)
+        mid.addWidget(coef_frame)
+        mid.setSizes([220, 520])
+        lay.addWidget(mid, 1)
+
+        self._joint_add_btn.clicked.connect(self._joint_add_selected_y)
+        self._joint_remove_btn.clicked.connect(self._joint_remove_selected_y)
+        self._joint_clear_btn.clicked.connect(self._joint_clear_y)
+        self._joint_export_btn.clicked.connect(
+            lambda: save_table_as_tsv(self._joint_table, self))
+        self._joint_y_list.itemSelectionChanged.connect(self._update_joint_action_buttons)
 
         return frame
 
@@ -1882,7 +2187,9 @@ class GPATab(_ExplorerTab):
         if overlaps:
             self._clear_results_display()
             self._analyze_status.setText("Invalid selection: overlapping X/Y/Z variables.")
-            self._desc_lbl.setText("  ·  ".join(overlaps))
+            self._picker_x.set_summary(overlaps[0] if overlaps else "")
+            self._picker_y.set_summary(overlaps[1] if len(overlaps) > 1 else "")
+            self._picker_z.set_summary(overlaps[2] if len(overlaps) > 2 else "")
             QtWidgets.QMessageBox.warning(
                 self._root, "GPA",
                 "A variable cannot be selected in more than one of X, Y, and Z.\n\n"
@@ -1896,6 +2203,9 @@ class GPATab(_ExplorerTab):
             "x_count": len(x_bases),
             "y_count": len(y_bases),
             "z_count": len(z_bases),
+            "x_vars": list(x_vars),
+            "y_vars": list(y_vars),
+            "z_vars": list(z_vars),
             "x_long_count": len(x_vars),
             "y_long_count": len(y_vars),
             "z_long_count": len(z_vars),
@@ -1904,6 +2214,7 @@ class GPATab(_ExplorerTab):
             "x_n": self._selection_n_summary(x_vars),
             "y_n": self._selection_n_summary(y_vars),
             "z_n": self._selection_n_summary(z_vars),
+            "opts": dict(request["opts"]),
         }
         if not self._start_work("Running GPA…"):
             return
@@ -2222,31 +2533,29 @@ class GPATab(_ExplorerTab):
         return f"N={lo}–{hi}"
 
     def _update_selection_desc(self):
-        """Summarize selected variables and their manifest non-missing counts."""
-        parts = []
+        """Summarize selected variables inline beside each picker header."""
+        for picker in (self._picker_x, self._picker_y, self._picker_z):
+            picker.set_summary("")
         for label, picker in (("X", self._picker_x), ("Y", self._picker_y), ("Z", self._picker_z)):
             bases = picker.selected()
             longs = picker.selected_long_names()
             if not bases:
                 continue
             n_txt = self._selection_n_summary(longs)
-            part = f"{label}: {len(bases)} base"
+            part = f"{len(bases)} base"
             if len(bases) != 1:
                 part += "s"
             if longs:
                 part += f", {len(longs)} long"
             if n_txt:
                 part += f" ({n_txt})"
-            parts.append(part)
-        self._desc_lbl.setText("  ·  ".join(parts) if parts else "")
+            picker.set_summary(part)
 
     def _clear_results_display(self):
         """Clear any stale GPA results and plots before/after a run."""
         self._results_dfs = {}
+        self._results_table_key = None
         self._active_result_df = None
-        self._results_table_combo.blockSignals(True)
-        self._results_table_combo.clear()
-        self._results_table_combo.blockSignals(False)
         self._results_view.setModel(None)
         self._results_proxy = None
         self._render_timer.stop()
@@ -2256,48 +2565,328 @@ class GPATab(_ExplorerTab):
         self._scatter_raw_btn.setChecked(True)
         self._scatter_partial_btn.setChecked(False)
         self._scatter_partial_btn.setEnabled(True)
+        self._joint_mode_btn.setChecked(False)
+        self._joint_mode_btn.setEnabled(False)
+        self._joint_mode = False
+        self._joint_fit_gen += 1
+        self._joint_xvar = ""
+        self._joint_yvars = []
+        self._joint_zvars = []
+        self._joint_result = None
+        self._joint_y_list.clear()
+        self._joint_table.setModel(None)
+        self._joint_status_lbl.setText("Joint model unavailable.")
+        self._update_joint_action_buttons()
+        if hasattr(self, "_viz_stack"):
+            self._viz_stack.setCurrentIndex(0)
         if self._canvas is not None:
             fig = self._canvas.figure
             fig.clear()
             self._canvas.draw()
 
     def _show_gpa_diagnostics(self, diag):
-        """Mirror the most useful empty-run diagnostics in the small summary line."""
+        """Mirror useful empty-run diagnostics inline with the X/Y/Z pickers."""
+        for picker in (self._picker_x, self._picker_y, self._picker_z):
+            picker.set_summary("")
         if not diag:
             return
-        bits = []
         joint_n = diag.get("joint_n")
         row_n = diag.get("row_n")
+        joint_txt = ""
         if joint_n is not None:
-            bits.append(
-                f"joint complete-case N={joint_n}/{row_n}" if row_n is not None else f"joint complete-case N={joint_n}"
+            joint_txt = (
+                f"cc N={joint_n}/{row_n}" if row_n is not None else f"cc N={joint_n}"
             )
-        for key in ("X∩Y", "X∩Z", "Y∩Z"):
-            vals = (diag.get("overlap") or {}).get(key) or []
-            if vals:
-                bits.append(f"{key}: {', '.join(vals[:3])}")
-        for key in ("X", "Y", "Z"):
-            vals = (diag.get("constant") or {}).get(key) or []
-            if vals:
-                bits.append(f"{key} const: {', '.join(vals[:3])}")
-        self._desc_lbl.setText("  ·  ".join(bits))
+        overlap = diag.get("overlap") or {}
+        constant = diag.get("constant") or {}
+        self._picker_x.set_summary(
+            "  ·  ".join(
+                txt for txt in [
+                    joint_txt,
+                    f"∩Y: {', '.join((overlap.get('X∩Y') or [])[:2])}" if overlap.get("X∩Y") else "",
+                    f"∩Z: {', '.join((overlap.get('X∩Z') or [])[:2])}" if overlap.get("X∩Z") else "",
+                    f"const: {', '.join((constant.get('X') or [])[:2])}" if constant.get("X") else "",
+                ] if txt
+            )
+        )
+        self._picker_y.set_summary(
+            "  ·  ".join(
+                txt for txt in [
+                    f"∩X: {', '.join((overlap.get('X∩Y') or [])[:2])}" if overlap.get("X∩Y") else "",
+                    f"∩Z: {', '.join((overlap.get('Y∩Z') or [])[:2])}" if overlap.get("Y∩Z") else "",
+                    f"const: {', '.join((constant.get('Y') or [])[:2])}" if constant.get("Y") else "",
+                ] if txt
+            )
+        )
+        self._picker_z.set_summary(
+            "  ·  ".join(
+                txt for txt in [
+                    f"∩X: {', '.join((overlap.get('X∩Z') or [])[:2])}" if overlap.get("X∩Z") else "",
+                    f"∩Y: {', '.join((overlap.get('Y∩Z') or [])[:2])}" if overlap.get("Y∩Z") else "",
+                    f"const: {', '.join((constant.get('Z') or [])[:2])}" if constant.get("Z") else "",
+                ] if txt
+            )
+        )
 
     # ======================================================================
     # Results
     # ======================================================================
 
+    def _joint_mode_available(self):
+        req = self._last_gpa_request or {}
+        return (
+            req.get("mode") == "assoc"
+            and len(req.get("x_vars") or []) == 1
+            and self._active_result_df is not None
+            and not self._active_result_df.empty
+            and {"X", "Y"}.issubset(self._active_result_df.columns)
+        )
+
+    def _selected_result_yvars(self):
+        proxy = self._results_proxy
+        if proxy is None or proxy.sourceModel() is None:
+            return []
+        selection = self._results_view.selectionModel()
+        if selection is None:
+            return []
+        model = proxy.sourceModel()
+        headers = [str(model.headerData(c, Qt.Horizontal) or "") for c in range(model.columnCount())]
+        if "Y" not in headers:
+            return []
+        y_col = headers.index("Y")
+        x_col = headers.index("X") if "X" in headers else -1
+        want_x = self._joint_xvar or ((self._last_gpa_request or {}).get("x_vars") or [""])[0]
+        out = []
+        for idx in selection.selectedRows():
+            src = proxy.mapToSource(idx)
+            if not src.isValid():
+                continue
+            if x_col >= 0 and want_x:
+                row_x = model.item(src.row(), x_col).text()
+                if row_x != want_x:
+                    continue
+            y_val = model.item(src.row(), y_col).text()
+            if y_val:
+                out.append(y_val)
+        return _unique_preserve(out)
+
+    def _update_joint_controls_visibility(self):
+        show = self._joint_mode_available() or self._joint_mode or self._scatter_mode
+        self._scatter_toggle_widget.setVisible(show)
+        self._joint_mode_btn.setEnabled(self._joint_mode_available())
+        if not self._joint_mode_available() and not self._joint_mode:
+            self._joint_mode_btn.setChecked(False)
+
+    def _update_joint_action_buttons(self):
+        has_selection = bool(self._selected_result_yvars())
+        has_active = bool(self._joint_yvars)
+        self._joint_add_btn.setEnabled(self._joint_mode and has_selection)
+        self._joint_remove_btn.setEnabled(
+            self._joint_mode and (has_selection or bool(self._joint_y_list.selectedItems()))
+        )
+        self._joint_clear_btn.setEnabled(self._joint_mode and has_active)
+        joint_model = self._joint_table.model()
+        self._joint_export_btn.setEnabled(
+            self._joint_mode and joint_model is not None and joint_model.rowCount() > 0
+        )
+
+    def _set_joint_active_y_list(self):
+        self._joint_y_list.clear()
+        for y_val in self._joint_yvars:
+            self._joint_y_list.addItem(y_val)
+        self._update_joint_action_buttons()
+
+    def _render_joint_table(self, df):
+        model = QStandardItemModel(len(df), len(df.columns), self)
+        model.setHorizontalHeaderLabels(list(df.columns))
+        for r in range(len(df)):
+            row = df.iloc[r]
+            for c, col in enumerate(df.columns):
+                raw_val = row.iloc[c]
+                if isinstance(raw_val, (float, np.floating)):
+                    text = _fmt_float(raw_val)
+                else:
+                    text = "" if pd.isna(raw_val) else str(raw_val)
+                item = QStandardItem(text)
+                if isinstance(raw_val, (int, float, np.integer, np.floating)) and not pd.isna(raw_val):
+                    item.setData(float(raw_val), Qt.UserRole)
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                model.setItem(r, c, item)
+        proxy = _GpaResultsSortProxy(self)
+        proxy.setSourceModel(model)
+        self._joint_table.setModel(proxy)
+        self._joint_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self._joint_table.horizontalHeader().setStretchLastSection(True)
+
+    def _joint_status_text(self, result):
+        if result is None:
+            return "Joint model unavailable."
+        bits = []
+        if result.get("model_type"):
+            bits.append(result["model_type"].title())
+        if result.get("x_var"):
+            bits.append(f"X={result['x_var']}")
+        if result.get("binary_labels"):
+            bits.append("binary")
+        bits.append(f"N={result.get('n_complete', 0)}")
+        bits.append(f"Y={len(self._joint_yvars)}")
+        bits.append(f"Z={len(self._joint_zvars)}")
+        warnings = result.get("warnings") or []
+        if warnings:
+            bits.append("; ".join(warnings[:3]))
+        if result.get("error"):
+            bits.append(result["error"])
+        return "  ·  ".join(bits)
+
+    def _joint_dump_filters(self):
+        opts = dict((self._last_gpa_request or {}).get("opts") or {})
+        keep = {}
+        for key in ("subset", "inc-ids", "ex-ids", "n-prop", "n-req", "knn", "winsor"):
+            if key in opts and opts[key] not in (None, ""):
+                keep[key] = opts[key]
+        return keep
+
+    def _start_joint_fit(self):
+        self._joint_fit_gen += 1
+        gen = self._joint_fit_gen
+        self._joint_result = None
+        self._joint_status_lbl.setText(
+            f"Fitting joint model… X={self._joint_xvar}  ·  Y={len(self._joint_yvars)}  ·  Z={len(self._joint_zvars)}"
+        )
+        self._joint_table.setModel(None)
+        dat_path = self._dat_edit.text().strip()
+        y_vars = list(self._joint_yvars)
+        z_vars = list(self._joint_zvars)
+        dump_filters = self._joint_dump_filters()
+        fut = self.ctrl._exec.submit(
+            self._joint_model_worker, dat_path, self._joint_xvar, y_vars, z_vars, dump_filters
+        )
+        def _done(_f=fut, _gen=gen):
+            try:
+                result = _f.result()
+                if _gen == self._joint_fit_gen and self._joint_mode:
+                    self._sig_ok.emit({"type": "joint", "result": result})
+            except Exception as exc:
+                if _gen == self._joint_fit_gen and self._joint_mode:
+                    self._sig_ok.emit({
+                        "type": "joint",
+                        "result": {
+                            "table": pd.DataFrame(columns=["TERM", "ROLE", "BETA", "SE", "STAT", "P"]),
+                            "warnings": [],
+                            "active_y": list(y_vars),
+                            "active_z": list(z_vars),
+                            "x_var": self._joint_xvar,
+                            "n_complete": 0,
+                            "n_total": 0,
+                            "model_type": "",
+                            "error": str(exc),
+                        },
+                    })
+        fut.add_done_callback(_done)
+
+    def _ensure_joint_mode(self, seed_from_selection=False):
+        if not self._joint_mode_available():
+            return False
+        if not self._joint_mode:
+            req = self._last_gpa_request or {}
+            self._joint_mode = True
+            self._joint_xvar = (req.get("x_vars") or [""])[0]
+            self._joint_zvars = list(req.get("z_vars") or [])
+            self._joint_yvars = []
+            self._joint_mode_btn.setChecked(True)
+            self._scatter_raw_btn.setChecked(False)
+            self._scatter_partial_btn.setChecked(False)
+            self._viz_stack.setCurrentIndex(1)
+        if seed_from_selection:
+            self._joint_yvars = _unique_preserve(self._joint_yvars + self._selected_result_yvars())
+        self._set_joint_active_y_list()
+        self._update_joint_controls_visibility()
+        self._update_joint_action_buttons()
+        if self._joint_yvars or self._joint_zvars:
+            self._start_joint_fit()
+        else:
+            self._joint_table.setModel(None)
+            self._joint_status_lbl.setText(
+                f"Joint mode active for X={self._joint_xvar}. Add one or more Y rows to fit X ~ Y + Z."
+            )
+        return True
+
+    def _leave_joint_mode(self):
+        self._joint_mode = False
+        self._joint_mode_btn.setChecked(False)
+        if hasattr(self, "_viz_stack"):
+            self._viz_stack.setCurrentIndex(0)
+        self._update_joint_controls_visibility()
+        self._update_joint_action_buttons()
+        if self._scatter_xvar and self._scatter_yvar:
+            partial = bool(self._last_gpa_z) and self._scatter_partial_btn.isChecked()
+            self._request_scatter(self._scatter_xvar, self._scatter_yvar, partial=partial)
+        else:
+            self._render_timer.start()
+
+    def _on_joint_mode_toggled(self, checked):
+        if checked:
+            if not self._ensure_joint_mode(seed_from_selection=True):
+                self._joint_mode_btn.setChecked(False)
+        else:
+            self._leave_joint_mode()
+
+    def _joint_add_selected_y(self):
+        if not self._ensure_joint_mode(seed_from_selection=False):
+            return
+        selected = self._selected_result_yvars()
+        if not selected:
+            self._update_joint_action_buttons()
+            return
+        new_y = _unique_preserve(self._joint_yvars + selected)
+        if new_y == self._joint_yvars:
+            self._update_joint_action_buttons()
+            return
+        self._joint_yvars = new_y
+        self._set_joint_active_y_list()
+        self._start_joint_fit()
+
+    def _joint_remove_selected_y(self):
+        if not self._joint_mode:
+            return
+        remove = set(self._selected_result_yvars())
+        remove.update(item.text() for item in self._joint_y_list.selectedItems())
+        if not remove:
+            self._update_joint_action_buttons()
+            return
+        self._joint_yvars = [y_val for y_val in self._joint_yvars if y_val not in remove]
+        self._set_joint_active_y_list()
+        if self._joint_yvars or self._joint_zvars:
+            self._start_joint_fit()
+        else:
+            self._joint_table.setModel(None)
+            self._joint_result = None
+            self._joint_status_lbl.setText(
+                f"Joint mode active for X={self._joint_xvar}. Add one or more Y rows to fit X ~ Y + Z."
+            )
+            self._update_joint_action_buttons()
+
+    def _joint_clear_y(self):
+        if not self._joint_mode:
+            return
+        self._joint_yvars = []
+        self._set_joint_active_y_list()
+        if self._joint_zvars:
+            self._start_joint_fit()
+        else:
+            self._joint_table.setModel(None)
+            self._joint_result = None
+            self._joint_status_lbl.setText(
+                f"Joint mode active for X={self._joint_xvar}. Add one or more Y rows to fit X ~ Y + Z."
+            )
+        self._update_joint_action_buttons()
+
     def _populate_results_tables(self, dfs):
         self._results_dfs = dfs
-        self._results_table_combo.blockSignals(True)
-        self._results_table_combo.clear()
-        for key in sorted(dfs.keys()):
-            self._results_table_combo.addItem(key, key)
-        self._results_table_combo.blockSignals(False)
         if dfs:
-            self._results_table_combo.setCurrentIndex(0)
-            self._on_results_table_changed(0)
+            self._show_results_table(sorted(dfs.keys())[0])
 
-    def _on_results_table_changed(self, idx):
+    def _show_results_table(self, key):
         # switching tables → exit scatter mode, return to volcano
         self._scatter_mode = False
         self._scatter_gen += 1
@@ -2306,18 +2895,25 @@ class GPATab(_ExplorerTab):
         self._scatter_partial_btn.setChecked(False)
         self._scatter_partial_btn.setEnabled(True)
         self._results_view.clearSelection()
-        key = self._results_table_combo.currentData()
+        if self._joint_mode:
+            self._leave_joint_mode()
         if not key:
             return
+        self._results_table_key = key
         df = self._results_dfs.get(key)
         if df is None or df.empty:
             return
         self._active_result_df = df
         self._fill_results_view(df)
+        self._update_joint_controls_visibility()
         self._render_timer.start()
 
     def _fill_results_view(self, df):
         df_disp = df.copy()
+        if "ID" in df_disp.columns:
+            id_vals = df_disp["ID"]
+            if id_vals.isna().all() or id_vals.astype(str).str.strip().eq("").all():
+                df_disp = df_disp.drop(columns=["ID"])
         numeric_cols = {
             col: pd.to_numeric(df_disp[col], errors="coerce")
             for col in df_disp.columns
@@ -2351,6 +2947,9 @@ class GPATab(_ExplorerTab):
         self._apply_results_filter(self._results_filter.text())
         self._results_view.selectionModel().currentRowChanged.connect(
             lambda cur, _prev: self._on_result_row_clicked(cur) if cur.isValid() else None)
+        self._results_view.selectionModel().selectionChanged.connect(
+            lambda *_: self._update_joint_action_buttons())
+        self._update_joint_action_buttons()
 
     def _apply_results_filter(self, text):
         if self._results_proxy:
@@ -2435,6 +3034,9 @@ class GPATab(_ExplorerTab):
 
     def _on_result_row_clicked(self, index):
         """User clicked a row in the results table — request a scatter plot."""
+        if self._joint_mode:
+            self._update_joint_action_buttons()
+            return
         proxy = self._results_proxy
         if proxy is None:
             return
@@ -2452,7 +3054,7 @@ class GPATab(_ExplorerTab):
         self._scatter_yvar = y_var
         # Always show toggle; disable Partial when no Z covariates available
         has_z = bool(self._last_gpa_z)
-        self._scatter_toggle_widget.setVisible(True)
+        self._update_joint_controls_visibility()
         self._scatter_partial_btn.setEnabled(has_z)
         if not has_z:
             self._scatter_raw_btn.setChecked(True)
@@ -2463,10 +3065,22 @@ class GPATab(_ExplorerTab):
 
     def _on_scatter_toggle(self, partial: bool):
         """Raw / Partial button clicked — redraw with same X, Y."""
+        if self._joint_mode:
+            self._leave_joint_mode()
         self._scatter_raw_btn.setChecked(not partial)
         self._scatter_partial_btn.setChecked(partial)
         if self._scatter_xvar and self._scatter_yvar:
             self._request_scatter(self._scatter_xvar, self._scatter_yvar, partial=partial)
+
+    @staticmethod
+    def _joint_model_worker(dat_path, x_var, y_vars, z_vars, dump_filters):
+        from lunapi import gpa_dump
+
+        cols = _unique_preserve([x_var] + list(y_vars) + list(z_vars))
+        dump_opts = dict(dump_filters or {})
+        dump_opts["lvars"] = ",".join(cols)
+        raw_df = gpa_dump(dat_path, **dump_opts)
+        return _fit_joint_model_frame(raw_df, x_var, y_vars, z_vars)
 
     def _request_scatter(self, x_var, y_var, partial=False):
         self._scatter_mode = True
@@ -2636,8 +3250,9 @@ class GPATab(_ExplorerTab):
     # ======================================================================
 
     def _on_ok(self, payload):
-        self._end_work()
         t = payload.get("type")
+        if t != "joint":
+            self._end_work()
         result = payload.get("result")
 
         if t == "prep":
@@ -2689,6 +3304,16 @@ class GPATab(_ExplorerTab):
             self._analyze_status.setText(self._format_gpa_status(tables, diag))
             self._populate_results_tables(tables)
             self._inner_tabs.setCurrentIndex(1)  # stay on Analyze
+
+        elif t == "joint":
+            self._joint_result = result
+            self._joint_status_lbl.setText(self._joint_status_text(result))
+            table = (result or {}).get("table")
+            if table is not None and not table.empty:
+                self._render_joint_table(table)
+            else:
+                self._joint_table.setModel(None)
+            self._update_joint_action_buttons()
 
     def _on_err(self, tb):
         self._end_work()

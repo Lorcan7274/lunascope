@@ -495,14 +495,19 @@ from PySide6.QtWidgets import QTableView, QToolTip
 from PySide6.QtGui import QGuiApplication, QCursor
 from PySide6.QtCore import Qt
 
+def _table_export_empty_value_settings(owner):
+    return (
+        getattr(owner, "cmap_use_na_for_empty", True),
+        getattr(owner, "cmap_na_token", "NA"),
+    )
+
 def copy_selection(
     table: QTableView,
     _self,
     with_headers: bool = True,
     show_message: bool = True ):
 
-    use_na_for_empty = _self.cmap_use_na_for_empty
-    na_token = _self.cmap_na_token
+    use_na_for_empty, na_token = _table_export_empty_value_settings(_self)
 
     sel = table.selectionModel()
     if not sel or not sel.hasSelection():
@@ -569,8 +574,7 @@ from PySide6.QtCore import Qt
 
 def save_table_as_tsv(view,_self):
 
-    use_na_for_empty = _self.cmap_use_na_for_empty
-    na_token = _self.cmap_na_token
+    use_na_for_empty, na_token = _table_export_empty_value_settings(_self)
     
     model = view.model()
     if model is None:

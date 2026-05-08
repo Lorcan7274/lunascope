@@ -1115,7 +1115,14 @@ class AnnotTab(_ExplorerTab):
             self._sig_progress.emit(done, total)
 
         fut = self.ctrl._exec.submit(
-            compile_cohort, self.ctrl.proj, ids, None, _progress_cb)
+            compile_cohort,
+            self.ctrl.proj,
+            ids,
+            None,
+            _progress_cb,
+            getattr(self.ctrl, "p", None),
+            self._saved_id,
+        )
         def _done(_f=fut):
             try:
                 self._sig_ok.emit({"type": "compile", "result": _f.result()})
