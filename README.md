@@ -6,13 +6,18 @@
 
 ---
 
-## Statement of Need
+Lunascope is a native desktop application that puts Luna's full
+analytical engine — the same one used in command-line and Python
+workflows — behind an interactive graphical interface. Signals,
+annotations, and derived outputs can be inspected, modified, and
+re-analyzed within a single session, with changes propagated
+immediately between the visual layer and the underlying data model.
 
-Computational analysis of polysomnographic (PSG) recordings has become central to sleep research, yet a practical gap exists between large-scale scripted pipelines and the detailed visual review that quality assessment and exploratory analysis require. Existing tools tend to separate signal viewing, algorithmic analysis, and cohort-scale exploration into different environments, creating friction for reproducible research.
-
-Lunascope bridges this gap. It is a native desktop application that puts Luna's full analytical engine — the same one used in command-line and Python workflows — behind an interactive graphical interface. Signals, annotations, and derived outputs can be inspected, modified, and re-analyzed within a single session, with changes propagated immediately between the visual layer and the underlying data model.
-
-Lunascope is aimed at sleep researchers, clinical scientists, and trainees who need to review PSG recordings, manage annotations, run automated staging, or explore cohort-level summaries without leaving the graphical environment — while remaining able to drop into scripted or batch analysis at any point.
+Lunascope is aimed at sleep researchers, clinical scientists, and
+trainees who need to review PSG recordings, manage annotations, run
+automated staging, or explore cohort-level summaries without leaving
+the graphical environment — while remaining able to drop into scripted
+or batch analysis at any point.
 
 ---
 
@@ -29,69 +34,6 @@ Lunascope is aimed at sleep researchers, clinical scientists, and trainees who n
 - **Command browser** — searchable Luna command and parameter reference with embedded documentation
 - **Multiday / actigraphy views** — support for EDF+D gapped recordings and long-form waveform review
 - **Session save/restore** — full application state (layout, loaded files, annotations) persists across launches
-
----
-
-## Worked Example
-
-The following shows a typical exploratory session using the Python interface (`lunapi`) alongside Lunascope, using a single EDF recording.
-
-### 1. Install and launch
-
-```bash
-pip install lunascope
-lunascope
-```
-
-### 2. Load a recording via the console
-
-Open **Console** from the View menu and enter:
-
-```
-LOAD edf /path/to/recording.edf
-LOAD annot /path/to/recording.annot
-```
-
-Or use **File → Open EDF** to load through the GUI.
-
-### 3. Run automated staging
-
-In the console:
-
-```
-POPS
-```
-
-The predicted hypnogram appears immediately in the Hypnogram dock.
-
-### 4. Inspect a spectral summary
-
-Select a channel in the signal viewer, then open **Spectral** from the View menu. The power spectrum for the current epoch is displayed and updates as you navigate.
-
-### 5. Export results
-
-```
-WRITE-ANNOTS file=out.annot
-```
-
-Or use **File → Save Annotations** to export the current annotation set.
-
-### Using `lunapi` in Python / notebooks
-
-```python
-import lunapi as lp
-
-p = lp.inst()
-p.attach_edf("/path/to/recording.edf")
-p.attach_annot("/path/to/recording.annot")
-
-# Run a Luna command and retrieve results as a DataFrame
-p.eval("PSD sig=EEG dB=T")
-df = p.table("PSD", "CH_F")
-print(df.head())
-```
-
-Full documentation, vignettes, and interactive notebooks are available at [zzz.nyspi.org/luna/](https://zzz.nyspi.org/luna/).
 
 ---
 
