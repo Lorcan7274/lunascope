@@ -1244,9 +1244,9 @@ class SignalsMixin:
         if ch in getattr(self, "cmap", {}):
             return self.cmap[ch]
         if self._channel_uses_pp_display(ch):
-            suffix = ch[3:]
-            if suffix in getattr(self, "stgcols_hex", {}):
-                return self.stgcols_hex[suffix]
+            stage = self._pp_stage_from_channel(ch)
+            if stage is not None:
+                return self.stgcols_hex.get(stage, fallback)
         return fallback
 
     def _set_signal_curve_pen(self, idx, color):
@@ -1294,6 +1294,8 @@ class SignalsMixin:
         if self.cmap_list:
             self.ss_chs = sorted( self.ss_chs, key=lambda x: (self.cmap_rlist.index(x) if x in self.cmap_rlist else len(self.cmap_rlist) + self.ss_chs.index(x)))
             self.ss_anns = sorted( self.ss_anns, key=lambda x: (self.cmap_list.index(x) if x in self.cmap_list else len(self.cmap_list) + self.ss_anns.index(x)))
+        else:
+            self.ss_chs = self._order_pp_channels( self.ss_chs )
 
         nchan = len( self.ss_chs )
 
@@ -1664,6 +1666,8 @@ class SignalsMixin:
         if self.cmap_list:
             chs = sorted( chs, key=lambda x: (self.cmap_list.index(x) if x in self.cmap_list else len(self.cmap_list) + chs.index(x)))
             anns = sorted( anns, key=lambda x: (self.cmap_list.index(x) if x in self.cmap_list else len(self.cmap_list) + anns.index(x)))
+        else:
+            chs = self._order_pp_channels( chs )
 
         
         # channels
@@ -1937,6 +1941,8 @@ class SignalsMixin:
             chs = sorted( chs, key=lambda x: (self.cmap_list.index(x) if x in self.cmap_list else len(self.cmap_list) + chs.index(x)))
             anns = sorted( anns, key=lambda x: (self.cmap_list.index(x) if x in self.cmap_list else len(self.cmap_list) + anns.index(x)))
             chs.reverse()
+        else:
+            chs = self._order_pp_channels( chs )
             
         # channels
         idx = 0        

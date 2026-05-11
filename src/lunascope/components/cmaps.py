@@ -164,11 +164,13 @@ _CMAP_DEFAULT_TEXT = """\
 %  f:    bandpass Hz
 %  mod:  sigmod + palette
 %
-%  Channels with exact prefix PP_ are treated as posterior
+%  Channels with prefix PP_ are treated as posterior
 %  probabilities when pp-style=Y:
 %   - auto scale to 0..1 unless explicit ylim= is set
 %   - lightly fill under trace using the trace colour
 %   - default stage colours for PP_N1/PP_N2/PP_N3/PP_R/PP_W...
+%   - PP_family_N1 style names also resolve by their final stage token
+%   - unknown PP_* suffixes fall back to the normal/generic signal colour
 %
 %  [ann] annotation colours
 %  label [col=C]
@@ -782,6 +784,8 @@ class CMapsMixin:
         if self.cmap_list:
             chs = sorted( chs, key=lambda x: (self.cmap_list.index(x) if x in self.cmap_list else len(self.cmap_list) + chs.index(x)))
             chs.reverse()
+        else:
+            chs = self._order_pp_channels( chs )
         nchan = len( chs )
         # set signal colors
         self.colors = override_colors(self.colors, chs, self.cmap)
@@ -813,6 +817,10 @@ class CMapsMixin:
         suffix = ch[3:]
         if suffix in self.stgcols_hex:
             return suffix
+        if "_" in suffix:
+            tail = suffix.rsplit("_", 1)[1]
+            if tail in self.stgcols_hex:
+                return tail
         return None
 
     def _update_pp_signal_cols(self, pal, chs):
@@ -828,6 +836,36 @@ class CMapsMixin:
             else:
                 updated.append(p_i)
         return updated
+
+    def _order_pp_channels(self, chs):
+        if not bool(getattr(self, "cfg_pp_style", True)):
+            return list(chs)
+
+        stage_order = {"N1": 0, "N2": 1, "N3": 2, "R": 3, "W": 4, "NR": 5}
+
+        def pp_family(ch, stage):
+            suffix = ch[3:]
+            if stage is None:
+                return suffix
+            if suffix == stage:
+                return ""
+            marker = "_" + stage
+            if suffix.endswith(marker):
+                return suffix[: -len(marker)]
+            return suffix
+
+        indexed = list(enumerate(chs))
+
+        def key(item):
+            idx, ch = item
+            if not isinstance(ch, str) or not ch.startswith("PP_"):
+                return (2, idx)
+            stage = self._pp_stage_from_channel(ch)
+            if stage is not None:
+                return (0, stage_order.get(stage, 99), pp_family(ch, stage), idx)
+            return (1, pp_family(ch, None), idx)
+
+        return [ch for _, ch in sorted(indexed, key=key)]
 
     
     def _load_palette(self):
