@@ -110,6 +110,8 @@ _CMAP_DEFAULT_TEXT = """\
 %  day-anchor  = 12     (0-23)
 %  pops-path   = ~/pops/
 %  pops-model  = s2
+%  meta-data   = cohort.meta   (TSV, col1=ID)
+%  meta-data-vars = Age,Sex,Dx (select/order cols)
 %  Docks (Y/N):
 %   project-dock  settings-dock
 %   console-dock  hypnogram-dock
@@ -204,7 +206,8 @@ class CMapsMixin:
 
         self.cfg_pops_path = cached_pops_path or '~/dropbox/pops/'
         self.cfg_pops_model = 's2'
-
+        self.cfg_pops_coda = False
+        
         self.ui.txt_pops_path.setText( self.cfg_pops_path )
         self.ui.txt_pops_model.setText( self.cfg_pops_model )
 
@@ -319,7 +322,16 @@ class CMapsMixin:
         if 'pops-model' in self.cfg['par']:
             self.cfg_pops_model = self.cfg['par']['pops-model']
             self.ui.txt_pops_model.setText( self.cfg_pops_model )
+            
+        if 'pops-coda' in self.cfg['par']:
+            t = self.cfg['par']['pops-coda']
+            if t == "1" or t == "Y" or t == "T":
+                self.cfg_pops_coda = True
+            else:
+                self.cfg_pops_coda = False
 
+        # ACTIG
+            
         if 'day-anchor' in self.cfg['par']:
             try:
                 v = int(self.cfg['par']['day-anchor'])
@@ -446,8 +458,33 @@ class CMapsMixin:
         self.cmap_rlist = list(reversed(self.cmap_list))
                 
         # and flag that we'll have bespoke as the default
-        if len(self.cmap) != 0:            
+        if len(self.cmap) != 0:
             self.palset = 'bespoke'
+
+        # --- metadata file ---
+        # meta-data and meta-data-vars are managed independently.
+        # meta-data controls which file is loaded (and only fires when the path changes).
+        # meta-data-vars only updates the column filter; it never clears an auto-discovered
+        # or interactively loaded file.
+        if 'meta-data' in self.cfg['par']:
+            new_meta_path = str(Path(self.cfg['par']['meta-data']).expanduser()).strip()
+            new_meta_vars = [v.strip() for v in self.cfg['par'].get('meta-data-vars', '').split(',') if v.strip()]
+            old_path = getattr(self, '_meta_file', '')
+            old_vars = getattr(self, '_meta_vars_filter', [])
+            if new_meta_path != old_path or new_meta_vars != old_vars:
+                self._meta_vars_filter = new_meta_vars
+                if new_meta_path:
+                    self._load_meta_file(new_meta_path)
+                else:
+                    self._clear_meta()
+        elif 'meta-data-vars' in self.cfg['par']:
+            new_meta_vars = [v.strip() for v in self.cfg['par']['meta-data-vars'].split(',') if v.strip()]
+            old_vars = getattr(self, '_meta_vars_filter', [])
+            if new_meta_vars != old_vars:
+                self._meta_vars_filter = new_meta_vars
+                current_file = getattr(self, '_meta_file', '')
+                if current_file:
+                    self._load_meta_file(current_file)
 
         return True
 

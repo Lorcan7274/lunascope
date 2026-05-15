@@ -96,11 +96,15 @@ class CTreeMixin:
                 # tables
                 tbls = lp.fetch_tbls( cmd )
                 for tbl in tbls:
-                    l4 = add_child( l3o , tbl , lp.fetch_desc_tbl( cmd , tbl ) )
+                    # '{baseline}' is the display sentinel for the root (no-strata) table,
+                    # but fetch_vars/fetch_desc_var/fetch_desc_tbl require "" as the key.
+                    api_tbl = "" if tbl == "{baseline}" else tbl
+                    tbl_label = "(baseline)" if tbl == "{baseline}" else tbl
+                    l4 = add_child( l3o , tbl_label , lp.fetch_desc_tbl( cmd , api_tbl ) )
 
-                    vars = lp.fetch_vars( cmd , tbl )
+                    vars = lp.fetch_vars( cmd , api_tbl )
                     for var in vars:
-                        add_child( l4 , var , lp.fetch_desc_var( cmd , tbl , var ) )
+                        add_child( l4 , var , lp.fetch_desc_var( cmd , api_tbl , var ) )
 
         # finish wiring
         view.setModel(model)              

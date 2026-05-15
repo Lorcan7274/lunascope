@@ -633,19 +633,35 @@ class SignalsMixin:
         stop_date = str(df["STOP_DATE"].iloc[0])
         stop_time = str(df["STOP_TIME"].iloc[0])
 
+        def _split_hms(value):
+            txt = str(value).strip()
+            parts = txt.replace(".", ":").split(":")
+            if len(parts) != 3:
+                raise ValueError(f"bad HMS string: {value!r}")
+            return int(parts[0]), int(parts[1]), int(parts[2])
+
+        def _parse_header_datetime(date_txt, time_txt):
+            date_s = str(date_txt).strip()
+            time_s = str(time_txt).strip()
+            for fmt in ("dd.MM.yy-HH:mm:ss", "dd.MM.yy-HH.mm.ss"):
+                dt = QtCore.QDateTime.fromString(f"{date_s}-{time_s}", fmt)
+                if dt.isValid():
+                    return dt
+            return QtCore.QDateTime()
+
         # store start-of-day offset (seconds from midnight) for day-boundary math
         try:
-            _stp = start_time.split(".")
-            self._record_start_tod_secs = int(_stp[0]) * 3600 + int(_stp[1]) * 60 + int(_stp[2])
+            _hh, _mm, _ss = _split_hms(start_time)
+            self._record_start_tod_secs = _hh * 3600 + _mm * 60 + _ss
         except (IndexError, ValueError):
             self._record_start_tod_secs = 0
         
         start = start_date + "-" + start_time
         stop = stop_date + "-" + stop_time
 
-        # time/date formats w/ '.' from HEADERS:
-        dt_start = QtCore.QDateTime.fromString(start, "dd.MM.yy-HH.mm.ss")
-        dt_stop = QtCore.QDateTime.fromString(stop, "dd.MM.yy-HH.mm.ss")
+        # EDF headers may expose either ':' or '.' as the time separator.
+        dt_start = _parse_header_datetime(start_date, start_time)
+        dt_stop = _parse_header_datetime(stop_date, stop_time)
 
         # set widget
         self.ui.dt_lights_out.setDateTime(dt_start)
@@ -1170,7 +1186,11 @@ class SignalsMixin:
 
         self.ui.lbl_twin.setText( f"T: {t1} - {t2}" )
         if getattr(self, 'multiday_mode', False):
-            self.ui.lbl_ewin.setText(f"Day: {int(lo/86400)+1} - {int(hi/86400)+1}")
+            anchor_secs = getattr(self, 'cfg_day_anchor', 12) * 3600
+            start_tod = int(getattr(self, '_record_start_tod_secs', 0))
+            day_lo = int(np.floor((float(lo) + start_tod - anchor_secs) / 86400.0)) + 1
+            day_hi = int(np.floor((float(hi) + start_tod - anchor_secs) / 86400.0)) + 1
+            self.ui.lbl_ewin.setText(f"Day: {day_lo} - {day_hi}")
         else:
             self.ui.lbl_ewin.setText(f"E: {int(lo/30)+1} - {int(hi/30)+1}")
         self._update_pg1()
@@ -1656,8 +1676,12 @@ class SignalsMixin:
         pw = self.ui.pg1
         vb = pw.getPlotItem().getViewBox()
 
-        # window (pixels)
-        self.ss.segsrv.set_pixel_width( int( vb.width() ) )
+        # Window-width changes by 1 px during full-screen/layout settle can
+        # trigger needless backend re-decimation and visible shimmer.
+        width_px = max(16, int(round(float(vb.width() or 1.0))))
+        if getattr(self, "_pg1_last_pixel_width", None) != width_px:
+            self.ss.segsrv.set_pixel_width(width_px)
+            self._pg1_last_pixel_width = width_px
         
         # set range (x-axis)
         vb.setRange(xRange=(x1,x2), padding=0, update=False)  # no immediate paint
@@ -1828,6 +1852,8 @@ class SignalsMixin:
             self._psd_overlay_on_trace_redraw()
         if hasattr(self, "_annot_queue_overlay_on_trace_redraw"):
             self._annot_queue_overlay_on_trace_redraw()
+        if hasattr(self, "_chep_overlay_on_trace_redraw"):
+            self._chep_overlay_on_trace_redraw()
 
 
     def _durstr( self , x , y ):
@@ -2098,6 +2124,8 @@ class SignalsMixin:
             self._psd_overlay_on_trace_redraw()
         if hasattr(self, "_annot_queue_overlay_on_trace_redraw"):
             self._annot_queue_overlay_on_trace_redraw()
+        if hasattr(self, "_chep_overlay_on_trace_redraw"):
+            self._chep_overlay_on_trace_redraw()
 
     def _init_pg1_probe_items(self):
         pi = self.ui.pg1.getPlotItem()

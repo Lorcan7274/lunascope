@@ -1101,7 +1101,10 @@ class SoapPopsMixin:
         if ignore_obs:
             opts += " ignore-obs=T"
             has_staging = False
-            
+
+        # coda
+        if self.cfg_pops_coda:
+            opts += " predict-coda"
 
         # test if resource file exists
         base = Path(pops_path).expanduser()

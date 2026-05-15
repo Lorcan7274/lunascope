@@ -444,6 +444,8 @@ def main(argv=None) -> int:
     qInstallMessageHandler(_qt_message_handler)
     _boot_log("Creating application...")
     app = QApplication(sys.argv)
+    app.setApplicationName("Lunascope")
+    app.setApplicationDisplayName("Lunascope")
     _apply_forced_dark_theme(app)
 
     # initiate silent luna
@@ -454,6 +456,8 @@ def main(argv=None) -> int:
     _boot_log("Loading user interface...")
     ui = _load_ui()
     _install_diagnostics(app, ui)
+    # sys.stderr.write(f"[lunascope] diagnostics log: {_diagnostics_log_path()}\n")
+    # sys.stderr.flush()
     controller = Controller(ui, proj)
     _install_signal_handlers(app, controller)
 
@@ -461,31 +465,37 @@ def main(argv=None) -> int:
     if not explicit_session:
         controller.load_geometry_cache_silently()
 
-    _boot_log("Showing main window...")
-    ui.show()
-
     # optionally, attach a file list (or .edf or .annot):
-    
+    # Do this BEFORE ui.show() so that if loading fails we can exit cleanly
+    # without Qt trying to tear down a partially-visible window.
     if args.slist_file:
         input_path = str(Path(args.slist_file).expanduser())
 
-        # Lunascope session?
-        if input_path.lower().endswith(".lss"):
-            controller.load_session_state_file(input_path)
-        # EDF?
-        elif input_path.lower().endswith(".edf"):
-            controller.open_edf(input_path)
-        # .annot file?
-        elif input_path.lower().endswith(".annot"):
-            controller.open_annot(input_path)
-        # folder? build a sample list
-        elif Path(input_path).is_dir():
-            controller._build_slist_from_folder(input_path)
-        # otherwise, assume a sample list
-        else:
-            folder_path = str(Path(input_path).parent) + os.sep
-            proj.var('path', folder_path)
-            controller._read_slist_from_file(input_path)
+        try:
+            # Lunascope session?
+            if input_path.lower().endswith(".lss"):
+                controller.load_session_state_file(input_path)
+            # EDF?
+            elif input_path.lower().endswith(".edf"):
+                controller.open_edf(input_path)
+            # .annot file?
+            elif input_path.lower().endswith(".annot"):
+                controller.open_annot(input_path)
+            # folder? build a sample list
+            elif Path(input_path).is_dir():
+                controller._build_slist_from_folder(input_path)
+            # otherwise, assume a sample list
+            else:
+                folder_path = str(Path(input_path).parent) + os.sep
+                proj.var('path', folder_path)
+                controller._read_slist_from_file(input_path)
+        except Exception as e:
+            sys.stderr.write(f"[lunascope] Error loading '{args.slist_file}': {e}\n")
+            sys.stderr.flush()
+            return 1
+
+    _boot_log("Showing main window...")
+    ui.show()
 
     # optionally, pre-load a parameter file?
     if args.param_file:

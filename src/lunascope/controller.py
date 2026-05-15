@@ -93,6 +93,10 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
     sig_proj_eval_progress = Signal(int, int)
     sig_proj_eval_finished = Signal(object)
     sig_proj_eval_failed = Signal(str)
+    sig_predict_proj_progress = Signal(int, int)
+    sig_predict_proj_row = Signal(object)
+    sig_predict_proj_done = Signal(object)
+    sig_predict_proj_failed = Signal(str)
 
     def __init__(self, ui, proj):
 
@@ -141,6 +145,8 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         act_save_slist = QAction("Save S-List...", self)
         act_build_slist = QAction("Build S-List", self)
         act_attach_annots = QAction("Attach Annotation Folder to S-List", self)
+        act_load_meta = QAction("Load Metadata File…", self)
+        act_clear_meta = QAction("Clear Metadata", self)
         act_load_edf = QAction("Load EDF", self)
         act_load_annot = QAction("Load Annotations", self)
         act_save_edf = QAction("Export EDF + Annotations…", self)
@@ -157,6 +163,8 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         act_save_slist.triggered.connect(self.save_file)
         act_build_slist.triggered.connect(self.open_folder)
         act_attach_annots.triggered.connect(self._attach_annotation_folder)
+        act_load_meta.triggered.connect(self._load_meta_interactive)
+        act_clear_meta.triggered.connect(self._clear_meta)
         act_load_edf.triggered.connect(self.open_edf)
         act_load_annot.triggered.connect(self.open_annot)
         act_save_edf.triggered.connect(self._save_edf_annots)
@@ -173,6 +181,8 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         self.ui.menuProject.addAction(act_save_slist)
         self.ui.menuProject.addAction(act_build_slist)
         self.ui.menuProject.addAction(act_attach_annots)
+        self.ui.menuProject.addAction(act_load_meta)
+        self.ui.menuProject.addAction(act_clear_meta)
         self.ui.menuProject.addSeparator()
         self.ui.menuProject.addAction(act_load_edf)
         self.ui.menuProject.addAction(act_load_annot)
@@ -329,7 +339,7 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         layout2.addWidget(splitter2)
 
         # short keyboard cuts
-        add_dock_shortcuts( self.ui, self.ui.menuView, self._toggle_signals_only_or_default )
+        add_dock_shortcuts( self.ui, self.ui.menuView, self._toggle_signals_only_or_default, self._reset_to_default_layout )
 
         # size overall app window – cap to available screen space.
         # 1440 wide allows the banner's PSD panel to show at default on screens
@@ -363,60 +373,7 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         self.ui.setCorner(Qt.TopRightCorner,    Qt.RightDockWidgetArea)
         self.ui.setCorner(Qt.BottomRightCorner, Qt.RightDockWidgetArea)
 
-        # Use relative defaults so the center signal viewer keeps a similar
-        # proportion across lower-resolution Windows and higher-resolution macOS displays.
-        w = self.ui.width()
-        h = self.ui.height()
-        left_w  = max(220, int(w * 0.20))
-        right_w = max(220, int(w * 0.20))
-        bottom_left_w  = max(220, int(w * 0.60))
-        bottom_right_w = max(180, w - bottom_left_w)
-
-        # arrange docks: lower docks (console, outputs)
-        self.ui.resizeDocks(
-            [self.ui.dock_console, self.ui.dock_outputs],
-            [bottom_left_w, bottom_right_w],
-            Qt.Horizontal
-        )
-
-        # arrange docks: left docks (samples, settings)
-        self.ui.resizeDocks(
-            [self.ui.dock_slist, self.ui.dock_settings],
-            [int(w * 0.5), int(w * 0.5)],
-            Qt.Vertical
-        )
-
-        # arrange docks: stack spectrogram and hypnogram
-        self.ui.tabifyDockWidget(self.ui.dock_spectrogram, self.ui.dock_hypno)
-        self.ui.dock_spectrogram.raise_()
-
-        # arrange docks: right docks (signals, annotations, events)
-        self.ui.resizeDocks(
-            [self.ui.dock_sig, self.ui.dock_annot, self.ui.dock_annots, self.ui.dock_mask],
-            [int(h * 0.35), int(h * 0.25), int(h * 0.1), int(h * 0.1)],
-            Qt.Vertical
-        )
-
-        # adjust overall left vs right width
-        self.ui.resizeDocks(
-            [self.ui.dock_slist, self.ui.dock_sig],
-            [left_w, right_w],
-            Qt.Horizontal
-        )
-
-        # general layout policies
-        cw = self.ui.centralWidget()
-        cw.setMinimumWidth(0)
-        cw.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-
-        # hide these after resizing
-        self.ui.dock_hypno.hide()
-        self.ui.dock_spectrogram.hide()
-        self.ui.dock_actigraphy.hide()
-        self._detach_actigraphy_dock_from_main_layout()
-        self.ui.dock_explorer.hide()
-        self.annotator.hide()
-        self.ui.dock_spectrogram.widget().setMinimumHeight(240)
+        self._apply_default_dock_layout()
         self._capture_default_dock_layout()
         QTimer.singleShot(0, self._set_initial_focus)
         
@@ -1063,15 +1020,105 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
     def _geometry_cache_path(self) -> Path:
         return app_state_file("window_geometry.json")
 
+    def _apply_default_dock_layout(self):
+        """Reapply the hardcoded startup dock arrangement. Safe to call at any time —
+        uses addDockWidget/splitDockWidget/resizeDocks, never restoreState."""
+        ui = self.ui
+
+        # Un-float anything that is floating so it re-enters the layout.
+        for dock in (
+            ui.dock_slist, ui.dock_settings,
+            ui.dock_sig, ui.dock_annot, ui.dock_annots, ui.dock_mask,
+            ui.dock_console, ui.dock_outputs,
+            ui.dock_spectrogram, ui.dock_hypno,
+        ):
+            if dock.isFloating():
+                dock.setFloating(False)
+
+        # Re-add each dock to its canonical area.  addDockWidget breaks any
+        # existing tab group the dock was part of and places it alone in that area.
+        ui.addDockWidget(Qt.LeftDockWidgetArea,   ui.dock_slist)
+        ui.addDockWidget(Qt.LeftDockWidgetArea,   ui.dock_settings)
+        ui.addDockWidget(Qt.RightDockWidgetArea,  ui.dock_sig)
+        ui.addDockWidget(Qt.RightDockWidgetArea,  ui.dock_annot)
+        ui.addDockWidget(Qt.RightDockWidgetArea,  ui.dock_annots)
+        ui.addDockWidget(Qt.RightDockWidgetArea,  ui.dock_mask)
+        ui.addDockWidget(Qt.BottomDockWidgetArea, ui.dock_console)
+        ui.addDockWidget(Qt.BottomDockWidgetArea, ui.dock_outputs)
+        ui.addDockWidget(Qt.TopDockWidgetArea,    ui.dock_spectrogram)
+        ui.addDockWidget(Qt.TopDockWidgetArea,    ui.dock_hypno)
+
+        # Establish vertical stacks on left and right via splitDockWidget.
+        ui.splitDockWidget(ui.dock_slist,    ui.dock_settings, Qt.Vertical)
+        ui.splitDockWidget(ui.dock_sig,      ui.dock_annot,    Qt.Vertical)
+        ui.splitDockWidget(ui.dock_annot,    ui.dock_annots,   Qt.Vertical)
+        ui.splitDockWidget(ui.dock_annots,   ui.dock_mask,     Qt.Vertical)
+
+        # Bottom side-by-side.
+        ui.splitDockWidget(ui.dock_console, ui.dock_outputs, Qt.Horizontal)
+
+        # Spectrogram/hypno stay tabbed (both hidden in default view).
+        ui.tabifyDockWidget(ui.dock_spectrogram, ui.dock_hypno)
+        ui.dock_spectrogram.raise_()
+
+        # Make everything visible before resizeDocks — Qt ignores hidden docks.
+        for dock in (
+            ui.dock_slist, ui.dock_settings,
+            ui.dock_sig, ui.dock_annot, ui.dock_annots, ui.dock_mask,
+            ui.dock_console, ui.dock_outputs,
+        ):
+            dock.show()
+
+        w = self.ui.width()
+        h = self.ui.height()
+        left_w  = max(220, int(w * 0.20))
+        right_w = max(220, int(w * 0.20))
+        bottom_left_w  = max(220, int(w * 0.60))
+        bottom_right_w = max(180, w - bottom_left_w)
+
+        ui.resizeDocks(
+            [ui.dock_console, ui.dock_outputs],
+            [bottom_left_w, bottom_right_w],
+            Qt.Horizontal
+        )
+        ui.resizeDocks(
+            [ui.dock_slist, ui.dock_settings],
+            [int(h * 0.5), int(h * 0.5)],
+            Qt.Vertical
+        )
+        ui.resizeDocks(
+            [ui.dock_sig, ui.dock_annot, ui.dock_annots, ui.dock_mask],
+            [int(h * 0.35), int(h * 0.25), int(h * 0.2), int(h * 0.1)],
+            Qt.Vertical
+        )
+        ui.resizeDocks(
+            [ui.dock_slist, ui.dock_sig],
+            [left_w, right_w],
+            Qt.Horizontal
+        )
+
+        cw = ui.centralWidget()
+        cw.setMinimumWidth(0)
+        cw.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+        ui.dock_spectrogram.widget().setMinimumHeight(240)
+        ui.dock_hypno.hide()
+        ui.dock_spectrogram.hide()
+        ui.dock_actigraphy.hide()
+        self._detach_actigraphy_dock_from_main_layout()
+        ui.dock_explorer.hide()
+        self.annotator.hide()
+        ui.dock_mask.hide()
+        ui.dock_console.hide()
+        ui.dock_outputs.hide()
+        ui.dock_help.hide()
+
+    def _reset_to_default_layout(self):
+        """Ctrl+): hard reset to the original fresh Lunascope layout."""
+        self._apply_default_dock_layout()
+
     def _capture_default_dock_layout(self):
-        try:
-            self._default_window_geometry_b64 = self.ui.saveGeometry()
-        except Exception:
-            self._default_window_geometry_b64 = None
-        try:
-            self._default_window_state_b64 = self.ui.saveState()
-        except Exception:
-            self._default_window_state_b64 = None
+        pass
 
     def _signals_only_mode_active(self):
         try:
@@ -1106,16 +1153,10 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         self.annotator.hide()
 
     def _restore_default_dock_layout(self):
-        try:
-            if getattr(self, "_default_window_geometry_b64", None) is not None:
-                self.ui.restoreGeometry(self._default_window_geometry_b64)
-        except Exception:
-            pass
-        try:
-            if getattr(self, "_default_window_state_b64", None) is not None:
-                self.ui.restoreState(self._default_window_state_b64)
-        except Exception:
-            pass
+        # restoreGeometry/restoreState are intentionally not called here.
+        # restoreGeometry would jump the window back to its startup monitor.
+        # restoreState walks internal dock-widget pointer lists that may contain
+        # stale entries (e.g. annotator added after capture), causing SIGSEGV.
 
         for dock in (
             self.ui.dock_slist,

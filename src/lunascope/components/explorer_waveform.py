@@ -187,6 +187,113 @@ def _feature_label(feature_key: str) -> str:
     return str(feature_key)
 
 
+def _ellipsis(text: str, limit: int = 48) -> str:
+    text = str(text)
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)] + "..."
+
+
+def _join_preview(values, *, limit_items: int = 3, limit_chars: int = 48) -> str:
+    items = [str(v) for v in values if str(v)]
+    if not items:
+        return ""
+    preview = ", ".join(items[:limit_items])
+    if len(items) > limit_items:
+        preview += f" +{len(items) - limit_items} more"
+    return _ellipsis(preview, limit_chars)
+
+
+def _format_waveform_suptitle(parts, *, prefix: str = "Peri-event waveform", line_limit: int = 118) -> str:
+    lines = [prefix]
+    current = ""
+    for part in [str(p) for p in parts if str(p)]:
+        candidate = part if not current else f"{current}  |  {part}"
+        if len(candidate) > line_limit and current:
+            lines.append(current)
+            current = part
+        else:
+            current = candidate
+    if current:
+        lines.append(current)
+    return "\n".join(lines)
+
+
+def _compact_waveform_title_parts(result, *, inspect_mode: bool, contrast_layout: str) -> list[str]:
+    parts = [f"'{result['annot_class']}'", f"({result['n_events']} {result.get('trace_count_label', 'events')})"]
+    contrast = result.get("contrast")
+    if contrast:
+        parts.append(contrast.get("title", "two-group contrast"))
+        parts.append(contrast_layout)
+    if inspect_mode:
+        parts.append("wave inspector")
+        selected_annot = result.get("_inspect_annot_label", "")
+        if selected_annot:
+            parts.append(f"inspect annot={selected_annot}")
+    summary_mode = result.get("summary_mode", "mean_ci")
+    if summary_mode == "variance":
+        parts.append("variance")
+    elif summary_mode == "mean_sd":
+        parts.append("mean ± SD")
+    elif summary_mode == "mean_quantiles":
+        parts.append("quantiles")
+    transform_mode = result.get("transform_mode", "raw")
+    baseline_mode = result.get("baseline_mode", "subtract")
+    outlier_mode = result.get("outlier_mode", "none")
+    outlier_sd_thresh = result.get("outlier_sd_thresh", np.nan)
+    if transform_mode == "rectified":
+        parts.append("rectified")
+    if baseline_mode == "normalize":
+        parts.append("norm[-1,1]")
+    elif baseline_mode == "subtract_normalize":
+        parts.append("baseline + norm[-1,1]")
+    elif baseline_mode == "subtract":
+        parts.append("baseline")
+    if outlier_mode != "none" and np.isfinite(outlier_sd_thresh):
+        parts.append(f"{outlier_mode}@{outlier_sd_thresh:g}SD")
+    return parts
+
+
+def _dedupe_preserve_order(values):
+    seen = set()
+    ordered = []
+    for value in values:
+        s = str(value).strip()
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        ordered.append(s)
+    return ordered
+
+
+def _table_column_values(model, header_candidates):
+    if model is None:
+        return []
+    try:
+        ncols = int(model.columnCount())
+    except Exception:
+        return []
+    headers = [str(model.headerData(c, Qt.Horizontal) or "").strip().upper() for c in range(ncols)]
+    value_col = -1
+    for candidate in header_candidates:
+        candidate_u = str(candidate).strip().upper()
+        if candidate_u in headers:
+            value_col = headers.index(candidate_u)
+            break
+    if value_col < 0:
+        value_col = 1 if ncols > 1 else 0
+    out = []
+    for r in range(int(model.rowCount())):
+        try:
+            val = model.data(model.index(r, value_col), Qt.DisplayRole)
+        except Exception:
+            val = None
+        s = "" if val is None else str(val).strip()
+        if s:
+            out.append(s)
+    return out
+
+
 def _collect_feature_names(trace_meta, channels):
     names = []
     seen = set()
@@ -801,16 +908,12 @@ def _extract_lwf_traces(dataset, filters, strategies, pre_secs, post_secs, align
 
     title_bits = []
     if annot_mode == "pool":
-        annot_label = ", ".join(sorted(selected_annots))
-        if len(annot_label) > 48:
-            annot_label = annot_label[:45] + "..."
+        annot_label = _join_preview(sorted(selected_annots), limit_items=3, limit_chars=52)
         title_bits.append(f"annots={annot_label}")
     else:
         annot_label = "stratified annots"
     if tag_mode == "pool":
-        pooled_tags_label = ", ".join(sorted(selected_tags))
-        if len(pooled_tags_label) > 36:
-            pooled_tags_label = pooled_tags_label[:33] + "..."
+        pooled_tags_label = _join_preview(sorted(selected_tags), limit_items=3, limit_chars=40)
         title_bits.append(f"tags={pooled_tags_label}")
     if ch_mode == "pool":
         title_bits.append(f"channels={len(selected_channels)} pooled")
@@ -1067,6 +1170,12 @@ class WaveformTab(_ExplorerTab):
         chk_show_band.setChecked(True)
         chk_show_band.setToolTip("Show the summary band (CI / SD / quantiles)")
 
+        chk_summary_only = QCheckBox("Summary only")
+        chk_summary_only.setToolTip(
+            "Hide individual traces and show only the selected summary. "
+            "Automatically locked on when too many traces are present."
+        )
+
         btn_render = QPushButton("Render"); btn_render.setFixedWidth(96)
         btn_render.setMinimumHeight(30)
         btn_render.setStyleSheet(RENDER_BUTTON_STYLE)
@@ -1092,6 +1201,8 @@ class WaveformTab(_ExplorerTab):
         display_row_a.addSpacing(8)
         display_row_a.addWidget(chk_show_line)
         display_row_a.addWidget(chk_show_band)
+        display_row_a.addSpacing(16)
+        display_row_a.addWidget(chk_summary_only)
         display_row_a.addStretch(1)
         rl3.addLayout(display_row_a)
 
@@ -1107,10 +1218,12 @@ class WaveformTab(_ExplorerTab):
         display_row_b.addStretch(1)
         rl3.addLayout(display_row_b)
 
-        # row 4: y-axis controls
-        row4 = QWidget(); rl4 = QHBoxLayout(row4)
-        rl4.setContentsMargins(0,0,0,0); rl4.setSpacing(6)
-        row4.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        # shared y-axis controls (applies to both current-record and .lwf renders)
+        shared_axes_row = QWidget()
+        shared_axes_layout = QHBoxLayout(shared_axes_row)
+        shared_axes_layout.setContentsMargins(0, 0, 0, 0)
+        shared_axes_layout.setSpacing(6)
+        shared_axes_row.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
         chk_auto_ymin = QCheckBox("Auto min")
         chk_auto_ymin.setChecked(True)
@@ -1134,21 +1247,22 @@ class WaveformTab(_ExplorerTab):
         spin_ymax.setEnabled(False)
         spin_ymax.setToolTip("Manual upper y-axis limit")
 
-        chk_summary_only = QCheckBox("Summary only")
-        chk_summary_only.setToolTip(
-            "Hide individual traces and show only the selected summary. "
-            "Automatically locked on when too many traces are present."
-        )
+        shared_axes_layout.addWidget(QLabel("Y min:"))
+        shared_axes_layout.addWidget(spin_ymin)
+        shared_axes_layout.addWidget(chk_auto_ymin)
+        shared_axes_layout.addSpacing(10)
+        shared_axes_layout.addWidget(QLabel("Y max:"))
+        shared_axes_layout.addWidget(spin_ymax)
+        shared_axes_layout.addWidget(chk_auto_ymax)
+        shared_axes_layout.addStretch(1)
 
-        rl4.addWidget(QLabel("Y min:")); rl4.addWidget(spin_ymin)
-        rl4.addWidget(chk_auto_ymin)
-        rl4.addSpacing(10)
-        rl4.addWidget(QLabel("Y max:")); rl4.addWidget(spin_ymax)
-        rl4.addWidget(chk_auto_ymax)
-        rl4.addSpacing(10)
-        rl4.addWidget(chk_summary_only)
-        rl4.addStretch(1)
-        rl4.addWidget(btn_render)
+        record_row4 = QWidget()
+        record_row4_layout = QHBoxLayout(record_row4)
+        record_row4_layout.setContentsMargins(0, 0, 0, 0)
+        record_row4_layout.setSpacing(6)
+        record_row4.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        record_row4_layout.addStretch(1)
+        record_row4_layout.addWidget(btn_render)
 
         record_tab = QWidget()
         record_layout = QVBoxLayout(record_tab)
@@ -1157,7 +1271,7 @@ class WaveformTab(_ExplorerTab):
         record_layout.addWidget(row1)
         record_layout.addWidget(row2)
         record_layout.addWidget(row3)
-        record_layout.addWidget(row4)
+        record_layout.addWidget(record_row4)
         record_tab.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
 
         lwf_tab = QWidget()
@@ -1180,7 +1294,7 @@ class WaveformTab(_ExplorerTab):
         combo_contrast = QComboBox()
         combo_contrast.setFixedWidth(130)
         combo_contrast.addItem("None", "none")
-        combo_contrast.addItem("ID group file", "id_group")
+        combo_contrast.addItem("ID covariate", "id_group")
         combo_contrast.addItem("CH", "CH")
         combo_contrast.addItem("ANNOT", "ANNOT")
         combo_contrast.addItem("TAG", "TAG")
@@ -1207,14 +1321,14 @@ class WaveformTab(_ExplorerTab):
         lwf_rl1.setColumnStretch(3, 1)
 
         lwf_summary = QLabel("No .lwf dataset loaded.")
-        lwf_summary.setWordWrap(False)
+        lwf_summary.setWordWrap(True)
         lwf_summary.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
         lwf_summary.setStyleSheet(
             "QLabel { color:#c9d1d9; padding:3px 6px; border:1px solid #30363d; "
             "border-radius:6px; background:#111827; }"
         )
-        lwf_summary.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        lwf_summary.setMaximumHeight(28)
+        lwf_summary.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        lwf_summary.setMinimumHeight(42)
 
         from .soappops import MultiSelectComboBox
 
@@ -1265,22 +1379,30 @@ class WaveformTab(_ExplorerTab):
         btn_lwf_id_all = _make_select_button("All", lambda: combo_lwf_id.check_all())
         btn_lwf_id_none = _make_select_button("None", lambda: combo_lwf_id.clear_all())
 
-        lwf_rl2.addWidget(QLabel("CH:"), 0, 0)
+        lab_lwf_ch = QLabel("CH:")
+        lab_lwf_ch.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        lwf_rl2.addWidget(lab_lwf_ch, 0, 0)
         lwf_rl2.addWidget(combo_lwf_ch, 0, 1)
         lwf_rl2.addWidget(btn_lwf_ch_all, 0, 2)
         lwf_rl2.addWidget(btn_lwf_ch_none, 0, 3)
         lwf_rl2.addWidget(combo_lwf_ch_mode, 0, 4)
-        lwf_rl2.addWidget(QLabel("Annot:"), 0, 5)
+        lab_lwf_annot = QLabel("Annot:")
+        lab_lwf_annot.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        lwf_rl2.addWidget(lab_lwf_annot, 0, 5)
         lwf_rl2.addWidget(combo_lwf_annot, 0, 6)
         lwf_rl2.addWidget(btn_lwf_annot_all, 0, 7)
         lwf_rl2.addWidget(btn_lwf_annot_none, 0, 8)
         lwf_rl2.addWidget(combo_lwf_annot_mode, 0, 9)
-        lwf_rl2.addWidget(QLabel("Tag:"), 1, 0)
+        lab_lwf_tag = QLabel("Tag:")
+        lab_lwf_tag.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        lwf_rl2.addWidget(lab_lwf_tag, 1, 0)
         lwf_rl2.addWidget(combo_lwf_tag, 1, 1)
         lwf_rl2.addWidget(btn_lwf_tag_all, 1, 2)
         lwf_rl2.addWidget(btn_lwf_tag_none, 1, 3)
         lwf_rl2.addWidget(combo_lwf_tag_mode, 1, 4)
-        lwf_rl2.addWidget(QLabel("ID:"), 1, 5)
+        lab_lwf_id = QLabel("ID:")
+        lab_lwf_id.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        lwf_rl2.addWidget(lab_lwf_id, 1, 5)
         lwf_rl2.addWidget(combo_lwf_id, 1, 6)
         lwf_rl2.addWidget(btn_lwf_id_all, 1, 7)
         lwf_rl2.addWidget(btn_lwf_id_none, 1, 8)
@@ -1417,10 +1539,18 @@ class WaveformTab(_ExplorerTab):
         mode_tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
         inspector_row = QWidget()
-        inspector_layout = QHBoxLayout(inspector_row)
+        inspector_layout = QVBoxLayout(inspector_row)
         inspector_layout.setContentsMargins(0, 0, 0, 0)
-        inspector_layout.setSpacing(6)
+        inspector_layout.setSpacing(4)
         inspector_row.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        inspector_row_a = QHBoxLayout()
+        inspector_row_a.setContentsMargins(0, 0, 0, 0)
+        inspector_row_a.setSpacing(6)
+
+        inspector_row_b = QHBoxLayout()
+        inspector_row_b.setContentsMargins(0, 0, 0, 0)
+        inspector_row_b.setSpacing(6)
 
         combo_view = QComboBox()
         combo_view.setFixedWidth(120)
@@ -1431,6 +1561,15 @@ class WaveformTab(_ExplorerTab):
         combo_feature = QComboBox()
         combo_feature.setMinimumWidth(150)
         combo_feature.setToolTip("Rank waves by this feature before selecting one with the slider")
+
+        lab_inspect_annot = QLabel("Inspect annot:")
+        combo_inspect_annot = QComboBox()
+        combo_inspect_annot.setMinimumWidth(140)
+        combo_inspect_annot.setToolTip("Restrict wave inspection to one annotation class at a time")
+
+        chk_stable_auto_y = QCheckBox("Stable auto Y")
+        chk_stable_auto_y.setChecked(True)
+        chk_stable_auto_y.setToolTip("Keep auto-scaled y-limits fixed while scrolling through inspected waves")
 
         combo_metric_source = QComboBox()
         combo_metric_source.setFixedWidth(160)
@@ -1469,22 +1608,30 @@ class WaveformTab(_ExplorerTab):
         lab_wave.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         lab_wave.setStyleSheet("QLabel { color:#8b949e; }")
 
-        inspector_layout.addWidget(QLabel("View:"))
-        inspector_layout.addWidget(combo_view)
-        inspector_layout.addSpacing(8)
-        inspector_layout.addWidget(QLabel("Metrics:"))
-        inspector_layout.addWidget(combo_metric_source)
-        inspector_layout.addWidget(lab_metric_pre)
-        inspector_layout.addWidget(spin_metric_pre)
-        inspector_layout.addWidget(lab_metric_post)
-        inspector_layout.addWidget(spin_metric_post)
-        inspector_layout.addSpacing(8)
-        inspector_layout.addWidget(QLabel("Order by:"))
-        inspector_layout.addWidget(combo_feature)
-        inspector_layout.addSpacing(8)
-        inspector_layout.addWidget(QLabel("Wave:"))
-        inspector_layout.addWidget(slider_wave, 3)
-        inspector_layout.addWidget(lab_wave)
+        inspector_row_a.addWidget(QLabel("View:"))
+        inspector_row_a.addWidget(combo_view)
+        inspector_row_a.addSpacing(8)
+        inspector_row_a.addWidget(QLabel("Metrics:"))
+        inspector_row_a.addWidget(combo_metric_source)
+        inspector_row_a.addWidget(lab_metric_pre)
+        inspector_row_a.addWidget(spin_metric_pre)
+        inspector_row_a.addWidget(lab_metric_post)
+        inspector_row_a.addWidget(spin_metric_post)
+        inspector_row_a.addSpacing(8)
+        inspector_row_a.addWidget(QLabel("Order by:"))
+        inspector_row_a.addWidget(combo_feature)
+        inspector_row_a.addWidget(lab_inspect_annot)
+        inspector_row_a.addWidget(combo_inspect_annot)
+        inspector_row_a.addSpacing(8)
+        inspector_row_a.addWidget(chk_stable_auto_y)
+        inspector_row_a.addStretch(1)
+
+        inspector_row_b.addWidget(QLabel("Wave:"))
+        inspector_row_b.addWidget(slider_wave, 1)
+        inspector_row_b.addWidget(lab_wave)
+
+        inspector_layout.addLayout(inspector_row_a)
+        inspector_layout.addLayout(inspector_row_b)
 
         # canvas host
         canvas_host = QFrame()
@@ -1514,6 +1661,7 @@ class WaveformTab(_ExplorerTab):
         canvas_scroll.viewport().installEventFilter(self)
 
         outer.addWidget(mode_tabs)
+        outer.addWidget(shared_axes_row)
         outer.addWidget(inspector_row)
         outer.addWidget(canvas_scroll, 1)
 
@@ -1539,8 +1687,13 @@ class WaveformTab(_ExplorerTab):
         self._spin_metric_pre = spin_metric_pre
         self._spin_metric_post = spin_metric_post
         self._combo_feature = combo_feature
+        self._lab_inspect_annot = lab_inspect_annot
+        self._combo_inspect_annot = combo_inspect_annot
+        self._chk_stable_auto_y = chk_stable_auto_y
         self._slider_wave = slider_wave
         self._lab_wave = lab_wave
+        self._inspector_row = inspector_row
+        self._shared_axes_row = shared_axes_row
         self._tab_record = record_tab
         self._tab_lwf = lwf_tab
         self._lab_lwf_summary = lwf_summary
@@ -1590,6 +1743,8 @@ class WaveformTab(_ExplorerTab):
         spin_metric_pre.valueChanged.connect(self._on_inspector_control_changed)
         spin_metric_post.valueChanged.connect(self._on_inspector_control_changed)
         combo_feature.currentIndexChanged.connect(self._on_inspector_control_changed)
+        combo_inspect_annot.currentIndexChanged.connect(self._on_inspector_control_changed)
+        chk_stable_auto_y.toggled.connect(self._redraw_cached)
         slider_wave.valueChanged.connect(self._on_inspector_control_changed)
         chk_summary_only.toggled.connect(self._redraw_cached)
         chk_lwf_summary_only.toggled.connect(self._redraw_cached)
@@ -1627,6 +1782,34 @@ class WaveformTab(_ExplorerTab):
         else:
             self._set_mode("record")
         self._sync_mode_tab_height()
+        self._refresh_mode_display()
+
+    def _refresh_mode_display(self):
+        result = self._last_result
+        if self._mode == "record":
+            if getattr(self.ctrl, "p", None) is None:
+                self._update_inspector_controls(None)
+                self._render_empty("No current record attached.")
+                return
+            if result is not None and result.get("source_mode") == "record":
+                self._update_inspector_controls(result)
+                self._draw(result)
+                return
+            self._update_inspector_controls(None)
+            self._render_empty("No current-record waveform rendered.")
+            return
+
+        if self._mode == "lwf":
+            if result is not None and result.get("source_mode") == "lwf":
+                self._update_inspector_controls(result)
+                self._draw(result)
+                return
+            if self._lwf_data is not None:
+                self._update_inspector_controls(None)
+                self._render_empty(self._lab_lwf_summary.text() or "No .lwf waveform rendered.")
+                return
+            self._update_inspector_controls(None)
+            self._render_empty("No .lwf dataset loaded.")
 
     def _sync_mode_tab_height(self):
         tabs = getattr(self, "_tabs_mode", None)
@@ -1653,11 +1836,12 @@ class WaveformTab(_ExplorerTab):
         combo_cov = getattr(self, "_combo_lwf_covariate", None)
         lab_cov = getattr(self, "_lab_lwf_cov_choice", None)
         combo_layout = getattr(self, "_combo_lwf_contrast_layout", None)
+        has_covariates = bool(combo_cov is not None and combo_cov.count() > 0)
         if combo_cov is not None:
-            combo_cov.setEnabled(contrast == "id_group" and combo_cov.count() > 0)
-            combo_cov.setVisible(contrast == "id_group")
+            combo_cov.setEnabled(contrast == "id_group" and has_covariates)
+            combo_cov.setVisible(has_covariates)
         if lab_cov is not None:
-            lab_cov.setVisible(contrast == "id_group")
+            lab_cov.setVisible(has_covariates)
         if combo_layout is not None:
             combo_layout.setEnabled(contrast != "none")
         if contrast in {"CH", "ANNOT", "TAG"}:
@@ -1699,7 +1883,13 @@ class WaveformTab(_ExplorerTab):
         self._lwf_covariate_path = path
         self._combo_lwf_covariate.clear()
         self._combo_lwf_covariate.addItems(cols)
-        self._lab_lwf_cov.setText(f"Covariates: {path} ({len(cols)} binary fields)")
+        preview = ", ".join(cols[:3])
+        if len(cols) > 3:
+            preview += f" +{len(cols) - 3} more"
+        self._lab_lwf_cov.setText(f"Covariates: {path} ({len(cols)} binary fields: {preview})")
+        idx = self._combo_lwf_contrast.findData("id_group")
+        if idx >= 0:
+            self._combo_lwf_contrast.setCurrentIndex(idx)
         self._on_lwf_contrast_changed()
 
     def _lwf_common_window(self, dataset, align_to: str = "mid"):
@@ -1782,16 +1972,14 @@ class WaveformTab(_ExplorerTab):
         if canvas is None:
             return
         nrows = max(1, int(nrows or 1))
-        # Give every row ~260 px plus a fixed header budget; for a single row
-        # this provides a usable minimum so the canvas never collapses to zero.
-        # Multi-row canvases are fixed-height (scroll); single-row stretches to
-        # fill available space so it uses whatever the dock gives it.
-        min_height = 120 + (nrows * 260) + ((nrows - 1) * 24)
+        # Keep single-panel plots compact enough to fit the dock while still
+        # allocating extra height for stacked multi-panel layouts.
+        min_height = 90 + (nrows * 210) + ((nrows - 1) * 18)
         canvas.setMinimumHeight(min_height)
-        canvas.setMaximumHeight(min_height if nrows > 1 else 16777215)
+        canvas.setMaximumHeight(min_height)
         if self._canvas_host is not None:
             self._canvas_host.setMinimumHeight(min_height)
-            self._canvas_host.setMaximumHeight(min_height if nrows > 1 else 16777215)
+            self._canvas_host.setMaximumHeight(min_height)
         self._sync_canvas_width()
 
     # ------------------------------------------------------------------
@@ -1807,17 +1995,33 @@ class WaveformTab(_ExplorerTab):
     def _refresh_ann_ch(self):
         """Update annotation and channel combo contents without changing display mode.
 
-        Called both from refresh_controls (tab switch) and from sig_results_changed
-        (command completed while waveform tab is already visible).
+        Called on tab switch, sig_results_changed, and after record attach.
         """
         p = getattr(self.ctrl, "p", None)
         if p is None:
             return
-        try:
-            all_annots = [c for c in (p.edf.annots() or [])
-                          if c not in {"N1","N2","N3","R","W","L","?"}]
-        except Exception:
-            all_annots = []
+        excluded = {"SleepStage", "N1", "N2", "N3", "R", "W", "L", "?"}
+        view = getattr(getattr(self.ctrl, "ui", None), "tbl_desc_annots", None)
+        model = view.model() if view is not None else None
+        annots = []
+        if model is not None:
+            headers = [str(model.headerData(c, Qt.Horizontal) or "") for c in range(model.columnCount())]
+            try:
+                annot_col = headers.index("Annotations")
+            except ValueError:
+                annot_col = None
+            if annot_col is not None:
+                for r in range(model.rowCount()):
+                    val = str(model.index(r, annot_col).data(Qt.DisplayRole) or "").strip()
+                    if val:
+                        annots.append(val)
+        if not annots:
+            try:
+                annots = [str(c) for c in (p.edf.annots() or []) if str(c)]
+            except Exception:
+                annots = []
+
+        all_annots = [a for a in _dedupe_preserve_order(annots) if a and a not in excluded]
         cur_ann = self._combo_ann.currentText()
         self._combo_ann.blockSignals(True)
         self._combo_ann.clear()
@@ -2105,6 +2309,37 @@ class WaveformTab(_ExplorerTab):
             return "summary"
         return str(combo.currentData() or "summary")
 
+    def _inspector_selected_annot(self):
+        combo = getattr(self, "_combo_inspect_annot", None)
+        if combo is None:
+            return ""
+        value = str(combo.currentData() or "")
+        return "" if value in {"", "__all__"} else value
+
+    def _stable_auto_y_enabled(self):
+        chk = getattr(self, "_chk_stable_auto_y", None)
+        return bool(chk is not None and chk.isChecked())
+
+    def _set_inspector_row_visible(self, visible: bool):
+        row = getattr(self, "_inspector_row", None)
+        if row is not None:
+            row.setVisible(bool(visible))
+        shared_axes_row = getattr(self, "_shared_axes_row", None)
+        if shared_axes_row is not None:
+            shared_axes_row.setVisible(bool(visible))
+
+    def _inspector_available_for_result(self, result) -> bool:
+        if result is None or result.get("contrast"):
+            return False
+        metric_payload = self._metric_features_for_result(result)
+        feature_maps = metric_payload.get("feature_maps", {})
+        panel_count = sum(
+            1
+            for ch in result.get("channels", [])
+            if len(feature_maps.get(ch, [])) > 0
+        )
+        return panel_count == 1
+
     def _metric_window_config(self, result=None):
         combo = getattr(self, "_combo_metric_source", None)
         spin_pre = getattr(self, "_spin_metric_pre", None)
@@ -2175,22 +2410,62 @@ class WaveformTab(_ExplorerTab):
         cache[cache_key] = payload
         return payload
 
+    def _inspector_panel_rows(self, result, panel_label):
+        trace_list = list(result.get("traces", {}).get(panel_label, []))
+        trace_meta = list(result.get("trace_meta", {}).get(panel_label, []))
+        metric_payload = self._metric_features_for_result(result)
+        panel_features = list(metric_payload.get("feature_maps", {}).get(panel_label, []))
+        selected_annot = self._inspector_selected_annot()
+        rows = []
+        for idx, (trace, meta, features) in enumerate(zip(trace_list, trace_meta, panel_features)):
+            if selected_annot and str(meta.get("annot", "")) != selected_annot:
+                continue
+            rows.append((idx, np.asarray(trace, dtype=float), meta, dict(features or {})))
+        return rows
+
+    def _inspector_auto_limits_for_panel(self, result, panel_label):
+        if not self._stable_auto_y_enabled():
+            return None, None
+        rows = self._inspector_panel_rows(result, panel_label)
+        if not rows:
+            return None, None
+        mins = []
+        maxs = []
+        for _, trace, _, _ in rows:
+            finite = trace[np.isfinite(trace)]
+            if finite.size == 0:
+                continue
+            mins.append(float(np.min(finite)))
+            maxs.append(float(np.max(finite)))
+        if not mins or not maxs:
+            return None, None
+        return min(mins), max(maxs)
+
     def _update_inspector_controls(self, result):
         combo_feature = getattr(self, "_combo_feature", None)
+        combo_annot = getattr(self, "_combo_inspect_annot", None)
+        lab_annot = getattr(self, "_lab_inspect_annot", None)
         slider = getattr(self, "_slider_wave", None)
         lab_wave = getattr(self, "_lab_wave", None)
         combo_view = getattr(self, "_combo_view", None)
         combo_metric = getattr(self, "_combo_metric_source", None)
-        if combo_feature is None or slider is None or lab_wave is None or combo_view is None:
+        if combo_feature is None or combo_annot is None or slider is None or lab_wave is None or combo_view is None:
             return
 
         combo_feature.blockSignals(True)
+        combo_annot.blockSignals(True)
         slider.blockSignals(True)
         self._sync_metric_window_controls(result)
 
         if result is None:
+            self._set_inspector_row_visible(False)
             combo_feature.clear()
             combo_feature.setEnabled(False)
+            combo_annot.clear()
+            combo_annot.setEnabled(False)
+            combo_annot.setVisible(False)
+            if lab_annot is not None:
+                lab_annot.setVisible(False)
             slider.setMinimum(1)
             slider.setMaximum(1)
             slider.setValue(1)
@@ -2200,16 +2475,33 @@ class WaveformTab(_ExplorerTab):
             if combo_metric is not None:
                 combo_metric.setEnabled(False)
             combo_feature.blockSignals(False)
+            combo_annot.blockSignals(False)
             slider.blockSignals(False)
             return
 
-        combo_view.setEnabled(True)
+        self._set_inspector_row_visible(True)
+        inspector_available = self._inspector_available_for_result(result)
+        if not inspector_available:
+            idx = combo_view.findData("summary")
+            if idx >= 0 and combo_view.currentIndex() != idx:
+                combo_view.setCurrentIndex(idx)
+        combo_view.setEnabled(inspector_available)
+        combo_view.setToolTip(
+            "Switch between the population summary and a single-wave inspection view"
+            if inspector_available else
+            "Wave Inspector is only available when rendering a single panel/channel."
+        )
         if combo_metric is not None:
-            combo_metric.setEnabled(True)
+            combo_metric.setEnabled(inspector_available)
         if result.get("contrast"):
             combo_view.setEnabled(False)
             combo_feature.clear()
             combo_feature.setEnabled(False)
+            combo_annot.clear()
+            combo_annot.setEnabled(False)
+            combo_annot.setVisible(False)
+            if lab_annot is not None:
+                lab_annot.setVisible(False)
             slider.setMinimum(1)
             slider.setMaximum(1)
             slider.setValue(1)
@@ -2218,8 +2510,31 @@ class WaveformTab(_ExplorerTab):
             if combo_metric is not None:
                 combo_metric.setEnabled(False)
             combo_feature.blockSignals(False)
+            combo_annot.blockSignals(False)
             slider.blockSignals(False)
             return
+
+        inspect_mode = inspector_available and combo_view.currentData() == "inspect"
+        annot_values = sorted(
+            {
+                str(meta.get("annot", "")).strip()
+                for metas in result.get("trace_meta", {}).values()
+                for meta in metas
+                if str(meta.get("annot", "")).strip()
+            }
+        )
+        show_annot_filter = inspect_mode and result.get("source_mode") == "lwf" and len(annot_values) > 1
+        current_annot = self._inspector_selected_annot()
+        combo_annot.clear()
+        if show_annot_filter:
+            for annot in annot_values:
+                combo_annot.addItem(annot, annot)
+            idx = combo_annot.findData(current_annot)
+            combo_annot.setCurrentIndex(idx if idx >= 0 else 0)
+        combo_annot.setEnabled(show_annot_filter)
+        combo_annot.setVisible(show_annot_filter)
+        if lab_annot is not None:
+            lab_annot.setVisible(show_annot_filter)
 
         metric_payload = self._metric_features_for_result(result)
         feature_names = list(metric_payload.get("feature_names", []))
@@ -2234,26 +2549,31 @@ class WaveformTab(_ExplorerTab):
 
         feature_maps = metric_payload.get("feature_maps", {})
         channels = [ch for ch in result.get("channels", []) if len(feature_maps.get(ch, [])) > 0]
-        common_n = min(
-            (
-                sum(
-                    1
-                    for features in feature_maps.get(ch, [])
-                    if np.isfinite(features.get(selected_key, np.nan))
-                )
-                for ch in channels
-            ),
-            default=0,
-        )
+        selected_annot = self._inspector_selected_annot()
+        counts = [
+            sum(
+                1
+                for meta, features in zip(result.get("trace_meta", {}).get(ch, []), feature_maps.get(ch, []))
+                if (not selected_annot or str(meta.get("annot", "")) == selected_annot)
+                and np.isfinite(features.get(selected_key, np.nan))
+            )
+            for ch in channels
+        ]
+        positive_counts = [count for count in counts if count > 0]
+        common_n = min(positive_counts) if positive_counts else 0
         slider.setMinimum(1)
         slider.setMaximum(max(1, common_n))
         if slider.value() > max(1, common_n):
             slider.setValue(max(1, common_n))
-        combo_feature.setEnabled(combo_view.currentData() == "inspect" and combo_feature.count() > 0 and common_n > 0)
-        slider.setEnabled(combo_view.currentData() == "inspect" and common_n > 0)
-        lab_wave.setText(f"Wave {slider.value()} / {max(1, common_n)}")
+        combo_feature.setEnabled(inspect_mode and combo_feature.count() > 0 and common_n > 0)
+        slider.setEnabled(inspect_mode and common_n > 0)
+        if inspector_available:
+            lab_wave.setText(f"Wave {slider.value()} / {max(1, common_n)}")
+        else:
+            lab_wave.setText("Single-panel only")
 
         combo_feature.blockSignals(False)
+        combo_annot.blockSignals(False)
         slider.blockSignals(False)
 
     def _set_summary_only_locked(self, locked: bool):
@@ -2434,18 +2754,15 @@ class WaveformTab(_ExplorerTab):
         self._style_ax(ax, title=f"{label} | {group_labels[0]} vs {group_labels[1]}", ylabel=units or "")
 
     def _inspector_selection_for_panel(self, result, panel_label):
-        trace_list = list(result.get("traces", {}).get(panel_label, []))
-        trace_meta = list(result.get("trace_meta", {}).get(panel_label, []))
-        if not trace_list or not trace_meta:
+        rows = self._inspector_panel_rows(result, panel_label)
+        if not rows:
             return None
         metric_payload = self._metric_features_for_result(result)
-        feature_maps = metric_payload.get("feature_maps", {})
-        panel_features = list(feature_maps.get(panel_label, []))
         feature_key = str(getattr(self, "_combo_feature", QComboBox()).currentData() or "")
         if not feature_key:
             return None
         ranked = []
-        for idx, (trace, meta, features) in enumerate(zip(trace_list, trace_meta, panel_features)):
+        for idx, trace, meta, features in rows:
             value = features.get(feature_key, np.nan)
             ranked.append((idx, value, meta, trace))
         ranked = [item for item in ranked if np.isfinite(item[1])]
@@ -2471,7 +2788,6 @@ class WaveformTab(_ExplorerTab):
         trace = selection["trace"]
         meta = selection["meta"]
         feature_key = selection["feature_key"]
-        feature_label = _feature_label(feature_key)
         title = (
             f"{label} | {_feature_label(feature_key)}={selection['value']:.3g} | "
             f"wave {selection['rank']}/{selection['count']}"
@@ -2550,35 +2866,18 @@ class WaveformTab(_ExplorerTab):
         fig = canvas.figure; fig.clear(); fig.patch.set_facecolor(BG)
 
         axes = fig.subplots(n, 1, squeeze=False)
-        fig.subplots_adjust(hspace=0.4, left=0.10, right=0.94,
-                            top=0.90, bottom=0.10)
-        title_bits = [f"'{ann_cls}'", f"({n_ev} {trace_count_label})"]
-        title_bits.extend([str(bit) for bit in extra_title_bits if bit])
-        if contrast:
-            title_bits.append(contrast.get("title", "two-group contrast"))
-            title_bits.append(contrast_layout)
-            title_bits.append(f"unit={contrast.get('unit_label', trace_count_label)}")
-        if transform_mode == "rectified":
-            title_bits.append("rectified")
-        if baseline_mode == "normalize":
-            title_bits.append("norm[-1,1]")
-        elif baseline_mode == "subtract_normalize":
-            title_bits.append("baseline + norm[-1,1]")
-        elif baseline_mode == "subtract":
-            title_bits.append("baseline")
-        if outlier_mode != "none" and np.isfinite(outlier_sd_thresh):
-            title_bits.append(f"{outlier_mode}@{outlier_sd_thresh:g}SD")
-        if inspect_mode:
-            title_bits.append("wave inspector")
-            title_bits.append(self._metric_features_for_result(result).get("label", ""))
-        if summary_mode == "variance":
-            title_bits.append("variance")
-        elif summary_mode == "mean_sd":
-            title_bits.append("mean ± SD")
-        elif summary_mode == "mean_quantiles":
-            title_bits.append("quantiles")
-        fig.suptitle(f"Peri-event waveform  |  {'  '.join(title_bits)}",
-                     color=FG, fontsize=10, y=0.97)
+        fig.subplots_adjust(hspace=0.42, left=0.10, right=0.94, top=0.82, bottom=0.16)
+        selected_annot = self._inspector_selected_annot() if inspect_mode else ""
+        result["_inspect_annot_label"] = selected_annot
+        title_bits = _compact_waveform_title_parts(result, inspect_mode=inspect_mode, contrast_layout=contrast_layout)
+        if not inspect_mode:
+            title_bits.extend([str(bit) for bit in extra_title_bits if bit])
+        fig.suptitle(
+            _format_waveform_suptitle(title_bits),
+            color=FG,
+            fontsize=10,
+            y=0.97,
+        )
         y_min, y_max, _ = self._get_y_limits()
 
         colors = ["#4cc9f0", "#f9844a", "#06d6a0", "#a78bfa",
@@ -2635,20 +2934,36 @@ class WaveformTab(_ExplorerTab):
                     continue
                 if inspect_mode:
                     selection = self._inspector_selection_for_panel(result, ch)
+                    panel_y_min = y_min
+                    panel_y_max = y_max
+                    if panel_y_min is None and panel_y_max is None:
+                        panel_y_min, panel_y_max = self._inspector_auto_limits_for_panel(result, ch)
                     if selection is None:
-                        self._draw_waveform_axis(
-                            axes[ch_idx][0], ch, ch_t_grid, traces.get(ch, []), result,
-                            units=units.get(ch, ""), color=colors[ch_idx % len(colors)], summary_mode=summary_mode,
-                            summary_only_requested=True, show_summary_line=show_summary_line,
-                            show_summary_band=show_summary_band, show_xlabel=(ch_idx == len(chs_with_data) - 1),
-                            y_min=y_min, y_max=y_max,
+                        ax = axes[ch_idx][0]
+                        ax.set_facecolor(BG)
+                        msg = "No finite traces for the selected inspector filter."
+                        self._style_ax(ax, title=ch, ylabel=units.get(ch, ""))
+                        ax.text(
+                            0.5, 0.5, msg,
+                            color=FG, ha="center", va="center", fontsize=9,
+                            transform=ax.transAxes, wrap=True, multialignment="center",
                         )
+                        ax.axvline(0, color="#ffffff", lw=0.7, ls="--", alpha=0.55)
+                        ax.axhline(0, color=GRID, lw=0.4, alpha=0.7)
+                        if len(ch_t_grid) >= 2:
+                            ax.set_xlim(float(ch_t_grid[0]), float(ch_t_grid[-1]))
+                        if panel_y_min is not None or panel_y_max is not None:
+                            ax.set_ylim(bottom=panel_y_min, top=panel_y_max)
+                        if ch_idx == len(chs_with_data) - 1:
+                            ax.set_xlabel("Time relative to event (s)", color=FG, fontsize=8)
+                        else:
+                            ax.set_xticklabels([])
                     else:
                         self._draw_inspector_axis(
                             axes[ch_idx][0], ch, ch_t_grid, selection,
                             units=units.get(ch, ""), color=colors[ch_idx % len(colors)],
                             show_xlabel=(ch_idx == len(chs_with_data) - 1),
-                            y_min=y_min, y_max=y_max,
+                            y_min=panel_y_min, y_max=panel_y_max,
                         )
                 else:
                     self._draw_waveform_axis(

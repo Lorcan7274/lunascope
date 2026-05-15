@@ -21,6 +21,7 @@
 #  --------------------------------------------------------------------
 
 import io
+import os
 import pickle
 import zipfile
 
@@ -104,6 +105,7 @@ class HelpHeaderView(QHeaderView):
 class ResultsIOMixin:
 
     def _init_results_io(self):
+        self._loaded_tsv_csv = False
         self.ui.butt_out_save.clicked.connect(self._save_results)
         self.ui.butt_out_load.clicked.connect(self._load_results)
         self.ui.butt_out_clear.clicked.connect(self._clear_results)
@@ -112,9 +114,16 @@ class ResultsIOMixin:
         self.ui.anal_table.setHorizontalHeader(self._help_header)
 
     def _update_table(self, cmd, stratum):
-        """Wraps AnalMixin._update_table to update the help header context."""
         super()._update_table(cmd, stratum)
         self._help_header.set_help_context(cmd, stratum)
+
+    def _render_tables(self, tbls):
+        self._set_tsv_csv_mode(False)
+        super()._render_tables(tbls)
+
+    def _set_tsv_csv_mode(self, enabled: bool):
+        self._loaded_tsv_csv = enabled
+        self.ui.butt_out_save.setEnabled(not enabled)
 
     # ------------------------------------------------------------------
     # Save
@@ -202,12 +211,16 @@ class ResultsIOMixin:
             self.ui,
             "Load Results",
             "",
-            "Results Files (*.pkl *.zip *.db);;Pickle (*.pkl);;Zip of TSVs (*.zip);;Luna DB (*.db);;All Files (*)",
+            "Results Files (*.pkl *.zip *.db *.tsv *.csv);;TSV/CSV (*.tsv *.csv);;Pickle (*.pkl);;Zip of TSVs (*.zip);;Luna DB (*.db);;All Files (*)",
         )
         if not filename:
             return
 
         lower = filename.lower()
+        if lower.endswith(".tsv") or lower.endswith(".csv"):
+            self._load_results_tsv_csv(filename)
+            return
+
         project_mode = False
         try:
             if lower.endswith(".pkl"):
@@ -221,13 +234,14 @@ class ResultsIOMixin:
                 QMessageBox.critical(
                     self.ui,
                     "Load error",
-                    "Unrecognised file format. Expected .pkl, .zip, or .db.",
+                    "Unrecognised file format. Expected .pkl, .zip, .db, .tsv, or .csv.",
                 )
                 return
         except Exception as e:
             QMessageBox.critical(self.ui, "Load error", f"Could not load results:\n{e}")
             return
 
+        self._set_tsv_csv_mode(False)
         self.project_mode = project_mode
         self.results = {
             k: df.sort_values("ID").reset_index(drop=True) if "ID" in df.columns else df
@@ -237,6 +251,38 @@ class ResultsIOMixin:
         self.set_tree_from_df(tree_df)
         self.ui.dock_outputs.show()
         self.sig_results_changed.emit()
+
+    def _load_results_tsv_csv(self, filename: str):
+        lower = filename.lower()
+        sep = "\t" if lower.endswith(".tsv") else ","
+        file_type = "TSV" if lower.endswith(".tsv") else "CSV"
+        try:
+            df = pd.read_csv(filename, sep=sep)
+        except Exception as e:
+            QMessageBox.critical(self.ui, "Load error", f"Could not load file:\n{e}")
+            return
+
+        basename = os.path.basename(filename)
+        key = f"{basename}_{file_type}"
+        self.results = {key: df}
+        self._project_results_mode = True  # suppresses ID-column drop in _update_table
+        self.project_mode = False
+        tree_df = pd.DataFrame([{"Command": basename, "Strata": file_type}])
+        self.set_tree_from_df(tree_df)
+        self.ui.dock_outputs.show()
+        self._set_tsv_csv_mode(True)
+        self.sig_results_changed.emit()
+
+        # auto-select the single row so the table appears immediately
+        tv = self.ui.anal_tables
+        m = tv.model()
+        if m and m.rowCount() > 0:
+            idx = m.index(0, 0)
+            tv.setCurrentIndex(idx)
+            sm = tv.selectionModel()
+            if sm:
+                from PySide6.QtCore import QItemSelectionModel
+                sm.select(idx, QItemSelectionModel.ClearAndSelect | QItemSelectionModel.Rows)
 
     def _load_results_db(self, path):
         self.proj.import_db(path)
@@ -327,3 +373,4 @@ class ResultsIOMixin:
         self.project_mode = False
         self.set_tree_from_df(None)
         self.ui.anal_table.setModel(QStandardItemModel(self))
+        self._set_tsv_csv_mode(False)

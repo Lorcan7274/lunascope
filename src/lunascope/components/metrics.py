@@ -557,9 +557,11 @@ class MetricsMixin:
         view.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
         view.resizeColumnsToContents()
 
+        # Notify waveform tab so its annotation combo reflects the new record.
+        if hasattr(self, "_tab_wave"):
+            QTimer.singleShot(0, self._tab_wave._refresh_ann_ch)
 
 
-        
         # --------------------------------------------------------------------------------
         # redo original population of ssa
 

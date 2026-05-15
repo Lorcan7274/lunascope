@@ -22,6 +22,7 @@
 
 """Predict dock – Luna model-based prediction (e.g. brain age)."""
 
+import threading
 import urllib.request
 from pathlib import Path
 
@@ -128,6 +129,8 @@ class PredictMixin:
 
     def _init_predict(self):
         self._predict_last_df: pd.DataFrame | None = None
+        self._predict_cancel_event = threading.Event()
+        self._predict_proj_running = False
 
         # ---- Dock --------------------------------------------------------
         dock = AuxiliaryWindow("Predict", self.ui)
@@ -235,8 +238,9 @@ class PredictMixin:
         varsfile_edit.setPlaceholderText("Path to per-individual variables file…")
         varsfile_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         varsfile_edit.setToolTip(
-            "Optional tab-delimited vars file. The IID column must match the current individual.\n"
-            "Direct variable entries above take precedence over file values."
+            "Tab-delimited file with IID column + one column per variable (e.g. age).\n"
+            "In project mode each individual's row is looked up by ID.\n"
+            "Values entered in the dialog above override the file."
         )
         varsfile_browse = QPushButton("Browse…")
         varsfile_browse.setObjectName("predict_varsfile_browse")
@@ -246,16 +250,29 @@ class PredictMixin:
         fl.addWidget(varsfile_browse)
         outer.addWidget(varsfile_frame)
 
-        # ---- Run button --------------------------------------------------
+        # ---- Run buttons -------------------------------------------------
         run_frame = QFrame(root)
         rl = QHBoxLayout(run_frame)
         rl.setContentsMargins(0, 2, 0, 2)
         rl.setSpacing(6)
+
         run_btn = QPushButton("Run Predict")
         run_btn.setObjectName("predict_run_btn")
         run_btn.setFixedHeight(28)
         run_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        run_btn.setToolTip("Run predict for the currently loaded individual")
+
+        run_all_btn = QPushButton("Run All")
+        run_all_btn.setObjectName("predict_run_all_btn")
+        run_all_btn.setFixedHeight(28)
+        run_all_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        run_all_btn.setToolTip(
+            "Run predict for every visible sample in the S-list.\n"
+            "Click again (shows as Stop) to interrupt after the current individual."
+        )
+
         rl.addWidget(run_btn)
+        rl.addWidget(run_all_btn)
         outer.addWidget(run_frame)
 
         # ---- Results divider --------------------------------------------
@@ -320,20 +337,21 @@ class PredictMixin:
         dock.hide()
 
         # ---- Store refs --------------------------------------------------
-        self.ui.dock_predict         = dock
-        self.ui.predict_model_combo  = model_combo
-        self.ui.predict_path_edit    = path_edit
-        self.ui.predict_get_btn      = get_btn
-        self.ui.predict_status_lbl   = status_lbl
-        self.ui.predict_ch_combo     = ch_combo
-        self.ui.predict_th_edit      = th_edit
+        self.ui.dock_predict           = dock
+        self.ui.predict_model_combo    = model_combo
+        self.ui.predict_path_edit      = path_edit
+        self.ui.predict_get_btn        = get_btn
+        self.ui.predict_status_lbl     = status_lbl
+        self.ui.predict_ch_combo       = ch_combo
+        self.ui.predict_th_edit        = th_edit
         self.ui.predict_varsfile_edit  = varsfile_edit
         self.ui.predict_varsfile_browse = varsfile_browse
-        self.ui.predict_run_btn      = run_btn
-        self.ui.predict_badge_yobs   = badge_yobs
-        self.ui.predict_badge_y1     = badge_y1
-        self.ui.predict_badge_diff   = badge_diff
-        self.ui.predict_result_table = result_table
+        self.ui.predict_run_btn        = run_btn
+        self.ui.predict_run_all_btn    = run_all_btn
+        self.ui.predict_badge_yobs     = badge_yobs
+        self.ui.predict_badge_y1       = badge_y1
+        self.ui.predict_badge_diff     = badge_diff
+        self.ui.predict_result_table   = result_table
 
         # ---- Dark-mode styling -------------------------------------------
         if is_dark_palette():
@@ -344,6 +362,12 @@ class PredictMixin:
         get_btn.clicked.connect(self._download_predict_model)
         varsfile_browse.clicked.connect(self._browse_predict_varsfile)
         run_btn.clicked.connect(self._run_predict)
+        run_all_btn.clicked.connect(self._on_predict_run_all_clicked)
+
+        self.sig_predict_proj_progress.connect(self._predict_proj_progress_update, Qt.QueuedConnection)
+        self.sig_predict_proj_row.connect(self._predict_proj_row_done, Qt.QueuedConnection)
+        self.sig_predict_proj_done.connect(self._predict_proj_done, Qt.QueuedConnection)
+        self.sig_predict_proj_failed.connect(self._predict_proj_failed, Qt.QueuedConnection)
 
         # Populate var fields for default model
         self._rebuild_predict_var_fields()
@@ -364,7 +388,6 @@ class PredictMixin:
     def _rebuild_predict_var_fields(self):
         """Recreate the dynamic variable-entry QLineEdits for the current model."""
         layout = self._predict_var_layout
-        # Remove old widgets
         while layout.count():
             item = layout.takeAt(0)
             w = item.widget()
@@ -498,7 +521,51 @@ class PredictMixin:
             self.ui.predict_varsfile_edit.setText(path)
 
     # ------------------------------------------------------------------
-    # Run
+    # Vars file helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _load_predict_varsfile(path: str) -> "pd.DataFrame | None":
+        """Load a vars file → DataFrame indexed by IID column. Returns None on failure."""
+        if not path:
+            return None
+        p = Path(path)
+        if not p.exists():
+            return None
+        try:
+            sep = "\t" if path.lower().endswith((".tsv", ".txt")) else ","
+            df = pd.read_csv(path, sep=sep, dtype=str)
+            if df.empty:
+                return None
+            for col_name in ("IID", "ID", "iid", "id"):
+                if col_name in df.columns:
+                    return df.set_index(col_name)
+            return df.set_index(df.columns[0])
+        except Exception:
+            return None
+
+    @staticmethod
+    def _resolve_predict_var(
+        id_str: str,
+        var_name: str,
+        direct_val: str,
+        vars_df: "pd.DataFrame | None",
+    ) -> "str | None":
+        """Return resolved value for var_name: dialog first, then vars file, else None."""
+        if direct_val:
+            return direct_val
+        if vars_df is not None:
+            try:
+                if id_str in vars_df.index and var_name in vars_df.columns:
+                    val = str(vars_df.loc[id_str, var_name]).strip()
+                    if val and val.lower() not in ("nan", "na", "none", ""):
+                        return val
+            except Exception:
+                pass
+        return None
+
+    # ------------------------------------------------------------------
+    # Run (single individual)
     # ------------------------------------------------------------------
 
     def _run_predict(self):
@@ -521,7 +588,6 @@ class PredictMixin:
             )
             return
 
-        # Channels
         channels = (
             self.ui.predict_ch_combo.checked_items()
             if hasattr(self.ui.predict_ch_combo, "checked_items")
@@ -532,14 +598,37 @@ class PredictMixin:
             QMessageBox.critical(self.ui, "Predict", "No EEG channel(s) selected.")
             return
 
-        # User vars
-        direct_vars: dict[str, str] = {}
-        for var_name, edit in self._predict_var_widgets.items():
-            val = edit.text().strip()
-            direct_vars[var_name] = val  # empty = not set directly
+        # Determine current individual ID for vars file lookup
+        id_str = self._predict_current_id()
+
+        # Direct vars from dialog widgets
+        direct_vars = {
+            var_name: edit.text().strip()
+            for var_name, edit in self._predict_var_widgets.items()
+        }
 
         th = self.ui.predict_th_edit.text().strip() or "3"
         vars_file = self.ui.predict_varsfile_edit.text().strip()
+        vars_df = self._load_predict_varsfile(vars_file)
+
+        # Resolve required vars; error if any are missing
+        resolved_vars: dict[str, str] = {}
+        missing_vars: list[str] = []
+        for var_name, _ in model.get("user_vars", []):
+            val = self._resolve_predict_var(id_str, var_name, direct_vars.get(var_name, ""), vars_df)
+            if val is not None:
+                resolved_vars[var_name] = val
+            else:
+                missing_vars.append(var_name)
+
+        if missing_vars:
+            msg = (
+                f"Required variable(s) not set: {', '.join(missing_vars)}\n\n"
+                "Enter a value in the dialog above, or provide a vars file whose "
+                "IID column matches this individual's ID."
+            )
+            QMessageBox.critical(self.ui, "Predict", msg)
+            return
 
         if getattr(self, "_busy", False):
             return
@@ -552,16 +641,25 @@ class PredictMixin:
         self.lock_ui()
         QTimer.singleShot(
             0,
-            lambda: self._start_predict_worker(mid, channels, direct_vars, th, vars_file),
+            lambda: self._start_predict_worker(mid, channels, resolved_vars, th),
         )
+
+    def _predict_current_id(self) -> str:
+        """Return the ID of the currently selected slist row (column 0)."""
+        view = self.ui.tbl_slist
+        slist_model = view.model()
+        curr_idx = view.currentIndex()
+        if curr_idx.isValid() and slist_model is not None:
+            col0 = slist_model.index(curr_idx.row(), 0)
+            return str(slist_model.data(col0, Qt.DisplayRole) or "").strip()
+        return ""
 
     def _start_predict_worker(
         self,
         model_id: str,
         channels: list[str],
-        direct_vars: dict[str, str],
+        resolved_vars: dict[str, str],
         th: str,
-        vars_file: str,
     ):
         if not getattr(self, "_busy", False):
             return
@@ -571,9 +669,8 @@ class PredictMixin:
             self.p,
             model_id,
             channels,
-            direct_vars,
+            resolved_vars,
             th,
-            vars_file,
         )
 
         def _done(_f=fut):
@@ -592,9 +689,8 @@ class PredictMixin:
         p,
         model_id: str,
         channels: list[str],
-        direct_vars: dict[str, str],
+        resolved_vars: dict[str, str],
         th: str,
-        vars_file: str,
     ) -> pd.DataFrame:
         from lunapi.results import cmdfile
 
@@ -602,22 +698,14 @@ class PredictMixin:
         mpath = str(_model_dir(model_id))
         luna_txt = _model_dir(model_id) / f"{model_id}-luna.txt"
 
-        # Load vars file first (direct entries override below)
-        if vars_file:
-            p.var("vars", vars_file)
-
-        # Set automatic vars
         p.var("mpath", mpath)
         p.var("th", th)
 
-        # Channel var
         ch_var = model.get("channel_var", "cen")
         p.var(ch_var, ",".join(channels))
 
-        # Direct user vars (skip if empty — let vars file supply them)
-        for var_name, val in direct_vars.items():
-            if val:
-                p.var(var_name, val)
+        for var_name, val in resolved_vars.items():
+            p.var(var_name, val)
 
         p.eval_lunascope(cmdfile(str(luna_txt)))
         df = p.table("PREDICT")
@@ -652,11 +740,287 @@ class PredictMixin:
             self.sb_progress.setVisible(False)
 
     # ------------------------------------------------------------------
+    # Run All (project mode)
+    # ------------------------------------------------------------------
+
+    def _on_predict_run_all_clicked(self):
+        if self._predict_proj_running:
+            self._request_predict_cancel()
+        else:
+            self._run_predict_all()
+
+    def _run_predict_all(self):
+        if getattr(self, "_busy", False):
+            return
+
+        model = self._current_predict_model()
+        if model is None:
+            QMessageBox.critical(self.ui, "Predict", "No model selected.")
+            return
+
+        mid = model["id"]
+        if not _model_files_present(mid):
+            QMessageBox.critical(
+                self.ui,
+                "Predict",
+                f"Model files for '{mid}' are not downloaded.\n"
+                "Click Get… to download them first.",
+            )
+            return
+
+        channels = (
+            self.ui.predict_ch_combo.checked_items()
+            if hasattr(self.ui.predict_ch_combo, "checked_items")
+            else [self.ui.predict_ch_combo.currentText().strip()]
+        )
+        channels = [c for c in channels if c]
+        if not channels:
+            QMessageBox.critical(self.ui, "Predict", "No EEG channel(s) selected.")
+            return
+
+        # Collect visible slist rows
+        view = self.ui.tbl_slist
+        slist_model = view.model()
+        if not slist_model or slist_model.rowCount() == 0:
+            QMessageBox.critical(self.ui, "Predict", "No samples in the S-list.")
+            return
+
+        records: list[str] = []
+        for row in range(slist_model.rowCount()):
+            idx = slist_model.index(row, 0)
+            label = str(slist_model.data(idx, Qt.DisplayRole) or "").strip()
+            if label:
+                records.append(label)
+
+        if not records:
+            QMessageBox.critical(self.ui, "Predict", "No samples found in the S-list.")
+            return
+
+        # Direct vars from dialog (override for all individuals)
+        direct_vars = {
+            var_name: edit.text().strip()
+            for var_name, edit in self._predict_var_widgets.items()
+        }
+
+        th = self.ui.predict_th_edit.text().strip() or "3"
+        vars_file = self.ui.predict_varsfile_edit.text().strip()
+
+        # Guard: need at least one source for required vars
+        required_vars = [v for v, _ in model.get("user_vars", [])]
+        if required_vars:
+            has_all_direct = all(direct_vars.get(v) for v in required_vars)
+            if not has_all_direct and not vars_file:
+                QMessageBox.critical(
+                    self.ui,
+                    "Predict",
+                    f"Required variable(s): {', '.join(required_vars)}\n\n"
+                    "Either enter a value in the dialog (applied to all individuals) "
+                    "or provide a vars file with an IID column and these variable columns.",
+                )
+                return
+
+        # Reset state
+        self._predict_cancel_event.clear()
+        self._predict_proj_running = True
+
+        # Clear table & badges
+        self.ui.predict_result_table.setRowCount(0)
+        self.ui.predict_result_table.setColumnCount(0)
+        self.ui.predict_badge_yobs.setText("—")
+        self.ui.predict_badge_y1.setText("—")
+        self.ui.predict_badge_diff.setText("—")
+
+        # Lock UI
+        self._busy = True
+        self._buttons(False)
+        self.ui.predict_run_btn.setEnabled(False)
+        self.ui.predict_run_all_btn.setText("Stop")
+        self.sb_progress.setVisible(True)
+        self.sb_progress.setRange(0, len(records))
+        self.sb_progress.setValue(0)
+        self.sb_progress.setFormat(f"0 / {len(records)}")
+        self.lock_ui(
+            f"Running predict for {len(records)} samples…\n\n"
+            "Click Stop to interrupt after the current individual."
+        )
+
+        fut = self._exec.submit(
+            self._predict_project_worker,
+            records, mid, channels, direct_vars, th, vars_file,
+        )
+
+        def _done(_f=fut):
+            try:
+                self.sig_predict_proj_done.emit(_f.result())
+            except Exception as e:
+                self.sig_predict_proj_failed.emit(f"{type(e).__name__}: {e}")
+
+        fut.add_done_callback(_done)
+
+    def _predict_project_worker(
+        self,
+        records: list[str],
+        model_id: str,
+        channels: list[str],
+        direct_vars: dict[str, str],
+        th: str,
+        vars_file: str,
+    ) -> dict:
+        vars_df = self._load_predict_varsfile(vars_file)
+        model = _MODEL_BY_ID[model_id]
+        required_vars = [v for v, _ in model.get("user_vars", [])]
+
+        all_dfs: list[pd.DataFrame] = []
+        cancelled = False
+
+        for i, id_str in enumerate(records, start=1):
+            if self._predict_cancel_event.is_set():
+                cancelled = True
+                break
+
+            # Resolve vars for this individual
+            resolved: dict[str, str] = {}
+            missing: list[str] = []
+            for var_name in required_vars:
+                val = self._resolve_predict_var(
+                    id_str, var_name, direct_vars.get(var_name, ""), vars_df
+                )
+                if val is not None:
+                    resolved[var_name] = val
+                else:
+                    missing.append(var_name)
+
+            if missing:
+                # Skip this individual but record an NA row
+                na_row = pd.DataFrame({"ID": [id_str], "SKIPPED": [f"missing: {', '.join(missing)}"]})
+                all_dfs.append(na_row)
+                self.sig_predict_proj_row.emit(na_row)
+                self.sig_predict_proj_progress.emit(i, len(records))
+                continue
+
+            try:
+                self.proj.clear_vars()
+                self.proj.reinit()
+                p = self.proj.inst(id_str)
+                row_df = self._derive_predict(p, model_id, channels, resolved, th)
+                if not row_df.empty and "ID" not in row_df.columns:
+                    row_df.insert(0, "ID", id_str)
+                all_dfs.append(row_df)
+                self.sig_predict_proj_row.emit(row_df)
+            except Exception as e:
+                err_row = pd.DataFrame({"ID": [id_str], "ERROR": [str(e)]})
+                all_dfs.append(err_row)
+                self.sig_predict_proj_row.emit(err_row)
+
+            self.sig_predict_proj_progress.emit(i, len(records))
+
+        combined = pd.concat(all_dfs, ignore_index=True) if all_dfs else pd.DataFrame()
+        return {"df": combined, "cancelled": cancelled, "n": len(records)}
+
+    def _request_predict_cancel(self):
+        if not self._predict_proj_running:
+            return
+        self._predict_cancel_event.set()
+        self.ui.predict_run_all_btn.setEnabled(False)
+        self.ui.predict_run_all_btn.setText("Stopping…")
+
+    # ------------------------------------------------------------------
+    # Project mode Slots
+    # ------------------------------------------------------------------
+
+    @Slot(int, int)
+    def _predict_proj_progress_update(self, i: int, n: int):
+        self.sb_progress.setValue(i)
+        self.sb_progress.setFormat(f"{i} / {n}")
+
+    @Slot(object)
+    def _predict_proj_row_done(self, row_df: pd.DataFrame):
+        """Append one individual's result to the table as it arrives."""
+        if row_df is None or row_df.empty:
+            return
+        self._append_predict_table_rows(row_df)
+
+    @Slot(object)
+    def _predict_proj_done(self, result: dict):
+        try:
+            df: pd.DataFrame = result.get("df", pd.DataFrame())
+            self._predict_last_df = df
+            # Update badges from first valid (non-skipped/error) row
+            if not df.empty and "Y1" in df.columns:
+                valid = df[pd.to_numeric(df["Y1"], errors="coerce").notna()]
+                if not valid.empty:
+                    self._render_predict_badges(valid.iloc[0:1])
+        finally:
+            self._predict_proj_cleanup()
+
+    @Slot(str)
+    def _predict_proj_failed(self, msg: str):
+        try:
+            QMessageBox.critical(self.ui, "Predict error", msg)
+        finally:
+            self._predict_proj_cleanup()
+
+    def _predict_proj_cleanup(self):
+        self.unlock_ui()
+        self._busy = False
+        self._predict_proj_running = False
+        self._predict_cancel_event.clear()
+        self._buttons(True)
+        self.ui.predict_run_btn.setEnabled(True)
+        self.ui.predict_run_all_btn.setText("Run All")
+        self.ui.predict_run_all_btn.setEnabled(True)
+        self.sb_progress.setRange(0, 100)
+        self.sb_progress.setValue(0)
+        self.sb_progress.setVisible(False)
+
+    # ------------------------------------------------------------------
     # Render results
     # ------------------------------------------------------------------
 
-    def _render_predict_results(self, df: pd.DataFrame):
-        # Update badge labels
+    def _append_predict_table_rows(self, df: pd.DataFrame):
+        """Append rows from df to the results table, creating columns on first call."""
+        tbl = self.ui.predict_result_table
+
+        # First batch: set up columns
+        if tbl.columnCount() == 0 and not df.empty:
+            cols = list(df.columns)
+            tbl.setColumnCount(len(cols))
+            tbl.setHorizontalHeaderLabels(cols)
+
+        if tbl.columnCount() == 0:
+            return
+
+        cols = [
+            tbl.horizontalHeaderItem(c).text()
+            for c in range(tbl.columnCount())
+        ]
+
+        for _, row in df.iterrows():
+            r = tbl.rowCount()
+            tbl.insertRow(r)
+            for c, col in enumerate(cols):
+                val = row.get(col, None)
+                if val is None:
+                    txt = "NA"
+                else:
+                    try:
+                        num = float(val)
+                        txt = f"{num:.4f}" if not float(num).is_integer() else f"{int(num)}"
+                    except (TypeError, ValueError, AttributeError):
+                        txt = str(val)
+                item = QTableWidgetItem(txt)
+                item.setTextAlignment(Qt.AlignCenter)
+                if col in _KEY_COLS:
+                    item.setForeground(
+                        Qt.cyan   if col == "Y1"   else
+                        Qt.green  if col == "YOBS" else
+                        Qt.yellow
+                    )
+                tbl.setItem(r, c, item)
+
+        tbl.resizeColumnsToContents()
+
+    def _render_predict_badges(self, df: pd.DataFrame):
         def _fmt(col: str) -> str:
             if df.empty or col not in df.columns:
                 return "—"
@@ -671,7 +1035,6 @@ class PredictMixin:
 
         diff_text = _fmt("DIFF")
         self.ui.predict_badge_diff.setText(diff_text)
-        # Tint DIFF badge: positive = older-than-expected (warm), negative = cooler
         try:
             diff_val = float(diff_text)
             if diff_val > 0:
@@ -687,34 +1050,14 @@ class PredictMixin:
         except ValueError:
             pass
 
-        # Populate full table
+    def _render_predict_results(self, df: pd.DataFrame):
+        """Full render for single-individual result."""
+        self._render_predict_badges(df)
+
         tbl = self.ui.predict_result_table
+        tbl.setRowCount(0)
+        tbl.setColumnCount(0)
         if df.empty:
-            tbl.setRowCount(0)
-            tbl.setColumnCount(0)
             return
 
-        cols = list(df.columns)
-        tbl.setColumnCount(len(cols))
-        tbl.setRowCount(len(df))
-        tbl.setHorizontalHeaderLabels(cols)
-
-        for r, row in df.iterrows():
-            for c, col in enumerate(cols):
-                val = row[col]
-                try:
-                    num = float(val)
-                    txt = f"{num:.4f}" if not num.is_integer() else f"{int(num)}"
-                except (TypeError, ValueError, AttributeError):
-                    txt = str(val)
-                item = QTableWidgetItem(txt)
-                item.setTextAlignment(Qt.AlignCenter)
-                if col in _KEY_COLS:
-                    item.setForeground(
-                        Qt.cyan if col == "Y1" else
-                        Qt.green if col == "YOBS" else
-                        Qt.yellow
-                    )
-                tbl.setItem(r, c, item)
-
-        tbl.resizeColumnsToContents()
+        self._append_predict_table_rows(df)

@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
     QStyle,
     QStyleOptionViewItem,
 )
-from PySide6.QtCore import Qt, QDir, QEvent, QRegularExpression, QSortFilterProxyModel, QAbstractTableModel, QModelIndex, QSize
+from PySide6.QtCore import Qt, QDir, QEvent, QRegularExpression, QSortFilterProxyModel, QAbstractTableModel, QModelIndex, QSize, QTimer
 from PySide6.QtGui import QStandardItemModel, QStandardItem, QPalette, QIcon
 
 import pandas as pd
@@ -173,6 +173,8 @@ class SampleListCompactDelegate(QStyledItemDelegate):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._expanded_keys = set()
+        self._meta_rows = {}   # id -> {col: val}
+        self._meta_cols = []   # ordered display columns (up to 10)
 
     @staticmethod
     def _clean_detail(value):
@@ -213,7 +215,12 @@ class SampleListCompactDelegate(QStyledItemDelegate):
         fm = option.fontMetrics
         height = fm.height() + 12
         if self.is_expanded(index):
-            height += (fm.height() + 4) * 2
+            n_extra = 2  # EDF + Annot
+            if self._meta_cols:
+                id_str = str(index.data(Qt.DisplayRole) or "")
+                if id_str in self._meta_rows:
+                    n_extra += len(self._meta_cols)
+            height += (fm.height() + 4) * n_extra
         return QSize(base.width(), max(base.height(), height))
 
     def paint(self, painter, option, index):
@@ -257,12 +264,22 @@ class SampleListCompactDelegate(QStyledItemDelegate):
         if expanded:
             edf_text = self._clean_detail(index.siblingAtColumn(1).data(Qt.DisplayRole))
             annot_text = self._clean_detail(index.siblingAtColumn(2).data(Qt.DisplayRole))
-            detail_rect = body_rect.adjusted(0, fm.height() + 4, 0, 0)
+            line_h = fm.height() + 4
+            detail_rect = body_rect.adjusted(0, line_h, 0, 0)
             painter.setPen(secondary)
             detail1 = fm.elidedText(f"EDF: {edf_text}", Qt.ElideMiddle, max(40, detail_rect.width()))
             detail2 = fm.elidedText(f"Annot: {annot_text}", Qt.ElideMiddle, max(40, detail_rect.width()))
             painter.drawText(detail_rect, Qt.AlignLeft | Qt.AlignTop, detail1)
-            painter.drawText(detail_rect.adjusted(0, fm.height() + 4, 0, 0), Qt.AlignLeft | Qt.AlignTop, detail2)
+            painter.drawText(detail_rect.adjusted(0, line_h, 0, 0), Qt.AlignLeft | Qt.AlignTop, detail2)
+            if self._meta_cols:
+                id_str = str(index.data(Qt.DisplayRole) or "")
+                meta = self._meta_rows.get(id_str)
+                if meta:
+                    for i, col in enumerate(self._meta_cols):
+                        val = meta.get(col, "")
+                        mr = body_rect.adjusted(0, line_h * (3 + i), 0, 0)
+                        painter.drawText(mr, Qt.AlignLeft | Qt.AlignTop,
+                                         fm.elidedText(f"{col}: {val}", Qt.ElideMiddle, max(40, mr.width())))
 
         painter.restore()
 
@@ -493,8 +510,20 @@ class SListMixin:
 
     def _init_slist(self):
 
-        # attach comma-delimited OR filter
+        # metadata state
+        self._meta_rows = {}          # id -> {col: val}
+        self._meta_cols = []          # display columns (up to 10, after filter)
+        self._meta_file = ""          # path of the currently loaded meta file
+        self._meta_vars_filter = []   # from config meta-data-vars
+
+        # Flag set while filter text is changing so currentRowChanged is ignored.
+        # Connected BEFORE attach_comma_filter so this handler fires first.
+        self._slist_filter_changing = False
+        self.ui.flt_slist.textChanged.connect(self._on_slist_filter_text_changing)
+
+        # attach comma-delimited OR filter; restrict to col 0 (ID) only
         self._proxy = attach_comma_filter( self.ui.tbl_slist , self.ui.flt_slist )
+        self._proxy.setFilterKeyColumn(0)
         self._slist_delegate = SampleListCompactDelegate(self.ui.tbl_slist)
         self.ui.tbl_slist.setItemDelegateForColumn(0, self._slist_delegate)
         self.ui.tbl_slist.clicked.connect(self._expand_slist_row)
@@ -621,13 +650,113 @@ class SListMixin:
         self.ui.tbl_slist.resizeRowToContents(index.row())
         self.ui.tbl_slist.viewport().update()
 
+    def _on_slist_filter_text_changing(self, _text):
+        """Called first (before attach_comma_filter's handler) when filter text changes."""
+        self._slist_filter_changing = True
+        QTimer.singleShot(0, self._on_slist_filter_done)
+
+    def _on_slist_filter_done(self):
+        """Reset flag after the proxy has finished re-filtering, then repaint."""
+        self._slist_filter_changing = False
+        self._refresh_slist_row_heights()
+        self.ui.tbl_slist.viewport().update()
+
     def _on_slist_current_row_changed(self, current, previous):
+        # While filter text is changing the proxy re-selects rows by position,
+        # not by identity.  Ignore those spurious selection changes entirely so
+        # the attached study and its expanded row stay unchanged.
+        if self._slist_filter_changing:
+            return
+
         if current.isValid() and hasattr(self, "_slist_delegate"):
             self._slist_delegate.set_expanded_only(current)
             self._refresh_slist_row_heights()
             self.ui.tbl_slist.viewport().update()
         self._attach_inst(current, previous)
 
+
+    # ------------------------------------------------------------
+    # Metadata file (TSV / .meta)
+    # ------------------------------------------------------------
+
+    def _update_meta_delegate(self):
+        if hasattr(self, "_slist_delegate"):
+            self._slist_delegate._meta_rows = self._meta_rows
+            self._slist_delegate._meta_cols = self._meta_cols
+            self._refresh_slist_row_heights()
+            self.ui.tbl_slist.viewport().update()
+
+    def _load_meta_file(self, path: str) -> bool:
+        """Load a TSV/.meta file; first column = ID, remaining = metadata fields.
+
+        Respects self._meta_vars_filter (comma list from config) and limits to
+        10 columns.  Returns True on success, False if the file is missing or
+        has an unexpected format (caller may warn the user).
+        """
+        self._meta_rows = {}
+        self._meta_cols = []
+        if not path:
+            self._update_meta_delegate()
+            return False
+        try:
+            p = Path(path).expanduser()
+            if not p.exists():
+                self._update_meta_delegate()
+                return False
+            df = pd.read_csv(str(p), sep="\t", dtype=str)
+            if df.empty or df.shape[1] < 2:
+                self._update_meta_delegate()
+                return False
+            id_col = df.columns[0]
+            data_cols = list(df.columns[1:])
+            if self._meta_vars_filter:
+                data_cols = [c for c in data_cols if c in self._meta_vars_filter]
+            data_cols = data_cols[:10]
+            if not data_cols:
+                self._update_meta_delegate()
+                return False
+            rows: dict[str, dict[str, str]] = {}
+            for _, row in df.iterrows():
+                id_val = str(row[id_col]).strip()
+                if id_val and id_val not in ("", ".", "nan", "NaN"):
+                    rows[id_val] = {
+                        c: (str(row[c]) if pd.notna(row[c]) else "") for c in data_cols
+                    }
+            self._meta_rows = rows
+            self._meta_cols = data_cols
+            self._meta_file = str(p)
+        except Exception:
+            self._meta_rows = {}
+            self._meta_cols = []
+            self._update_meta_delegate()
+            return False
+        self._update_meta_delegate()
+        return True
+
+    def _clear_meta(self):
+        self._meta_rows = {}
+        self._meta_cols = []
+        self._meta_file = ""
+        self._update_meta_delegate()
+
+    def _load_meta_interactive(self):
+        from ..file_dialogs import open_file_name
+        path, _ = open_file_name(
+            self.ui,
+            "Open metadata file",
+            self._meta_file or "",
+            "Metadata (*.tsv *.meta);;All Files (*)",
+        )
+        if not path:
+            return
+        ok = self._load_meta_file(path)
+        if not ok:
+            QMessageBox.warning(
+                self.ui,
+                "Metadata",
+                f"Could not load metadata from:\n{path}\n\n"
+                "Expected a tab-separated file with IDs in the first column.",
+            )
 
     def _build_slist_from_folder(self, folder: str, annot_ext: str = ""):
         if not folder:
@@ -657,6 +786,15 @@ class SListMixin:
                 raise RuntimeError(f"Could not load sample list '{slist}': {e}") from e
 
             self._apply_sample_list_df(df, slist)
+
+            # Auto-discover companion metadata file (only if not already loaded from config)
+            if not self._meta_rows:
+                stem = Path(slist).with_suffix("")
+                for meta_ext in (".tsv", ".meta"):
+                    candidate = stem.with_suffix(meta_ext)
+                    if candidate.exists():
+                        self._load_meta_file(str(candidate))
+                        break
 
             
     # ------------------------------------------------------------

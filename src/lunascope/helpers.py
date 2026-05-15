@@ -58,20 +58,22 @@ class SmallPlaceholderEdit(QPlainTextEdit):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._suppress_placeholder = False
+        self._custom_placeholder = super().placeholderText()
+        # Keep Qt's built-in placeholder disabled so paintEvent() never has
+        # to mutate widget state mid-paint just to suppress the default draw.
+        super().setPlaceholderText("")
+
+    def setPlaceholderText(self, text):
+        self._custom_placeholder = text or ""
+        super().setPlaceholderText("")
+
+    def placeholderText(self):
+        return self._custom_placeholder
 
     def paintEvent(self, event):
-        ph = self.placeholderText()
-        if ph and not self.toPlainText() and not self._suppress_placeholder:
-            # Temporarily hide the built-in placeholder so Qt does not draw it
-            self._suppress_placeholder = True
-            try:
-                self.setPlaceholderText("")
-                super().paintEvent(event)
-            finally:
-                self.setPlaceholderText(ph)
-                self._suppress_placeholder = False
-
+        super().paintEvent(event)
+        ph = self._custom_placeholder
+        if ph and not self.toPlainText():
             # Draw our own smaller, non-bold placeholder on the viewport
             vp = self.viewport()
             painter = QPainter(vp)
@@ -88,8 +90,6 @@ class SmallPlaceholderEdit(QPlainTextEdit):
             rect = vp.rect().adjusted(ox, oy, -margin, -margin)
             painter.drawText(rect, Qt.AlignLeft | Qt.AlignTop | Qt.TextWordWrap, ph)
             painter.end()
-        else:
-            super().paintEvent(event)
 
 
 class AuxiliaryWindow(QWidget):
@@ -295,13 +295,13 @@ def winsorize_array(values, limit):
 #
 # ------------------------------------------------------------
 
-def add_dock_shortcuts(win, view_menu, toggle_zero=None):
+def add_dock_shortcuts(win, view_menu, toggle_zero=None, reset_layout=None):
 
     # hide/show all
 
     act_show_all = QAction("Show/Hide All Docks", win, checkable=False)
     act_show_all.setShortcut("Ctrl+0")
-    
+
     if toggle_zero is None:
         def toggle_all():
             docks = win.findChildren(QDockWidget)
@@ -312,6 +312,13 @@ def add_dock_shortcuts(win, view_menu, toggle_zero=None):
     else:
         act_show_all.triggered.connect(toggle_zero)
     view_menu.addAction(act_show_all)
+
+    # reset to default layout
+    if reset_layout is not None:
+        act_reset = QAction("Reset to Default Layout", win, checkable=False)
+        act_reset.setShortcut("Ctrl+)")
+        act_reset.triggered.connect(reset_layout)
+        view_menu.addAction(act_reset)
 
     # control individual docks
 
