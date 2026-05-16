@@ -1,0 +1,271 @@
+name: Smoke Test App (PyInstaller Desktop+Diagnostic)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  smoke-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15-intel
+            platform: macOS-Intel
+            os: mac
+            flavor: desktop
+            asset: Lunascope-macOS-Intel-Desktop.dmg
+          - runner: macos-15-intel
+            platform: macOS-Intel
+            os: mac
+            flavor: diagnostic
+            asset: Lunascope-macOS-Intel-Diagnostic.zip
+          - runner: macos-latest
+            platform: macOS-Silicon
+            os: mac
+            flavor: desktop
+            asset: Lunascope-macOS-Silicon-Desktop.dmg
+          - runner: macos-latest
+            platform: macOS-Silicon
+            os: mac
+            flavor: diagnostic
+            asset: Lunascope-macOS-Silicon-Diagnostic.zip
+          - runner: windows-latest
+            platform: Windows
+            os: windows
+            flavor: desktop
+            asset: Lunascope-Windows-Desktop-Setup.exe
+          - runner: windows-latest
+            platform: Windows
+            os: windows
+            flavor: diagnostic
+            asset: Lunascope-Windows-Diagnostic.zip
+
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Download release asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          gh release download latest-teaching-build \
+            --pattern "${{ matrix.asset }}" \
+            --repo "${{ github.repository }}"
+
+      - name: Verify DMG integrity (macOS desktop)
+        if: matrix.os == 'mac' && matrix.flavor == 'desktop'
+        shell: bash
+        run: |
+          hdiutil verify "${{ matrix.asset }}"
+
+      - name: Mount DMG and inspect contents (macOS desktop)
+        if: matrix.os == 'mac' && matrix.flavor == 'desktop'
+        shell: bash
+        run: |
+          hdiutil attach "${{ matrix.asset }}" -mountpoint /Volumes/LunascopeSmoke -nobrowse -quiet
+          ls -la /Volumes/LunascopeSmoke/
+
+          if [ ! -d "/Volumes/LunascopeSmoke/Lunascope.app" ]; then
+            echo "FAIL: Lunascope.app not found in DMG"
+            hdiutil detach /Volumes/LunascopeSmoke -quiet
+            exit 1
+          fi
+          if [ ! -L "/Volumes/LunascopeSmoke/Applications" ]; then
+            echo "FAIL: Applications symlink missing from DMG"
+            hdiutil detach /Volumes/LunascopeSmoke -quiet
+            exit 1
+          fi
+
+      - name: Copy desktop app from DMG (macOS desktop)
+        if: matrix.os == 'mac' && matrix.flavor == 'desktop'
+        shell: bash
+        run: |
+          cp -R /Volumes/LunascopeSmoke/Lunascope.app ./Lunascope.app
+          hdiutil detach /Volumes/LunascopeSmoke -quiet
+
+      - name: Unpack diagnostic ZIP (macOS diagnostic)
+        if: matrix.os == 'mac' && matrix.flavor == 'diagnostic'
+        shell: bash
+        run: |
+          ditto -x -k "${{ matrix.asset }}" .
+          test -x ./Lunascope/Lunascope
+
+      - name: Validate macOS bundle contents
+        if: matrix.os == 'mac' && matrix.flavor == 'desktop'
+        shell: bash
+        run: |
+          APP="./Lunascope.app"
+          for path in "$APP/Contents/MacOS/Lunascope" "$APP/Contents/Info.plist"; do
+            if [ ! -e "$path" ]; then
+              echo "FAIL: missing $path"
+              exit 1
+            fi
+          done
+
+          UI_FILE=$(find "$APP" -path "*/lunascope/ui/main.ui" 2>/dev/null | head -1)
+          MPL_RC=$(find "$APP" -name "matplotlibrc" 2>/dev/null | head -1)
+          if [ -z "$UI_FILE" ]; then
+            echo "FAIL: lunascope/ui/main.ui not found in bundle"
+            exit 1
+          fi
+          if [ -z "$MPL_RC" ]; then
+            echo "FAIL: matplotlibrc not found in bundle"
+            exit 1
+          fi
+
+      - name: Validate macOS diagnostic contents
+        if: matrix.os == 'mac' && matrix.flavor == 'diagnostic'
+        shell: bash
+        run: |
+          UI_FILE=$(find ./Lunascope -path "*/lunascope/ui/main.ui" 2>/dev/null | head -1)
+          MPL_RC=$(find ./Lunascope -name "matplotlibrc" 2>/dev/null | head -1)
+          if [ -z "$UI_FILE" ]; then
+            echo "FAIL: lunascope/ui/main.ui not found in diagnostic bundle"
+            exit 1
+          fi
+          if [ -z "$MPL_RC" ]; then
+            echo "FAIL: matplotlibrc not found in diagnostic bundle"
+            exit 1
+          fi
+
+      - name: Smoke test launch (macOS desktop)
+        if: matrix.os == 'mac' && matrix.flavor == 'desktop'
+        shell: bash
+        run: |
+          BINARY="./Lunascope.app/Contents/MacOS/Lunascope"
+          "$BINARY" >/tmp/lunascope-desktop.log 2>&1 &
+          PID=$!
+          sleep 20
+          if kill -0 "$PID" 2>/dev/null; then
+            kill "$PID"
+            echo "PASS: desktop app stayed alive"
+          else
+            cat /tmp/lunascope-desktop.log
+            echo "FAIL: desktop app exited early"
+            exit 1
+          fi
+
+      - name: Smoke test launch (macOS diagnostic)
+        if: matrix.os == 'mac' && matrix.flavor == 'diagnostic'
+        shell: bash
+        env:
+          LUNASCOPE_DEBUG: "1"
+        run: |
+          ./Lunascope/Lunascope >/tmp/lunascope-diagnostic.log 2>&1 &
+          PID=$!
+          DEADLINE=$((SECONDS + 30))
+          while [ $SECONDS -lt $DEADLINE ]; do
+            if ! kill -0 "$PID" 2>/dev/null; then
+              cat /tmp/lunascope-diagnostic.log
+              echo "FAIL: diagnostic app exited early"
+              exit 1
+            fi
+            if grep -q "Showing main window" /tmp/lunascope-diagnostic.log 2>/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          sleep 10
+          if kill -0 "$PID" 2>/dev/null; then
+            kill "$PID"
+            echo "PASS: diagnostic app stayed alive"
+          else
+            cat /tmp/lunascope-diagnostic.log
+            echo "FAIL: diagnostic app crashed after startup"
+            exit 1
+          fi
+
+      - name: Run desktop installer silently (Windows desktop)
+        if: matrix.os == 'windows' && matrix.flavor == 'desktop'
+        shell: pwsh
+        run: |
+          $proc = Start-Process -FilePath ".\${{ matrix.asset }}" `
+            -ArgumentList "/VERYSILENT", "/NORESTART", "/SUPPRESSMSGBOXES" `
+            -Wait `
+            -PassThru
+          if ($proc.ExitCode -ne 0) {
+            throw "FAIL: installer exited with code $($proc.ExitCode)"
+          }
+
+      - name: Validate installed desktop files (Windows desktop)
+        if: matrix.os == 'windows' && matrix.flavor == 'desktop'
+        shell: pwsh
+        run: |
+          $installDir = "$env:ProgramFiles\Lunascope"
+          if (-not (Test-Path $installDir)) {
+            $installDir = "${env:ProgramFiles(x86)}\Lunascope"
+          }
+          $exe = Join-Path $installDir "Lunascope.exe"
+          if (-not (Test-Path $exe)) {
+            throw "FAIL: missing $exe"
+          }
+
+      - name: Smoke test launch (Windows desktop)
+        if: matrix.os == 'windows' && matrix.flavor == 'desktop'
+        shell: pwsh
+        run: |
+          $installDir = "$env:ProgramFiles\Lunascope"
+          if (-not (Test-Path $installDir)) {
+            $installDir = "${env:ProgramFiles(x86)}\Lunascope"
+          }
+          $exe = Join-Path $installDir "Lunascope.exe"
+          $proc = Start-Process -FilePath $exe -PassThru
+          Start-Sleep -Seconds 20
+          if (-not $proc.HasExited) {
+            $proc.Kill()
+            Write-Host "PASS: desktop app stayed alive"
+          } else {
+            throw "FAIL: desktop app exited early with code $($proc.ExitCode)"
+          }
+
+      - name: Unpack diagnostic ZIP (Windows diagnostic)
+        if: matrix.os == 'windows' && matrix.flavor == 'diagnostic'
+        shell: pwsh
+        run: |
+          Expand-Archive -Path ".\${{ matrix.asset }}" -DestinationPath . -Force
+          if (-not (Test-Path ".\Lunascope\Lunascope.exe")) {
+            throw "FAIL: unpacked diagnostic executable not found"
+          }
+
+      - name: Validate diagnostic contents (Windows diagnostic)
+        if: matrix.os == 'windows' && matrix.flavor == 'diagnostic'
+        shell: pwsh
+        run: |
+          $uiFile = Get-ChildItem -Path .\Lunascope -Filter "main.ui" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          $mplRc = Get-ChildItem -Path .\Lunascope -Filter "matplotlibrc" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $uiFile) { throw "FAIL: lunascope/ui/main.ui not found in diagnostic bundle" }
+          if (-not $mplRc) { throw "FAIL: matplotlibrc not found in diagnostic bundle" }
+
+      - name: Smoke test launch (Windows diagnostic)
+        if: matrix.os == 'windows' && matrix.flavor == 'diagnostic'
+        shell: pwsh
+        env:
+          LUNASCOPE_DEBUG: "1"
+        run: |
+          $exe = Resolve-Path ".\Lunascope\Lunascope.exe"
+          $logFile = "lunascope-diagnostic.log"
+          $proc = Start-Process -FilePath $exe `
+            -RedirectStandardOutput $logFile `
+            -RedirectStandardError $logFile `
+            -PassThru
+
+          $deadline = (Get-Date).AddSeconds(30)
+          while ((Get-Date) -lt $deadline) {
+            if ($proc.HasExited) {
+              if (Test-Path $logFile) { Get-Content $logFile }
+              throw "FAIL: diagnostic app exited early with code $($proc.ExitCode)"
+            }
+            if ((Test-Path $logFile) -and (Select-String -Path $logFile -Pattern "Showing main window" -Quiet)) {
+              break
+            }
+            Start-Sleep -Seconds 1
+          }
+
+          Start-Sleep -Seconds 10
+          if (-not $proc.HasExited) {
+            $proc.Kill()
+            Write-Host "PASS: diagnostic app stayed alive"
+          } else {
+            if (Test-Path $logFile) { Get-Content $logFile }
+            throw "FAIL: diagnostic app crashed after startup with code $($proc.ExitCode)"
+          }

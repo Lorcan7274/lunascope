@@ -1,0 +1,497 @@
+name: Build App (PyInstaller Desktop+Diagnostic)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15-intel
+            platform: macOS-Intel
+            os: mac
+            flavor: desktop
+            artifact_name: Lunascope-macOS-Intel-Desktop.dmg
+          - runner: macos-15-intel
+            platform: macOS-Intel
+            os: mac
+            flavor: diagnostic
+            artifact_name: Lunascope-macOS-Intel-Diagnostic.zip
+          - runner: macos-latest
+            platform: macOS-Silicon
+            os: mac
+            flavor: desktop
+            artifact_name: Lunascope-macOS-Silicon-Desktop.dmg
+          - runner: macos-latest
+            platform: macOS-Silicon
+            os: mac
+            flavor: diagnostic
+            artifact_name: Lunascope-macOS-Silicon-Diagnostic.zip
+          - runner: windows-latest
+            platform: Windows
+            os: windows
+            flavor: desktop
+            artifact_name: Lunascope-Windows-Desktop-Setup.exe
+          - runner: windows-latest
+            platform: Windows
+            os: windows
+            flavor: diagnostic
+            artifact_name: Lunascope-Windows-Diagnostic.zip
+
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies (macOS)
+        if: matrix.os == 'mac'
+        shell: bash
+        run: |
+          rm -rf .venv dist build installer release-assets dmg-staging
+          python -m venv .venv
+          source .venv/bin/activate
+          python -m pip install --upgrade pip
+          python -m pip install .
+          python -m pip install pyinstaller
+          mkdir -p release-assets
+
+      - name: Install dependencies (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          foreach ($path in @(".venv", "dist", "build", "installer", "release-assets")) {
+            if (Test-Path $path) {
+              Remove-Item -Recurse -Force $path
+            }
+          }
+          python -m venv .venv
+          .venv\Scripts\python -m pip install --upgrade pip
+          .venv\Scripts\python -m pip install .
+          .venv\Scripts\python -m pip install pyinstaller
+          New-Item -ItemType Directory -Force -Path release-assets | Out-Null
+
+      - name: Create runtime hook (macOS)
+        if: matrix.os == 'mac'
+        shell: bash
+        run: |
+          cat > hook_stdout.py <<'EOF'
+          import os
+          import sys
+
+          if sys.stdout is None:
+              sys.stdout = open(os.devnull, "w")
+          if sys.stderr is None:
+              sys.stderr = open(os.devnull, "w")
+          EOF
+
+      - name: Create runtime hook (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          @"
+          import os
+          import sys
+
+          if sys.stdout is None:
+              sys.stdout = open(os.devnull, "w")
+          if sys.stderr is None:
+              sys.stderr = open(os.devnull, "w")
+          "@ | Out-File -FilePath hook_stdout.py -Encoding utf8
+
+      - name: Build desktop app (macOS)
+        if: matrix.os == 'mac' && matrix.flavor == 'desktop'
+        shell: bash
+        run: |
+          source .venv/bin/activate
+          pyinstaller launch.py \
+            --name Lunascope \
+            --windowed \
+            --noconfirm \
+            --runtime-hook=hook_stdout.py \
+            --hidden-import=scipy \
+            --hidden-import=scipy.optimize \
+            --hidden-import=scipy.optimize._cobyla_py \
+            --hidden-import=scipy.optimize._constraints \
+            --hidden-import=scipy.optimize._minimize \
+            --hidden-import=scipy.optimize._optimize \
+            --hidden-import=pyparsing \
+            --hidden-import=pyparsing.testing \
+            --hidden-import=IPython \
+            --hidden-import=charset_normalizer \
+            --hidden-import=certifi \
+            --collect-data=lunascope \
+            --collect-data=matplotlib \
+            --exclude-module=ipywidgets \
+            --exclude-module=ipykernel \
+            --exclude-module=jupyter_client \
+            --exclude-module=nbconvert
+
+      - name: Validate PyInstaller analysis warnings (macOS desktop)
+        if: matrix.os == 'mac' && matrix.flavor == 'desktop'
+        shell: bash
+        run: |
+          WARN_FILE="build/Lunascope/warn-Lunascope.txt"
+          test -f "$WARN_FILE"
+          python - <<'PY'
+          from pathlib import Path
+          import sys
+
+          warn_file = Path("build/Lunascope/warn-Lunascope.txt")
+          allow = (
+              "ipywidgets",
+              "ipykernel",
+              "jupyter_client",
+              "nbconvert",
+              "__main__",
+              "winreg",
+              "msvcrt",
+              "_winapi",
+              "nt",
+              "org.python",
+              "java",
+          )
+          bad = []
+          for raw in warn_file.read_text(encoding="utf-8", errors="ignore").splitlines():
+              line = raw.strip()
+              if "missing module named" not in line:
+                  continue
+              if any(token in line for token in allow):
+                  continue
+              bad.append(line)
+          if bad:
+              print("Unexpected PyInstaller missing-module warnings detected:")
+              for line in bad:
+                  print(line)
+              sys.exit(1)
+          print("PyInstaller warnings check passed")
+          PY
+
+      - name: Build diagnostic app (macOS)
+        if: matrix.os == 'mac' && matrix.flavor == 'diagnostic'
+        shell: bash
+        run: |
+          source .venv/bin/activate
+          pyinstaller launch.py \
+            --name Lunascope \
+            --noconfirm \
+            --runtime-hook=hook_stdout.py \
+            --hidden-import=scipy \
+            --hidden-import=scipy.optimize \
+            --hidden-import=scipy.optimize._cobyla_py \
+            --hidden-import=scipy.optimize._constraints \
+            --hidden-import=scipy.optimize._minimize \
+            --hidden-import=scipy.optimize._optimize \
+            --hidden-import=pyparsing \
+            --hidden-import=pyparsing.testing \
+            --hidden-import=IPython \
+            --hidden-import=charset_normalizer \
+            --hidden-import=certifi \
+            --collect-data=lunascope \
+            --collect-data=matplotlib \
+            --exclude-module=ipywidgets \
+            --exclude-module=ipykernel \
+            --exclude-module=jupyter_client \
+            --exclude-module=nbconvert
+
+      - name: Validate PyInstaller analysis warnings (macOS diagnostic)
+        if: matrix.os == 'mac' && matrix.flavor == 'diagnostic'
+        shell: bash
+        run: |
+          WARN_FILE="build/Lunascope/warn-Lunascope.txt"
+          test -f "$WARN_FILE"
+          python - <<'PY'
+          from pathlib import Path
+          import sys
+
+          warn_file = Path("build/Lunascope/warn-Lunascope.txt")
+          allow = (
+              "ipywidgets",
+              "ipykernel",
+              "jupyter_client",
+              "nbconvert",
+              "__main__",
+              "winreg",
+              "msvcrt",
+              "_winapi",
+              "nt",
+              "org.python",
+              "java",
+          )
+          bad = []
+          for raw in warn_file.read_text(encoding="utf-8", errors="ignore").splitlines():
+              line = raw.strip()
+              if "missing module named" not in line:
+                  continue
+              if any(token in line for token in allow):
+                  continue
+              bad.append(line)
+          if bad:
+              print("Unexpected PyInstaller missing-module warnings detected:")
+              for line in bad:
+                  print(line)
+              sys.exit(1)
+          print("PyInstaller warnings check passed")
+          PY
+
+      - name: Build desktop app (Windows)
+        if: matrix.os == 'windows' && matrix.flavor == 'desktop'
+        shell: pwsh
+        run: |
+          .venv\Scripts\pyinstaller launch.py `
+            --name Lunascope `
+            --windowed `
+            --onefile `
+            --noconfirm `
+            --runtime-hook=hook_stdout.py `
+            --hidden-import=scipy `
+            --hidden-import=scipy.optimize `
+            --hidden-import=scipy.optimize._cobyla_py `
+            --hidden-import=scipy.optimize._constraints `
+            --hidden-import=scipy.optimize._minimize `
+            --hidden-import=scipy.optimize._optimize `
+            --hidden-import=pyparsing `
+            --hidden-import=pyparsing.testing `
+            --hidden-import=IPython `
+            --hidden-import=charset_normalizer `
+            --hidden-import=certifi `
+            --collect-data=lunascope `
+            --collect-data=matplotlib `
+            --exclude-module=ipywidgets `
+            --exclude-module=ipykernel `
+            --exclude-module=jupyter_client `
+            --exclude-module=nbconvert
+
+      - name: Validate PyInstaller analysis warnings (Windows desktop)
+        if: matrix.os == 'windows' && matrix.flavor == 'desktop'
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "build\Lunascope\warn-Lunascope.txt")) {
+            throw "Expected build\Lunascope\warn-Lunascope.txt was not produced"
+          }
+          .venv\Scripts\python -c "from pathlib import Path; import sys; warn_file = Path(r'build/Lunascope/warn-Lunascope.txt'); allow = ('ipywidgets','ipykernel','jupyter_client','nbconvert','__main__','posix','pwd','grp','fcntl','resource','termios','readline','org.python','java'); bad = [line.strip() for line in warn_file.read_text(encoding='utf-8', errors='ignore').splitlines() if 'missing module named' in line and not any(token in line for token in allow)]; print('PyInstaller warnings check passed') if not bad else (print('Unexpected PyInstaller missing-module warnings detected:'), [print(line) for line in bad], sys.exit(1))"
+
+      - name: Build diagnostic app (Windows)
+        if: matrix.os == 'windows' && matrix.flavor == 'diagnostic'
+        shell: pwsh
+        run: |
+          .venv\Scripts\pyinstaller launch.py `
+            --name Lunascope `
+            --noconfirm `
+            --runtime-hook=hook_stdout.py `
+            --hidden-import=scipy `
+            --hidden-import=scipy.optimize `
+            --hidden-import=scipy.optimize._cobyla_py `
+            --hidden-import=scipy.optimize._constraints `
+            --hidden-import=scipy.optimize._minimize `
+            --hidden-import=scipy.optimize._optimize `
+            --hidden-import=pyparsing `
+            --hidden-import=pyparsing.testing `
+            --hidden-import=IPython `
+            --hidden-import=charset_normalizer `
+            --hidden-import=certifi `
+            --collect-data=lunascope `
+            --collect-data=matplotlib `
+            --exclude-module=ipywidgets `
+            --exclude-module=ipykernel `
+            --exclude-module=jupyter_client `
+            --exclude-module=nbconvert
+
+      - name: Validate PyInstaller analysis warnings (Windows diagnostic)
+        if: matrix.os == 'windows' && matrix.flavor == 'diagnostic'
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "build\Lunascope\warn-Lunascope.txt")) {
+            throw "Expected build\Lunascope\warn-Lunascope.txt was not produced"
+          }
+          .venv\Scripts\python -c "from pathlib import Path; import sys; warn_file = Path(r'build/Lunascope/warn-Lunascope.txt'); allow = ('ipywidgets','ipykernel','jupyter_client','nbconvert','__main__','posix','pwd','grp','fcntl','resource','termios','readline','org.python','java'); bad = [line.strip() for line in warn_file.read_text(encoding='utf-8', errors='ignore').splitlines() if 'missing module named' in line and not any(token in line for token in allow)]; print('PyInstaller warnings check passed') if not bad else (print('Unexpected PyInstaller missing-module warnings detected:'), [print(line) for line in bad], sys.exit(1))"
+
+      - name: Validate packaged resources (macOS desktop)
+        if: matrix.os == 'mac' && matrix.flavor == 'desktop'
+        shell: bash
+        run: |
+          APP="dist/Lunascope.app"
+          test -e "$APP/Contents/MacOS/Lunascope"
+          find "$APP" -path "*/lunascope/ui/main.ui" | grep .
+          find "$APP" -name "matplotlibrc" | grep .
+          find "$APP" -path "*scipy*" | grep .
+          find "$APP" -path "*PySide6*" | grep .
+          find "$APP" -path "*pyparsing*" | grep .
+          find "$APP" -path "*charset_normalizer*" | grep .
+          find "$APP" -path "*certifi*" | grep .
+
+      - name: Validate packaged resources (macOS diagnostic)
+        if: matrix.os == 'mac' && matrix.flavor == 'diagnostic'
+        shell: bash
+        run: |
+          APP="dist/Lunascope"
+          test -x "$APP/Lunascope"
+          find "$APP" -path "*/lunascope/ui/main.ui" | grep .
+          find "$APP" -name "matplotlibrc" | grep .
+          find "$APP" -path "*scipy*" | grep .
+          find "$APP" -path "*PySide6*" | grep .
+          find "$APP" -path "*pyparsing*" | grep .
+          find "$APP" -path "*charset_normalizer*" | grep .
+          find "$APP" -path "*certifi*" | grep .
+
+      - name: Validate packaged resources (Windows diagnostic)
+        if: matrix.os == 'windows' && matrix.flavor == 'diagnostic'
+        shell: pwsh
+        run: |
+          $requiredPatterns = @(
+            "main.ui",
+            "matplotlibrc",
+            "scipy*",
+            "PySide6*",
+            "pyparsing*",
+            "charset_normalizer*",
+            "certifi*"
+          )
+          if (-not (Test-Path "dist\Lunascope\Lunascope.exe")) {
+            throw "Expected dist\Lunascope\Lunascope.exe was not produced"
+          }
+          foreach ($pattern in $requiredPatterns) {
+            $match = Get-ChildItem -Path "dist\Lunascope" -Recurse -Filter $pattern -ErrorAction SilentlyContinue | Select-Object -First 1
+            if (-not $match) {
+              throw "Required packaged dependency pattern missing: $pattern"
+            }
+          }
+
+      - name: Validate packaged resources (Windows desktop)
+        if: matrix.os == 'windows' && matrix.flavor == 'desktop'
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "dist\Lunascope.exe")) {
+            throw "Expected dist\Lunascope.exe was not produced"
+          }
+          $version = .venv\Scripts\python -c "import importlib.metadata; print(importlib.metadata.version('lunascope'))"
+          if (-not $version) {
+            throw "Package version lookup failed"
+          }
+
+      - name: Check binary architecture (macOS desktop)
+        if: matrix.os == 'mac' && matrix.flavor == 'desktop'
+        shell: bash
+        run: |
+          file dist/Lunascope.app/Contents/MacOS/Lunascope
+          lipo -info dist/Lunascope.app/Contents/MacOS/Lunascope
+
+      - name: Check binary architecture (macOS diagnostic)
+        if: matrix.os == 'mac' && matrix.flavor == 'diagnostic'
+        shell: bash
+        run: |
+          file dist/Lunascope/Lunascope
+          lipo -info dist/Lunascope/Lunascope
+
+      - name: Sign app bundle (macOS desktop)
+        if: matrix.os == 'mac' && matrix.flavor == 'desktop'
+        shell: bash
+        run: |
+          codesign --deep -s - --force dist/Lunascope.app
+
+      - name: Package desktop DMG (macOS)
+        if: matrix.os == 'mac' && matrix.flavor == 'desktop'
+        shell: bash
+        run: |
+          mkdir -p dmg-staging
+          cp -R dist/Lunascope.app dmg-staging/
+          ln -s /Applications dmg-staging/Applications
+          hdiutil create \
+            -volname "Lunascope" \
+            -srcfolder dmg-staging \
+            -ov -format UDZO \
+            "release-assets/${{ matrix.artifact_name }}"
+
+      - name: Package diagnostic ZIP (macOS)
+        if: matrix.os == 'mac' && matrix.flavor == 'diagnostic'
+        shell: bash
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent dist/Lunascope "release-assets/${{ matrix.artifact_name }}"
+
+      - name: Package desktop installer (Windows)
+        if: matrix.os == 'windows' && matrix.flavor == 'desktop'
+        shell: pwsh
+        run: |
+          $version = .venv\Scripts\python -c "import importlib.metadata; print(importlib.metadata.version('lunascope'))"
+          $iss = @"
+          [Setup]
+          AppName=Lunascope
+          AppVersion=$version
+          DefaultDirName={autopf}\Lunascope
+          DefaultGroupName=Lunascope
+          OutputDir=release-assets
+          OutputBaseFilename=Lunascope-Windows-Desktop-Setup
+          Compression=lzma
+          SolidCompression=yes
+
+          [Files]
+          Source: "dist\Lunascope.exe"; DestDir: "{app}"; Flags: ignoreversion
+
+          [Icons]
+          Name: "{group}\Lunascope"; Filename: "{app}\Lunascope.exe"
+          Name: "{commondesktop}\Lunascope"; Filename: "{app}\Lunascope.exe"
+
+          [Run]
+          Filename: "{app}\Lunascope.exe"; Description: "Launch Lunascope"; Flags: nowait postinstall skipifsilent
+          "@
+          $iss | Out-File -FilePath lunascope-desktop.iss -Encoding utf8
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" lunascope-desktop.iss
+          if (-not (Test-Path "release-assets\${{ matrix.artifact_name }}")) {
+            throw "Expected installer release-assets\${{ matrix.artifact_name }} was not created"
+          }
+
+      - name: Package diagnostic ZIP (Windows)
+        if: matrix.os == 'windows' && matrix.flavor == 'diagnostic'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist\Lunascope -DestinationPath "release-assets\${{ matrix.artifact_name }}" -Force
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: release-assets/${{ matrix.artifact_name }}
+          if-no-files-found: error
+
+  publish-release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download built artifacts
+        uses: actions/download-artifact@v5
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          shopt -s nullglob
+          assets=(release-assets/*)
+          if [ "${#assets[@]}" -eq 0 ]; then
+            echo "No artifacts found to publish"
+            exit 1
+          fi
+
+          if gh release view latest-teaching-build > /dev/null 2>&1; then
+            gh release upload latest-teaching-build --clobber "${assets[@]}"
+          else
+            gh release create latest-teaching-build \
+              --title "Latest Teaching Build" \
+              --prerelease \
+              --notes "Latest automated desktop and diagnostic builds." \
+              "${assets[@]}"
+          fi
