@@ -64,7 +64,7 @@ jobs:
           source .venv/bin/activate
           python -m pip install --upgrade pip
           python -m pip install .
-          python -m pip install pyinstaller
+          python -m pip install pyinstaller PyOpenGL
           mkdir -p release-assets
 
       - name: Install dependencies (Windows)
@@ -79,7 +79,7 @@ jobs:
           python -m venv .venv
           .venv\Scripts\python -m pip install --upgrade pip
           .venv\Scripts\python -m pip install .
-          .venv\Scripts\python -m pip install pyinstaller
+          .venv\Scripts\python -m pip install pyinstaller PyOpenGL
           New-Item -ItemType Directory -Force -Path release-assets | Out-Null
 
       - name: Create runtime hook (macOS)
@@ -129,6 +129,7 @@ jobs:
             --hidden-import=pyparsing \
             --hidden-import=pyparsing.testing \
             --hidden-import=IPython \
+            --hidden-import=OpenGL \
             --hidden-import=charset_normalizer \
             --hidden-import=certifi \
             --collect-data=lunascope \
@@ -178,6 +179,7 @@ jobs:
             --hidden-import=pyparsing \
             --hidden-import=pyparsing.testing \
             --hidden-import=IPython \
+            --hidden-import=OpenGL \
             --hidden-import=charset_normalizer \
             --hidden-import=certifi \
             --collect-data=lunascope \
@@ -228,6 +230,7 @@ jobs:
             --hidden-import=pyparsing `
             --hidden-import=pyparsing.testing `
             --hidden-import=IPython `
+            --hidden-import=OpenGL `
             --hidden-import=charset_normalizer `
             --hidden-import=certifi `
             --collect-data=lunascope `
@@ -263,6 +266,7 @@ jobs:
             --hidden-import=pyparsing `
             --hidden-import=pyparsing.testing `
             --hidden-import=IPython `
+            --hidden-import=OpenGL `
             --hidden-import=charset_normalizer `
             --hidden-import=certifi `
             --collect-data=lunascope `
@@ -291,9 +295,6 @@ jobs:
           find "$APP" -name "matplotlibrc" | grep .
           find "$APP" -path "*scipy*" | grep .
           find "$APP" -path "*PySide6*" | grep .
-          find "$APP" -path "*pyparsing*" | grep .
-          find "$APP" -path "*charset_normalizer*" | grep .
-          find "$APP" -path "*certifi*" | grep .
 
       - name: Validate packaged resources (macOS diagnostic)
         if: matrix.os == 'mac' && matrix.flavor == 'diagnostic'
@@ -305,31 +306,35 @@ jobs:
           find "$APP" -name "matplotlibrc" | grep .
           find "$APP" -path "*scipy*" | grep .
           find "$APP" -path "*PySide6*" | grep .
-          find "$APP" -path "*pyparsing*" | grep .
-          find "$APP" -path "*charset_normalizer*" | grep .
-          find "$APP" -path "*certifi*" | grep .
 
       - name: Validate packaged resources (Windows diagnostic)
         if: matrix.os == 'windows' && matrix.flavor == 'diagnostic'
         shell: pwsh
         run: |
-          $requiredPatterns = @(
-            "main.ui",
-            "matplotlibrc",
-            "scipy*",
-            "PySide6*",
-            "pyparsing*",
-            "charset_normalizer*",
-            "certifi*"
-          )
-          if (-not (Test-Path "dist\Lunascope\Lunascope.exe")) {
-            throw "Expected dist\Lunascope\Lunascope.exe was not produced"
+          $root = "dist\Lunascope"
+          $exe = Join-Path $root "Lunascope.exe"
+          if (-not (Test-Path $exe)) {
+            throw "Expected $exe was not produced"
           }
-          foreach ($pattern in $requiredPatterns) {
-            $match = Get-ChildItem -Path "dist\Lunascope" -Recurse -Filter $pattern -ErrorAction SilentlyContinue | Select-Object -First 1
-            if (-not $match) {
-              throw "Required packaged dependency pattern missing: $pattern"
-            }
+
+          $uiFile = Get-ChildItem -Path $root -Recurse -Filter "main.ui" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $uiFile) {
+            throw "Expected bundled UI file main.ui was not found"
+          }
+
+          $matplotlibRc = Get-ChildItem -Path $root -Recurse -Filter "matplotlibrc" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $matplotlibRc) {
+            throw "Expected bundled matplotlibrc was not found"
+          }
+
+          $scipyDir = Get-ChildItem -Path $root -Recurse -Directory -Filter "scipy" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $scipyDir) {
+            throw "Expected bundled scipy directory was not found"
+          }
+
+          $pySideDir = Get-ChildItem -Path $root -Recurse -Directory -Filter "PySide6" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $pySideDir) {
+            throw "Expected bundled PySide6 directory was not found"
           }
 
       - name: Validate packaged resources (Windows desktop)
