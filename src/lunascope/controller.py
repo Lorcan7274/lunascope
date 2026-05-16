@@ -575,6 +575,7 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         if getattr(self, "soapcanvas", None) is not None:
             self.soapcanvas.ax.cla()
             self.soapcanvas.figure.canvas.draw_idle()
+        self._clear_hypnogram_navigator()
 
         self.multiday_mode = False
         if hasattr(self, "_update_mode_badge"):
@@ -594,6 +595,74 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
             self.ui.tbl_slist.setCurrentIndex(QModelIndex())
         except Exception:
             pass
+
+    def _clear_hypnogram_navigator(self):
+        h = getattr(getattr(self, "ui", None), "pgh", None)
+        if h is None:
+            return
+
+        try:
+            pi = h.getPlotItem()
+            pi.clear()
+            h.setXRange(0, 1)
+            h.setYRange(0, 1)
+        except Exception:
+            pass
+
+        if getattr(self, "sel", None) is not None:
+            try:
+                self.sel.dispose()
+            except Exception:
+                pass
+            self.sel = None
+
+        if getattr(self, "tb0", None) is not None:
+            try:
+                h.removeItem(self.tb0)
+            except Exception:
+                pass
+            self.tb0 = None
+
+        self.updated_hypno = []
+        self._day_lines_pgh = []
+
+    def _restore_attached_subject(self, saved_id=None):
+        view = getattr(self.ui, "tbl_slist", None)
+        model = view.model() if view is not None else None
+        if model is None:
+            return False
+
+        target_id = str(saved_id).strip() if saved_id else ""
+        if not target_id:
+            return False
+
+        target_row = None
+        for row in range(model.rowCount()):
+            idx = model.index(row, 0)
+            label = str(model.data(idx, Qt.DisplayRole) or "").strip()
+            if label == target_id:
+                target_row = row
+                break
+
+        if target_row is None:
+            return False
+
+        idx = model.index(target_row, 0)
+        if not idx.isValid():
+            return False
+
+        sel_model = view.selectionModel()
+        was_blocked = False
+        try:
+            if sel_model is not None:
+                was_blocked = sel_model.blockSignals(True)
+            view.setCurrentIndex(idx)
+            view.selectRow(target_row)
+        finally:
+            if sel_model is not None:
+                sel_model.blockSignals(was_blocked)
+        self._attach_inst(idx, None)
+        return True
             
     # ------------------------------------------------------------
     # attach a new record

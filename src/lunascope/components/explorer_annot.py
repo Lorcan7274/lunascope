@@ -249,6 +249,10 @@ class AnnotTab(_ExplorerTab):
         rl1  = QGridLayout(row1)
         rl1.setContentsMargins(0, 0, 0, 0); rl1.setSpacing(6)
 
+        btn_compile_current = QPushButton("Compile Record")
+        btn_compile_current.setFixedWidth(120)
+        btn_compile_current.setToolTip("Load annotations from the currently attached record")
+
         btn_compile = QPushButton("Compile All")
         btn_compile.setFixedWidth(100)
         btn_compile.setToolTip("Load annotations from every subject in the sample list")
@@ -266,14 +270,15 @@ class AnnotTab(_ExplorerTab):
 
         btn_export = QPushButton("Export…"); btn_export.setFixedWidth(80)
 
-        rl1.addWidget(btn_compile, 0, 0)
-        rl1.addWidget(btn_load, 0, 1)
-        rl1.addWidget(btn_save, 0, 2)
-        rl1.addWidget(lbl_status, 0, 3, 1, 3)
+        rl1.addWidget(btn_compile_current, 0, 0)
+        rl1.addWidget(btn_compile, 0, 1)
+        rl1.addWidget(btn_load, 0, 2)
+        rl1.addWidget(btn_save, 0, 3)
+        rl1.addWidget(lbl_status, 0, 4, 1, 3)
         rl1.addWidget(QLabel("View:"), 1, 0)
-        rl1.addWidget(combo_view, 1, 1, 1, 2)
-        rl1.addWidget(btn_export, 1, 3)
-        rl1.setColumnStretch(3, 1)
+        rl1.addWidget(combo_view, 1, 1, 1, 3)
+        rl1.addWidget(btn_export, 1, 4)
+        rl1.setColumnStretch(4, 1)
 
         # ---- row 1b: covariate file ----------------------------------
         row1b = QWidget()
@@ -513,6 +518,7 @@ class AnnotTab(_ExplorerTab):
         self._lbl_status    = lbl_status
         self._lbl_cov_file  = lbl_cov_file
         self._lbl_filters_hint = lbl_filters_hint
+        self._btn_compile_current = btn_compile_current
         self._btn_add_filter = btn_add_filter
         self._btn_clear_filters = btn_clear_filters
         self._filter_host = filter_host
@@ -547,6 +553,7 @@ class AnnotTab(_ExplorerTab):
         self._list_host     = list_host
 
         # ---- wire signals ---------------------------------------------
+        btn_compile_current.clicked.connect(self._compile_current)
         btn_compile.clicked.connect(self._compile)
         btn_load.clicked.connect(self._load_cache)
         btn_save.clicked.connect(self._save_cache)
@@ -741,10 +748,25 @@ class AnnotTab(_ExplorerTab):
 
     def _get_current_id(self):
         view = getattr(self.ctrl.ui, "tbl_slist", None)
-        if view is None:
-            return None
-        idx = view.currentIndex()
-        return idx.siblingAtColumn(0).data(Qt.DisplayRole) if idx.isValid() else None
+        if view is not None:
+            idx = view.currentIndex()
+            if idx.isValid():
+                value = idx.siblingAtColumn(0).data(Qt.DisplayRole)
+                if value is not None and str(value).strip():
+                    return value
+        p = getattr(self.ctrl, "p", None)
+        if p is not None:
+            try:
+                value = p.id()
+                if value is not None and str(value).strip():
+                    return value
+            except Exception:
+                pass
+        return None
+
+    def _get_compile_ids_for_current(self):
+        current_id = self._get_current_id()
+        return [str(current_id)] if current_id is not None and str(current_id).strip() else []
 
     def _dock4_annotation_classes(self):
         view = getattr(self.ctrl.ui, "tbl_desc_annots", None)
@@ -1094,18 +1116,20 @@ class AnnotTab(_ExplorerTab):
     # Compilation
     # ------------------------------------------------------------------
 
-    def _compile(self):
-        ids = self._get_all_ids()
+    def _compile_ids(self, ids, *, scope_label, empty_msg):
+        ids = [str(idv) for idv in (ids or []) if str(idv).strip()]
         if not ids:
             QtWidgets.QMessageBox.warning(
                 self._root, "Annotation Explorer",
-                "No subjects in the sample list.")
+                empty_msg,
+            )
             return
         n = len(ids)
-        if not self._start_work(f"Compiling annotations from {n} subjects…"):
+        noun = "record" if n == 1 else "subjects"
+        if not self._start_work(f"Compiling annotations from {n} {noun}…"):
             return
         self._render_empty(
-            f"Compiling annotations from {n} subjects…\n\nPlease wait.\n\n"
+            f"Compiling annotations from {scope_label}…\n\nPlease wait.\n\n"
             "Tip: use  Save cache…  after compiling\n"
             "to speed up future loads."
         )
@@ -1129,6 +1153,21 @@ class AnnotTab(_ExplorerTab):
             except Exception:
                 self._sig_err.emit(traceback.format_exc())
         fut.add_done_callback(_done)
+
+    def _compile_current(self):
+        self._compile_ids(
+            self._get_compile_ids_for_current(),
+            scope_label="current record",
+            empty_msg="No current record is attached.",
+        )
+
+    def _compile(self):
+        ids = self._get_all_ids()
+        self._compile_ids(
+            ids,
+            scope_label=f"{len(ids)} subjects",
+            empty_msg="No subjects in the sample list.",
+        )
 
     # ------------------------------------------------------------------
     # Analysis (background)

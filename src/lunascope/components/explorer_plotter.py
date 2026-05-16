@@ -47,7 +47,7 @@ from PySide6 import QtWidgets
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel,
-    QPushButton, QSizePolicy, QVBoxLayout, QWidget,
+    QPushButton, QSizePolicy, QSpinBox, QVBoxLayout, QWidget,
     QFileDialog,
 )
 
@@ -93,14 +93,33 @@ def _numeric_sort(values):
         return sorted(lst, key=_str_key)
 
 
+def _coerce_numeric_series(series):
+    """Return numeric values when a whole column is numeric-like, else None."""
+    if pd.api.types.is_numeric_dtype(series):
+        return pd.to_numeric(series, errors="coerce")
+
+    cleaned = series.copy()
+    if cleaned.dtype == object:
+        cleaned = cleaned.map(
+            lambda v: v.replace(",", "").strip() if isinstance(v, str) else v
+        )
+    numeric = pd.to_numeric(cleaned, errors="coerce")
+    non_missing = ~pd.isna(cleaned)
+    if non_missing.any() and numeric[non_missing].isna().any():
+        return None
+    return numeric
+
+
 def _auto_plot_type(df, xcol, ycol):
     if xcol not in df.columns or ycol not in df.columns:
         return "scatter"
-    x_num    = pd.api.types.is_numeric_dtype(df[xcol])
+    x_num_series = _coerce_numeric_series(df[xcol])
+    y_num_series = _coerce_numeric_series(df[ycol])
+    x_num    = x_num_series is not None
     n_uniq_x = df[xcol].nunique()
     if not x_num or n_uniq_x <= 20:
         return "bar"
-    if x_num and pd.api.types.is_numeric_dtype(df[ycol]) and n_uniq_x < len(df) * 0.6:
+    if x_num and y_num_series is not None and n_uniq_x < len(df) * 0.6:
         return "line"
     return "scatter"
 
@@ -328,6 +347,9 @@ class PlotterTab(_ExplorerTab):
         combo_x = QComboBox(); combo_x.setMinimumWidth(100)
         combo_y = QComboBox(); combo_y.setMinimumWidth(100)
         combo_type = QComboBox(); combo_type.setFixedWidth(90)
+        spin_bins = QSpinBox(); spin_bins.setRange(5, 200); spin_bins.setValue(20)
+        spin_bins.setFixedWidth(70)
+        spin_bins.setToolTip("Number of bins for histogram plots")
         for key, lbl in [("auto", "Auto"), ("scatter", "Scatter"),
                           ("line", "Line"), ("bar", "Bar"),
                           ("hist", "Histogram"), ("box", "Box")]:
@@ -339,6 +361,7 @@ class PlotterTab(_ExplorerTab):
         rl2.addWidget(QLabel("X:")); rl2.addWidget(combo_x)
         rl2.addWidget(QLabel("Y:")); rl2.addWidget(combo_y)
         rl2.addWidget(QLabel("Type:")); rl2.addWidget(combo_type)
+        rl2.addWidget(QLabel("Bins:")); rl2.addWidget(spin_bins)
         rl2.addWidget(chk_log_x); rl2.addWidget(chk_log_y)
         rl2.addStretch(1); rl2.addWidget(btn_export)
 
@@ -391,6 +414,7 @@ class PlotterTab(_ExplorerTab):
         self._combo_group2 = combo_group2
         self._combo_mode2  = combo_mode2
         self._combo_type   = combo_type
+        self._spin_bins    = spin_bins
         self._chk_log_x    = chk_log_x
         self._chk_log_y    = chk_log_y
         self._lbl_shape    = lbl_shape
@@ -411,8 +435,11 @@ class PlotterTab(_ExplorerTab):
         for w in (combo_x, combo_y, combo_group1, combo_mode1,
                   combo_group2, combo_mode2, combo_type):
             w.currentIndexChanged.connect(self._schedule_plot)
+        spin_bins.valueChanged.connect(self._schedule_plot)
         chk_log_x.stateChanged.connect(self._schedule_plot)
         chk_log_y.stateChanged.connect(self._schedule_plot)
+        combo_type.currentIndexChanged.connect(self._sync_plot_controls)
+        self._sync_plot_controls()
 
     # ------------------------------------------------------------------
     # Data access
@@ -686,6 +713,10 @@ class PlotterTab(_ExplorerTab):
         if self._df is not None or self._aux_df is not None:
             self._plot_timer.start()
 
+    def _sync_plot_controls(self, *_):
+        ptype = self._combo_type.currentData()
+        self._spin_bins.setEnabled(ptype in ("hist", "auto"))
+
     def _plot(self):
         df, _ = self._get_effective_df()
         if df is None:
@@ -738,7 +769,7 @@ class PlotterTab(_ExplorerTab):
 
         try:
             if ptype == "hist":
-                self._plot_hist(ctx, df, xcol, log_x)
+                self._plot_hist(ctx, df, xcol, log_x, int(self._spin_bins.value()))
             elif ptype == "bar":
                 self._plot_bar(ctx, df, xcol, ycol)
             elif ptype == "box":
@@ -1008,8 +1039,9 @@ class PlotterTab(_ExplorerTab):
     # Histogram
     # ------------------------------------------------------------------
 
-    def _plot_hist(self, ctx, df, xcol, log_x):
-        is_num = pd.api.types.is_numeric_dtype(df[xcol])
+    def _plot_hist(self, ctx, df, xcol, log_x, n_bins):
+        numeric_series = _coerce_numeric_series(df[xcol])
+        is_num = numeric_series is not None
         used   = set()
         for g1i, g1v, g2i, g2v in self._iter_groups(ctx):
             sub = self._subset(df, ctx, g1v, g2v)
@@ -1026,11 +1058,19 @@ class PlotterTab(_ExplorerTab):
                 ax.set_xticklabels(counts.index.astype(str),
                                    rotation=30, ha="right", fontsize=7, color=FG)
             else:
-                vals = sub[xcol].dropna()
+                vals = _coerce_numeric_series(sub[xcol])
+                if vals is None:
+                    continue
+                vals = vals.dropna()
                 if log_x: vals = vals[vals > 0]
                 if vals.empty: continue
-                bins = (np.logspace(np.log10(vals.min()), np.log10(vals.max()), 40)
-                        if log_x else 40)
+                if log_x:
+                    if vals.min() <= 0 or vals.min() == vals.max():
+                        bins = n_bins
+                    else:
+                        bins = np.logspace(np.log10(vals.min()), np.log10(vals.max()), n_bins + 1)
+                else:
+                    bins = n_bins
                 ax.hist(vals, bins=bins, color=col, alpha=0.5, edgecolor="none",
                         label=lbl)
             ax.set_ylabel("Count", color=FG, fontsize=9)

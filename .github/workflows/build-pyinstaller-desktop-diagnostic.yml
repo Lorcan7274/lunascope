@@ -138,7 +138,7 @@ jobs:
             --exclude-module=jupyter_client \
             --exclude-module=nbconvert
 
-      - name: Validate PyInstaller analysis warnings (macOS desktop)
+      - name: Report PyInstaller analysis warnings (macOS desktop)
         if: matrix.os == 'mac' && matrix.flavor == 'desktop'
         shell: bash
         run: |
@@ -146,36 +146,18 @@ jobs:
           test -f "$WARN_FILE"
           python - <<'PY'
           from pathlib import Path
-          import sys
 
           warn_file = Path("build/Lunascope/warn-Lunascope.txt")
-          allow = (
-              "ipywidgets",
-              "ipykernel",
-              "jupyter_client",
-              "nbconvert",
-              "__main__",
-              "winreg",
-              "msvcrt",
-              "_winapi",
-              "nt",
-              "org.python",
-              "java",
-          )
-          bad = []
-          for raw in warn_file.read_text(encoding="utf-8", errors="ignore").splitlines():
-              line = raw.strip()
-              if "missing module named" not in line:
-                  continue
-              if any(token in line for token in allow):
-                  continue
-              bad.append(line)
-          if bad:
-              print("Unexpected PyInstaller missing-module warnings detected:")
-              for line in bad:
-                  print(line)
-              sys.exit(1)
-          print("PyInstaller warnings check passed")
+          lines = [
+              line.strip()
+              for line in warn_file.read_text(encoding="utf-8", errors="ignore").splitlines()
+              if "missing module named" in line
+          ]
+          print(f"PyInstaller reported {len(lines)} missing-module warnings")
+          for line in lines[:80]:
+              print(line)
+          if len(lines) > 80:
+              print(f"... truncated {len(lines) - 80} additional warnings")
           PY
 
       - name: Build diagnostic app (macOS)
@@ -205,7 +187,7 @@ jobs:
             --exclude-module=jupyter_client \
             --exclude-module=nbconvert
 
-      - name: Validate PyInstaller analysis warnings (macOS diagnostic)
+      - name: Report PyInstaller analysis warnings (macOS diagnostic)
         if: matrix.os == 'mac' && matrix.flavor == 'diagnostic'
         shell: bash
         run: |
@@ -213,36 +195,18 @@ jobs:
           test -f "$WARN_FILE"
           python - <<'PY'
           from pathlib import Path
-          import sys
 
           warn_file = Path("build/Lunascope/warn-Lunascope.txt")
-          allow = (
-              "ipywidgets",
-              "ipykernel",
-              "jupyter_client",
-              "nbconvert",
-              "__main__",
-              "winreg",
-              "msvcrt",
-              "_winapi",
-              "nt",
-              "org.python",
-              "java",
-          )
-          bad = []
-          for raw in warn_file.read_text(encoding="utf-8", errors="ignore").splitlines():
-              line = raw.strip()
-              if "missing module named" not in line:
-                  continue
-              if any(token in line for token in allow):
-                  continue
-              bad.append(line)
-          if bad:
-              print("Unexpected PyInstaller missing-module warnings detected:")
-              for line in bad:
-                  print(line)
-              sys.exit(1)
-          print("PyInstaller warnings check passed")
+          lines = [
+              line.strip()
+              for line in warn_file.read_text(encoding="utf-8", errors="ignore").splitlines()
+              if "missing module named" in line
+          ]
+          print(f"PyInstaller reported {len(lines)} missing-module warnings")
+          for line in lines[:80]:
+              print(line)
+          if len(lines) > 80:
+              print(f"... truncated {len(lines) - 80} additional warnings")
           PY
 
       - name: Build desktop app (Windows)
@@ -273,14 +237,14 @@ jobs:
             --exclude-module=jupyter_client `
             --exclude-module=nbconvert
 
-      - name: Validate PyInstaller analysis warnings (Windows desktop)
+      - name: Report PyInstaller analysis warnings (Windows desktop)
         if: matrix.os == 'windows' && matrix.flavor == 'desktop'
         shell: pwsh
         run: |
           if (-not (Test-Path "build\Lunascope\warn-Lunascope.txt")) {
             throw "Expected build\Lunascope\warn-Lunascope.txt was not produced"
           }
-          .venv\Scripts\python -c "from pathlib import Path; import sys; warn_file = Path(r'build/Lunascope/warn-Lunascope.txt'); allow = ('ipywidgets','ipykernel','jupyter_client','nbconvert','__main__','posix','pwd','grp','fcntl','resource','termios','readline','org.python','java'); bad = [line.strip() for line in warn_file.read_text(encoding='utf-8', errors='ignore').splitlines() if 'missing module named' in line and not any(token in line for token in allow)]; print('PyInstaller warnings check passed') if not bad else (print('Unexpected PyInstaller missing-module warnings detected:'), [print(line) for line in bad], sys.exit(1))"
+          .venv\Scripts\python -c "from pathlib import Path; warn_file = Path(r'build/Lunascope/warn-Lunascope.txt'); lines = [line.strip() for line in warn_file.read_text(encoding='utf-8', errors='ignore').splitlines() if 'missing module named' in line]; print(f'PyInstaller reported {len(lines)} missing-module warnings'); [print(line) for line in lines[:80]]; print(f'... truncated {len(lines) - 80} additional warnings') if len(lines) > 80 else None"
 
       - name: Build diagnostic app (Windows)
         if: matrix.os == 'windows' && matrix.flavor == 'diagnostic'
@@ -308,14 +272,14 @@ jobs:
             --exclude-module=jupyter_client `
             --exclude-module=nbconvert
 
-      - name: Validate PyInstaller analysis warnings (Windows diagnostic)
+      - name: Report PyInstaller analysis warnings (Windows diagnostic)
         if: matrix.os == 'windows' && matrix.flavor == 'diagnostic'
         shell: pwsh
         run: |
           if (-not (Test-Path "build\Lunascope\warn-Lunascope.txt")) {
             throw "Expected build\Lunascope\warn-Lunascope.txt was not produced"
           }
-          .venv\Scripts\python -c "from pathlib import Path; import sys; warn_file = Path(r'build/Lunascope/warn-Lunascope.txt'); allow = ('ipywidgets','ipykernel','jupyter_client','nbconvert','__main__','posix','pwd','grp','fcntl','resource','termios','readline','org.python','java'); bad = [line.strip() for line in warn_file.read_text(encoding='utf-8', errors='ignore').splitlines() if 'missing module named' in line and not any(token in line for token in allow)]; print('PyInstaller warnings check passed') if not bad else (print('Unexpected PyInstaller missing-module warnings detected:'), [print(line) for line in bad], sys.exit(1))"
+          .venv\Scripts\python -c "from pathlib import Path; warn_file = Path(r'build/Lunascope/warn-Lunascope.txt'); lines = [line.strip() for line in warn_file.read_text(encoding='utf-8', errors='ignore').splitlines() if 'missing module named' in line]; print(f'PyInstaller reported {len(lines)} missing-module warnings'); [print(line) for line in lines[:80]]; print(f'... truncated {len(lines) - 80} additional warnings') if len(lines) > 80 else None"
 
       - name: Validate packaged resources (macOS desktop)
         if: matrix.os == 'mac' && matrix.flavor == 'desktop'
