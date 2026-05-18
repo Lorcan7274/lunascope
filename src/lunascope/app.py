@@ -447,7 +447,6 @@ def main(argv=None) -> int:
     app.setApplicationName("Lunascope")
     app.setApplicationDisplayName("Lunascope")
     _apply_forced_dark_theme(app)
-
     # initiate silent luna
     _boot_log("Initializing Luna...")
     proj = lp.proj()

@@ -316,7 +316,7 @@ def add_dock_shortcuts(win, view_menu, toggle_zero=None, reset_layout=None):
     # reset to default layout
     if reset_layout is not None:
         act_reset = QAction("Reset to Default Layout", win, checkable=False)
-        act_reset.setShortcut("Ctrl+)")
+        act_reset.setShortcuts(["Ctrl+)", "Ctrl+Shift+0"])
         act_reset.triggered.connect(reset_layout)
         view_menu.addAction(act_reset)
 

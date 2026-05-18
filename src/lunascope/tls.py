@@ -6,13 +6,13 @@ _TRUSTSTORE_INSTALLED = False
 
 
 def configure_tls() -> None:
-    """Use the native macOS trust store when available.
+    """Use the native OS trust store when available (macOS and Windows).
 
     The frozen app can otherwise end up validating HTTPS only against the
     bundled CA file, which misses locally trusted enterprise/intercept roots.
     """
     global _TRUSTSTORE_INSTALLED
-    if _TRUSTSTORE_INSTALLED or sys.platform != "darwin":
+    if _TRUSTSTORE_INSTALLED or sys.platform not in ("darwin", "win32"):
         return
     try:
         import truststore
@@ -27,7 +27,7 @@ def configure_tls() -> None:
 def create_default_context() -> ssl.SSLContext:
     """Create an SSL context aligned with the app's TLS configuration."""
     configure_tls()
-    if sys.platform == "darwin" and _TRUSTSTORE_INSTALLED:
+    if _TRUSTSTORE_INSTALLED:
         return ssl.create_default_context()
     try:
         import certifi

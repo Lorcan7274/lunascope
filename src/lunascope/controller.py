@@ -104,7 +104,6 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
 
         # GUI
         self.ui = ui
-
         # Luna
         self.proj = proj
         
@@ -342,23 +341,9 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         add_dock_shortcuts( self.ui, self.ui.menuView, self._toggle_signals_only_or_default, self._reset_to_default_layout )
 
         # size overall app window – cap to available screen space.
-        # 1440 wide allows the banner's PSD panel to show at default on screens
-        # >= 1440 px logical width; it hides naturally on narrower displays.
-        # On smaller screens (available height < 900 px) start maximized so the
-        # status bar is always visible; restoreGeometry() from a saved session
-        # will override this if the user has set a different preference.
-        screen = QGuiApplication.primaryScreen()
-        if screen is not None:
-            avail = screen.availableGeometry()
-            win_w = min(1440, int(avail.width()  * 0.92))
-            win_h = min(900,  int(avail.height() * 0.92))
-            small_screen = avail.height() < 900
-        else:
-            win_w, win_h = 1440, 900
-            small_screen = False
-        self.ui.resize(win_w, win_h)
-        if small_screen:
-            self.ui.showMaximized()
+        # restoreGeometry() from a saved session will override this if the user
+        # has set a different preference.
+        self._apply_default_window_geometry()
 
         # arrange docks: hide some docks
         self.ui.dock_help.hide()
@@ -1182,8 +1167,33 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         ui.dock_outputs.hide()
         ui.dock_help.hide()
 
+    def _apply_default_window_geometry(self):
+        """Apply the fresh-start window size on the current screen."""
+        screen = self.ui.screen() or QGuiApplication.primaryScreen()
+        if screen is not None:
+            avail = screen.availableGeometry()
+            win_w = min(1200, int(avail.width() * 0.92))
+            win_h = min(800, int(avail.height() * 0.92))
+            small_screen = avail.height() < 900
+            target_x = avail.x() + max(0, (avail.width() - win_w) // 2)
+            target_y = avail.y() + max(0, (avail.height() - win_h) // 2)
+        else:
+            win_w, win_h = 1200, 800
+            small_screen = False
+            target_x = target_y = 0
+
+        if small_screen:
+            self.ui.showMaximized()
+            return
+
+        if self.ui.isFullScreen() or self.ui.isMaximized():
+            self.ui.showNormal()
+        self.ui.resize(win_w, win_h)
+        self.ui.move(target_x, target_y)
+
     def _reset_to_default_layout(self):
         """Ctrl+): hard reset to the original fresh Lunascope layout."""
+        self._apply_default_window_geometry()
         self._apply_default_dock_layout()
 
     def _capture_default_dock_layout(self):

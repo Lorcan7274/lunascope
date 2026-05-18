@@ -237,6 +237,49 @@ def _unique_preserve(values):
     return out
 
 
+def _normalize_gpa_role_overlap(x_vars, y_vars, z_vars):
+    """Resolve GPA role overlap before building the request."""
+    x_vars = _unique_preserve(x_vars or [])
+    y_vars = _unique_preserve(y_vars or [])
+    z_vars = _unique_preserve(z_vars or [])
+
+    z_set = set(z_vars)
+    xz_overlap = [name for name in x_vars if name in z_set]
+    if xz_overlap:
+        return {
+            "ok": False,
+            "error_lines": [f"X and Z: {', '.join(xz_overlap[:4])}"],
+            "x_vars": x_vars,
+            "y_vars": y_vars,
+            "z_vars": z_vars,
+        }
+
+    x_set = set(x_vars)
+    yx_overlap = [name for name in y_vars if name in x_set]
+    yz_overlap = [name for name in y_vars if name in z_set]
+    y_drop = set(yx_overlap) | set(yz_overlap)
+    normalized_y = [name for name in y_vars if name not in y_drop]
+
+    warning_lines = []
+    if yx_overlap:
+        warning_lines.append(
+            "Dropped from Y because also selected in X: " + ", ".join(yx_overlap[:8])
+        )
+    if yz_overlap:
+        warning_lines.append(
+            "Dropped from Y because also selected in Z: " + ", ".join(yz_overlap[:8])
+        )
+
+    return {
+        "ok": True,
+        "warning_lines": warning_lines,
+        "x_vars": x_vars,
+        "y_vars": normalized_y,
+        "z_vars": z_vars,
+        "dropped_from_y": [name for name in y_vars if name in y_drop],
+    }
+
+
 def _fmt_float(value):
     try:
         if value is None or np.isnan(value):
@@ -898,6 +941,7 @@ class GPATab(_ExplorerTab):
         self._joint_yvars: list[str] = []
         self._joint_zvars: list[str] = []
         self._joint_result: dict | None = None
+        self._pre_joint_status_text: str = ""
 
         self._render_timer = QTimer(self)
         self._render_timer.setSingleShot(True)
@@ -962,7 +1006,7 @@ class GPATab(_ExplorerTab):
 
         outer.addWidget(left_scroll)
         outer.addWidget(right_stack)
-        outer.setSizes([320, 900])
+        outer.setSizes([400, 900])
         outer.setCollapsible(0, False)
         outer.setCollapsible(1, False)
 
@@ -1279,6 +1323,18 @@ class GPATab(_ExplorerTab):
         opts_lay.addLayout(_row("inc-ids:", self._incids_edit))
         self._exids_edit  = QLineEdit(); self._exids_edit.setPlaceholderText("id1,id2,…")
         opts_lay.addLayout(_row("ex-ids:", self._exids_edit))
+
+        # Save as TSV (dump)
+        dump_row = QHBoxLayout()
+        self._dump_tsv_btn = QPushButton("Save as TSV…")
+        self._dump_tsv_btn.setToolTip(
+            "Export the selected variables as a flat TSV file using GPA dump mode.\n"
+            "Applies the same filters (subset, inc-ids, ex-ids, n-prop, n-req, knn, winsor)\n"
+            "as the current Options settings.")
+        self._dump_tsv_btn.clicked.connect(self._save_gpa_dump_tsv)
+        dump_row.addStretch(1)
+        dump_row.addWidget(self._dump_tsv_btn)
+        opts_lay.addLayout(dump_row)
 
         self._opts_frame.setVisible(False)
         lay.addWidget(self._opts_frame)
@@ -2136,6 +2192,81 @@ class GPATab(_ExplorerTab):
     # Analyze tab — run GPA
     # ======================================================================
 
+    def _save_gpa_dump_tsv(self):
+        """Export selected X/Y/Z variables as a flat TSV via GPA dump mode."""
+        dat_path = self._dat_edit.text().strip()
+        if not dat_path or not os.path.exists(dat_path):
+            QtWidgets.QMessageBox.warning(
+                self._root, "GPA", "Load a manifest first (valid .dat path).")
+            return
+
+        x_vars = self._picker_x.selected_long_names()
+        y_vars = self._picker_y.selected_long_names()
+        z_vars = self._picker_z.selected_long_names()
+        all_vars = list(dict.fromkeys(x_vars + y_vars + z_vars))
+        if not all_vars:
+            QtWidgets.QMessageBox.warning(
+                self._root, "GPA", "Select at least one variable in X, Y, or Z first.")
+            return
+
+        path, _ = QFileDialog.getSaveFileName(
+            self._root, "Save GPA dump as TSV", "", "TSV files (*.tsv);;All files (*)")
+        if not path:
+            return
+
+        opts = {"dat": dat_path, "dump": "", "lvars": ",".join(all_vars)}
+        np_txt = self._nprop_edit.text().strip()
+        if np_txt:
+            try:
+                float(np_txt); opts["n-prop"] = np_txt
+            except ValueError:
+                pass
+        nr_txt = self._nreq_edit.text().strip()
+        if nr_txt:
+            try:
+                int(nr_txt); opts["n-req"] = nr_txt
+            except ValueError:
+                pass
+        knn = self._knn_edit.text().strip()
+        if knn:
+            try:
+                int(knn); opts["knn"] = knn
+            except ValueError:
+                pass
+        win = self._winsor_edit.text().strip()
+        if win:
+            try:
+                float(win); opts["winsor"] = win
+            except ValueError:
+                pass
+        sub = self._subset_edit.text().strip()
+        if sub:
+            opts["subset"] = sub
+        inc = self._incids_edit.text().strip()
+        if inc:
+            opts["inc-ids"] = inc
+        ex = self._exids_edit.text().strip()
+        if ex:
+            opts["ex-ids"] = ex
+
+        if not self._start_work("Dumping GPA data…"):
+            return
+
+        fut = self.ctrl._exec.submit(self._gpa_dump_worker, opts)
+        def _done(_f=fut, _path=path):
+            try:
+                self._sig_ok.emit({"type": "dump_tsv", "result": _f.result(), "path": _path})
+            except Exception:
+                self._sig_err.emit(traceback.format_exc())
+        fut.add_done_callback(_done)
+
+    @staticmethod
+    def _gpa_dump_worker(opts):
+        import lunapi.lunapi0 as _l0
+        eng = _l0.inaugurate()
+        _, stdout = eng.run_gpa(opts, False)
+        return stdout
+
     def _run_gpa(self):
         dat_path = self._dat_edit.text().strip()
         if not dat_path or not os.path.exists(dat_path):
@@ -2143,23 +2274,42 @@ class GPATab(_ExplorerTab):
                 self._root, "GPA", "Load a manifest first (valid .dat path).")
             return
 
-        x_bases = self._picker_x.selected()
-        y_bases = self._picker_y.selected()
-        z_bases = self._picker_z.selected()
         x_vars = self._picker_x.selected_long_names()
         y_vars = self._picker_y.selected_long_names()
         z_vars = self._picker_z.selected_long_names()
         mode = self._mode_combo.currentData()
-        self._last_gpa_z = z_vars  # list for partial scatter
 
         facs = self._facs_edit.text().strip()
 
-        if mode == "assoc" and (not x_bases or not y_bases):
+        overlap_info = _normalize_gpa_role_overlap(x_vars, y_vars, z_vars)
+        if not overlap_info.get("ok"):
+            overlaps = overlap_info.get("error_lines") or []
+            self._clear_results_display()
+            self._analyze_status.setText("Invalid selection: overlapping X/Z variables.")
+            self._picker_x.set_summary(overlaps[0] if overlaps else "")
+            self._picker_y.set_summary("")
+            self._picker_z.set_summary(overlaps[0] if overlaps else "")
+            QtWidgets.QMessageBox.warning(
+                self._root, "GPA",
+                "A variable cannot be selected in both X and Z.\n\n"
+                + "\n".join(overlaps)
+            )
+            return
+
+        x_vars = overlap_info["x_vars"]
+        y_vars = overlap_info["y_vars"]
+        z_vars = overlap_info["z_vars"]
+        x_bases = self._selection_base_count(x_vars)
+        y_bases = self._selection_base_count(y_vars)
+        z_bases = self._selection_base_count(z_vars)
+        self._last_gpa_z = z_vars  # list for partial scatter
+
+        if mode == "assoc" and (x_bases == 0 or y_bases == 0):
             QtWidgets.QMessageBox.warning(
                 self._root, "GPA",
                 "Association mode requires at least one X predictor and one Y outcome.")
             return
-        if mode == "comp" and not x_bases:
+        if mode == "comp" and x_bases == 0:
             QtWidgets.QMessageBox.warning(
                 self._root, "GPA",
                 "Comparison mode requires at least one X variable to test.")
@@ -2170,39 +2320,27 @@ class GPATab(_ExplorerTab):
                 "Comparison mode requires a factor variable in the FAC field (Options).\n"
                 "Enter the name of a binary FAC column from your dataset.")
             return
-        if mode == "stats" and not x_bases:
+        if mode == "stats" and x_bases == 0:
             QtWidgets.QMessageBox.warning(
                 self._root, "GPA", "Descriptive stats mode requires at least one X variable.")
             return
 
-        overlaps = []
-        for label, left, right in (
-            ("X and Y", x_vars, y_vars),
-            ("X and Z", x_vars, z_vars),
-            ("Y and Z", y_vars, z_vars),
-        ):
-            dup = sorted(set(left) & set(right))
-            if dup:
-                overlaps.append(f"{label}: {', '.join(dup[:4])}")
-        if overlaps:
-            self._clear_results_display()
-            self._analyze_status.setText("Invalid selection: overlapping X/Y/Z variables.")
-            self._picker_x.set_summary(overlaps[0] if overlaps else "")
-            self._picker_y.set_summary(overlaps[1] if len(overlaps) > 1 else "")
-            self._picker_z.set_summary(overlaps[2] if len(overlaps) > 2 else "")
+        warning_lines = overlap_info.get("warning_lines") or []
+        if warning_lines:
+            self._picker_y.set_summary("Dropped overlap from Y for this run.")
+            self._analyze_status.setText("Dropping overlapping Y variables, then running…")
             QtWidgets.QMessageBox.warning(
                 self._root, "GPA",
-                "A variable cannot be selected in more than one of X, Y, and Z.\n\n"
-                + "\n".join(overlaps)
+                "Some overlapping variables were dropped from Y for this run.\n\n"
+                + "\n".join(warning_lines)
             )
-            return
 
         request = self._collect_gpa_request(x_vars, y_vars, z_vars)
         self._last_gpa_request = {
             "mode": mode,
-            "x_count": len(x_bases),
-            "y_count": len(y_bases),
-            "z_count": len(z_bases),
+            "x_count": x_bases,
+            "y_count": y_bases,
+            "z_count": z_bases,
             "x_vars": list(x_vars),
             "y_vars": list(y_vars),
             "z_vars": list(z_vars),
@@ -2215,6 +2353,7 @@ class GPATab(_ExplorerTab):
             "y_n": self._selection_n_summary(y_vars),
             "z_n": self._selection_n_summary(z_vars),
             "opts": dict(request["opts"]),
+            "selection_warning": " | ".join(warning_lines) if warning_lines else "",
         }
         if not self._start_work("Running GPA…"):
             return
@@ -2465,6 +2604,8 @@ class GPATab(_ExplorerTab):
             details.append(f"n-prop<={req['n_prop']}")
         if req.get("n_req") is not None:
             details.append(f"n-req>={req['n_req']}")
+        if req.get("selection_warning"):
+            details.append(req["selection_warning"])
         n_tables = len(result or {})
         nrows = sum(len(v) for v in (result or {}).values())
         details.append(f"{n_tables} table(s)")
@@ -2532,6 +2673,20 @@ class GPATab(_ExplorerTab):
             return f"N={lo}"
         return f"N={lo}–{hi}"
 
+    def _selection_base_count(self, names):
+        """Return the number of distinct base names represented by selected long vars."""
+        if not names:
+            return 0
+        if self._manifest_df is None or self._manifest_df.empty:
+            return len(names)
+        if "VAR" not in self._manifest_df.columns:
+            return len(names)
+        sub = self._manifest_df[self._manifest_df["VAR"].isin(names)]
+        if sub.empty:
+            return len(names)
+        base_col = "BASE" if "BASE" in sub.columns else "VAR"
+        return len({str(v) for v in sub[base_col].tolist() if str(v).strip()})
+
     def _update_selection_desc(self):
         """Summarize selected variables inline beside each picker header."""
         for picker in (self._picker_x, self._picker_y, self._picker_z):
@@ -2573,6 +2728,7 @@ class GPATab(_ExplorerTab):
         self._joint_yvars = []
         self._joint_zvars = []
         self._joint_result = None
+        self._pre_joint_status_text = ""
         self._joint_y_list.clear()
         self._joint_table.setModel(None)
         self._joint_status_lbl.setText("Joint model unavailable.")
@@ -2793,6 +2949,7 @@ class GPATab(_ExplorerTab):
             self._joint_xvar = (req.get("x_vars") or [""])[0]
             self._joint_zvars = list(req.get("z_vars") or [])
             self._joint_yvars = []
+            self._pre_joint_status_text = self._analyze_status.text()
             self._joint_mode_btn.setChecked(True)
             self._scatter_raw_btn.setChecked(False)
             self._scatter_partial_btn.setChecked(False)
@@ -2818,10 +2975,15 @@ class GPATab(_ExplorerTab):
             self._viz_stack.setCurrentIndex(0)
         self._update_joint_controls_visibility()
         self._update_joint_action_buttons()
-        if self._scatter_xvar and self._scatter_yvar:
-            partial = bool(self._last_gpa_z) and self._scatter_partial_btn.isChecked()
-            self._request_scatter(self._scatter_xvar, self._scatter_yvar, partial=partial)
-        else:
+        if self._pre_joint_status_text:
+            self._analyze_status.setText(self._pre_joint_status_text)
+        if self._canvas is None:
+            if self._scatter_xvar and self._scatter_yvar:
+                partial = bool(self._last_gpa_z) and self._scatter_partial_btn.isChecked()
+                self._request_scatter(self._scatter_xvar, self._scatter_yvar, partial=partial)
+            else:
+                self._render_timer.start()
+        elif not self._scatter_mode:
             self._render_timer.start()
 
     def _on_joint_mode_toggled(self, checked):
@@ -3314,6 +3476,27 @@ class GPATab(_ExplorerTab):
             else:
                 self._joint_table.setModel(None)
             self._update_joint_action_buttons()
+
+        elif t == "dump_tsv":
+            path = payload.get("path", "")
+            stdout = result or ""
+            if not stdout.strip():
+                QtWidgets.QMessageBox.warning(
+                    self._root, "GPA dump", "Dump returned no data.")
+                return
+            try:
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(stdout)
+                    if not stdout.endswith("\n"):
+                        fh.write("\n")
+                df = _parse_gpa_manifest_text(stdout)
+                n_rows = len(df) if df is not None and not df.empty else "?"
+                n_cols = len(df.columns) if df is not None and not df.empty else "?"
+                self._analyze_status.setText(
+                    f"Saved dump: {n_rows} rows × {n_cols} cols → {os.path.basename(path)}")
+            except Exception as exc:
+                QtWidgets.QMessageBox.critical(
+                    self._root, "GPA dump", f"Failed to save file:\n{exc}")
 
     def _on_err(self, tb):
         self._end_work()

@@ -74,3 +74,23 @@ def test_clear_rows_handles_none_model(qapp):
     view = QTableView()
     # No model attached → must be a graceful no-op
     clear_rows(view)
+
+
+def test_add_dock_shortcuts_registers_windows_friendly_reset_shortcut(qapp):
+    from PySide6.QtWidgets import QMainWindow, QMenu
+
+    from lunascope.helpers import add_dock_shortcuts
+
+    win = QMainWindow()
+    view_menu = QMenu("View", win)
+    win.menuView = view_menu
+
+    add_dock_shortcuts(win, view_menu, reset_layout=lambda: None)
+
+    reset_action = next(
+        act for act in view_menu.actions() if act.text() == "Reset to Default Layout"
+    )
+    shortcuts = {seq.toString() for seq in reset_action.shortcuts()}
+
+    assert "Ctrl+)" in shortcuts
+    assert "Ctrl+Shift+0" in shortcuts
