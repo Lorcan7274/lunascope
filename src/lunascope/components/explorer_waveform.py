@@ -2005,14 +2005,16 @@ class WaveformTab(_ExplorerTab):
         model = view.model() if view is not None else None
         annots = []
         if model is not None:
-            headers = [str(model.headerData(c, Qt.Horizontal) or "") for c in range(model.columnCount())]
+            src = getattr(model, "sourceModel", lambda: None)()
+            src = src if src is not None else model
+            headers = [str(src.headerData(c, Qt.Horizontal) or "") for c in range(src.columnCount())]
             try:
                 annot_col = headers.index("Annotations")
             except ValueError:
                 annot_col = None
             if annot_col is not None:
-                for r in range(model.rowCount()):
-                    val = str(model.index(r, annot_col).data(Qt.DisplayRole) or "").strip()
+                for r in range(src.rowCount()):
+                    val = str(src.index(r, annot_col).data(Qt.DisplayRole) or "").strip()
                     if val:
                         annots.append(val)
         if not annots:

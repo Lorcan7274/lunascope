@@ -388,6 +388,25 @@ class AnnotTab(_ExplorerTab):
             "Signed avg: nearest target by absolute distance, retaining sign"
         )
 
+        combo_overlap_metric = QComboBox(); combo_overlap_metric.setFixedWidth(148)
+        combo_overlap_metric.addItem("Jaccard similarity",       "jaccard")
+        combo_overlap_metric.addItem("P(col | row)",             "directed")
+        combo_overlap_metric.addItem("Joint probability P(A∩B)", "joint_prob")
+        combo_overlap_metric.addItem("Co-occurrence counts",     "counts")
+        combo_overlap_metric.setToolTip(
+            "Jaccard: symmetric similarity (intersection / union)\n"
+            "P(col | row): conditional — fraction of row-class time that overlaps col-class\n"
+            "Joint probability: P(A∩B) = co-occupied bins / total bins\n"
+            "Counts: raw co-occupied bin counts"
+        )
+
+        lbl_overlap_metric = QLabel("Metric:")
+
+        chk_mask_diag = QCheckBox("Mask diag.")
+        chk_mask_diag.setToolTip(
+            "Hide diagonal cells and rescale the colorbar to the off-diagonal range"
+        )
+
         lbl_anchor   = QLabel("Anchor:")
         lbl_tgt_mode = QLabel("Target:")
         lbl_nn_anchor = QLabel("Other:")
@@ -420,6 +439,9 @@ class AnnotTab(_ExplorerTab):
         rl2.addWidget(spin_flank, 1, 7)
         rl2.addWidget(lbl_maxdist, 1, 8)
         rl2.addWidget(spin_maxdist, 1, 9)
+        rl2.addWidget(lbl_overlap_metric, 1, 8)
+        rl2.addWidget(combo_overlap_metric, 1, 9)
+        rl2.addWidget(chk_mask_diag, 1, 10)
         rl2.setColumnStretch(1, 1)
 
         # ---- row 2b: Luna OVERLAP ------------------------------------
@@ -548,6 +570,9 @@ class AnnotTab(_ExplorerTab):
         self._combo_overlap_source = combo_overlap_source
         self._txt_overlap_args = txt_overlap_args
         self._btn_overlap_run = btn_overlap_run
+        self._combo_overlap_metric = combo_overlap_metric
+        self._lbl_overlap_metric = lbl_overlap_metric
+        self._chk_mask_diag = chk_mask_diag
         self._list_cls      = list_cls
         self._btn_toggle_all = btn_toggle_all
         self._list_host     = list_host
@@ -575,6 +600,8 @@ class AnnotTab(_ExplorerTab):
         combo_nn_anchor.currentIndexChanged.connect(self._schedule_render)
         combo_nn_mode.currentIndexChanged.connect(self._schedule_render)
         combo_overlap_source.currentIndexChanged.connect(self._on_overlap_source_changed)
+        combo_overlap_metric.currentIndexChanged.connect(self._schedule_render)
+        chk_mask_diag.toggled.connect(self._schedule_render)
         txt_overlap_args.textChanged.connect(self._on_overlap_source_changed)
         btn_overlap_run.clicked.connect(self._run_luna_overlap)
 
@@ -714,6 +741,9 @@ class AnnotTab(_ExplorerTab):
         self._spin_gap.setVisible(is_raster)
         self._lbl_flank.setVisible(is_overlap)
         self._spin_flank.setVisible(is_overlap)
+        self._lbl_overlap_metric.setVisible(is_overlap)
+        self._combo_overlap_metric.setVisible(is_overlap)
+        self._chk_mask_diag.setVisible(is_overlap)
         self._lbl_maxdist.setVisible(is_dist)
         self._spin_maxdist.setVisible(is_dist)
         self._list_host.setVisible(not is_luna_overlap and self._cohort is not None)
@@ -774,9 +804,11 @@ class AnnotTab(_ExplorerTab):
         annots = []
 
         if model is not None:
+            src = getattr(model, "sourceModel", lambda: None)()
+            src = src if src is not None else model
             headers = [
-                str(model.headerData(c, Qt.Horizontal) or "")
-                for c in range(model.columnCount())
+                str(src.headerData(c, Qt.Horizontal) or "")
+                for c in range(src.columnCount())
             ]
             try:
                 annot_col = headers.index("Annotations")
@@ -784,8 +816,8 @@ class AnnotTab(_ExplorerTab):
                 annot_col = None
 
             if annot_col is not None:
-                for r in range(model.rowCount()):
-                    val = str(model.index(r, annot_col).data(Qt.DisplayRole) or "").strip()
+                for r in range(src.rowCount()):
+                    val = str(src.index(r, annot_col).data(Qt.DisplayRole) or "").strip()
                     if val and val != "SleepStage":
                         annots.append(val)
 
@@ -1200,21 +1232,24 @@ class AnnotTab(_ExplorerTab):
             return
         self._update_status_label()
 
-        view       = self._combo_view.currentData()
-        ref        = self._combo_ref.currentText()
-        window     = float(self._spin_win.value())
-        bin_s      = float(self._spin_bin.value())
-        gap        = float(self._spin_gap.value())
-        flank_s    = float(self._spin_flank.value())
-        max_dist_s = float(self._spin_maxdist.value())
-        ref_anchor = self._combo_anchor.currentData()
-        tgt_mode   = self._combo_tgt_mode.currentData()
-        nn_anchor  = self._combo_nn_anchor.currentData()
-        nn_mode    = self._combo_nn_mode.currentData()
+        view           = self._combo_view.currentData()
+        ref            = self._combo_ref.currentText()
+        window         = float(self._spin_win.value())
+        bin_s          = float(self._spin_bin.value())
+        gap            = float(self._spin_gap.value())
+        flank_s        = float(self._spin_flank.value())
+        max_dist_s     = float(self._spin_maxdist.value())
+        ref_anchor     = self._combo_anchor.currentData()
+        tgt_mode       = self._combo_tgt_mode.currentData()
+        nn_anchor      = self._combo_nn_anchor.currentData()
+        nn_mode        = self._combo_nn_mode.currentData()
+        overlap_metric = self._combo_overlap_metric.currentData()
+        mask_diag      = self._chk_mask_diag.isChecked()
 
         fut = self.ctrl._exec.submit(
             self._analyze_worker, cohort, view, checked, ref, window, bin_s, gap,
-            flank_s, max_dist_s, ref_anchor, tgt_mode, nn_anchor, nn_mode)
+            flank_s, max_dist_s, ref_anchor, tgt_mode, nn_anchor, nn_mode,
+            overlap_metric, mask_diag)
         def _done(_f=fut):
             try:
                 self._sig_ok.emit({"type": "render", "result": _f.result()})
@@ -1226,7 +1261,8 @@ class AnnotTab(_ExplorerTab):
     def _analyze_worker(cohort, view, checked, ref, window, bin_s, gap,
                         flank_s, max_dist_s,
                         ref_anchor="mid", tgt_mode="span",
-                        nn_anchor="mid", nn_mode="absolute"):
+                        nn_anchor="mid", nn_mode="absolute",
+                        overlap_metric="jaccard", mask_diag=False):
         colors = {
             cls: ANNOT_PALETTE[cohort["annot_classes"].index(cls) % len(ANNOT_PALETTE)]
             if cls in cohort["annot_classes"] else "#aaaaaa"
@@ -1258,7 +1294,8 @@ class AnnotTab(_ExplorerTab):
         return {"view": view, "data": data, "colors": colors,
                 "checked": checked, "ref": ref, "window": window, "bin_s": bin_s,
                 "flank_s": flank_s, "max_dist_s": max_dist_s,
-                "ref_anchor": ref_anchor, "nn_anchor": nn_anchor, "nn_mode": nn_mode}
+                "ref_anchor": ref_anchor, "nn_anchor": nn_anchor, "nn_mode": nn_mode,
+                "overlap_metric": overlap_metric, "mask_diag": mask_diag}
 
     # ------------------------------------------------------------------
     # Done callbacks
@@ -1556,10 +1593,12 @@ class AnnotTab(_ExplorerTab):
         flank_s = result.get("flank_s", 0.0)
         max_dist_s = result.get("max_dist_s", 3600.0)
         bin_s = result.get("bin_s", 2.0)
+        overlap_metric = result.get("overlap_metric", "jaccard")
+        mask_diag      = result.get("mask_diag", False)
         if vm == "peth":
             self._render_peth(d, c, ref)
         elif vm == "overlap":
-            self._render_overlap(d, flank_s)
+            self._render_overlap(d, flank_s, overlap_metric, mask_diag)
         elif vm == "nearest":
             self._render_nearest(d, c, ref, max_dist_s, bin_s)
         elif vm == "raster":
@@ -1627,13 +1666,13 @@ class AnnotTab(_ExplorerTab):
     # Render: overlap matrix
     # ------------------------------------------------------------------
 
-    def _render_overlap(self, data, flank_s=0.0):
+    def _render_overlap(self, data, flank_s=0.0, overlap_metric="jaccard",
+                        mask_diag=False):
         from matplotlib.colors import LinearSegmentedColormap
+        import numpy.ma as nma
         canvas = self._ensure_canvas()
         fig = canvas.figure; fig.clear(); fig.patch.set_facecolor(BG)
-        labels  = data.get("labels", [])
-        jaccard = data.get("jaccard", np.zeros((0, 0)))
-        directed= data.get("directed", np.zeros((0, 0)))
+        labels = data.get("labels", [])
         n = len(labels)
         self._set_canvas_height(min_height=max(420, 220 + (28 * n)))
         if n < 2:
@@ -1641,31 +1680,60 @@ class AnnotTab(_ExplorerTab):
             ax.text(0.5, 0.5, "Need ≥ 2 annotation classes.", color=FG,
                     ha="center", va="center", fontsize=10, transform=ax.transAxes)
             canvas.draw(); return
+
+        _METRIC_META = {
+            "jaccard":   ("Jaccard similarity",        True),
+            "directed":  ("P(col | row)",               True),
+            "joint_prob":("Joint probability  P(A∩B)", True),
+            "counts":    ("Co-occurrence counts",       False),
+        }
+        title_suffix, fixed_range = _METRIC_META.get(overlap_metric, ("", True))
+        mat = data.get(overlap_metric, data.get("jaccard", np.zeros((n, n)))).copy().astype(float)
+
+        if mask_diag:
+            np.fill_diagonal(mat, np.nan)
+
+        masked = nma.masked_invalid(mat)
+        if mask_diag or not fixed_range:
+            vmin = float(nma.min(masked)) if masked.count() else 0.0
+            vmax = float(nma.max(masked)) if masked.count() else 1.0
+        else:
+            vmin, vmax = 0.0, 1.0
+
         cmap = LinearSegmentedColormap.from_list(
             "ah", ["#0d1117","#1a3a5c","#1e6091","#48cae4","#ffd166","#f9844a"], N=256)
-        fig.subplots_adjust(left=0.18, right=0.92, top=0.88, bottom=0.18, wspace=0.5)
-        ax1, ax2 = fig.subplots(1, 2)
-        short = [lb[:12] + "…" if len(lb) > 13 else lb for lb in labels]
-        def _hmap(ax, mat, title):
-            im = ax.imshow(mat, cmap=cmap, vmin=0, vmax=1, aspect="auto",
-                           interpolation="nearest")
-            ax.set_xticks(range(n)); ax.set_yticks(range(n))
-            ax.set_xticklabels(short, rotation=45, ha="right", fontsize=7, color=FG)
-            ax.set_yticklabels(short, fontsize=7, color=FG)
-            ax.tick_params(colors=FG)
-            for sp in ax.spines.values(): sp.set_edgecolor(GRID)
-            for i in range(n):
-                for j in range(n):
-                    v = mat[i,j]
-                    ax.text(j, i, f"{v:.2f}", ha="center", va="center",
-                            fontsize=6.5, color="#000" if v > 0.55 else FG)
-            ax.set_facecolor(BG); ax.set_title(title, color=FG, fontsize=9, pad=6)
-            fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04).ax.tick_params(
-                labelcolor=FG, labelsize=7)
-        _hmap(ax1, jaccard, "Jaccard similarity")
-        _hmap(ax2, directed, "P(col | row)")
+        cmap.set_bad(color=BG)
+
+        fig.subplots_adjust(left=0.16, right=0.90, top=0.88, bottom=0.18)
+        ax = fig.add_subplot(111)
+        short = [lb[:16] + "…" if len(lb) > 17 else lb for lb in labels]
+
+        im = ax.imshow(masked, cmap=cmap, vmin=vmin, vmax=vmax, aspect="auto",
+                       interpolation="nearest")
+        ax.set_xticks(range(n)); ax.set_yticks(range(n))
+        ax.set_xticklabels(short, rotation=45, ha="right", fontsize=7, color=FG)
+        ax.set_yticklabels(short, fontsize=7, color=FG)
+        ax.tick_params(colors=FG)
+        for sp in ax.spines.values():
+            sp.set_edgecolor(GRID)
+
+        mid = vmin + (vmax - vmin) * 0.55
+        fmt = ".0f" if overlap_metric == "counts" else ".3f"
+        for i in range(n):
+            for j in range(n):
+                if mask_diag and i == j:
+                    continue
+                v = mat[i, j]
+                ax.text(j, i, format(v, fmt), ha="center", va="center",
+                        fontsize=6.5, color="#000" if v > mid else FG)
+
+        ax.set_facecolor(BG)
+        ax.set_title(title_suffix, color=FG, fontsize=9, pad=6)
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04).ax.tick_params(
+            labelcolor=FG, labelsize=7)
+
         flank_lbl = f"  |  flank = +/-{flank_s:.0f} s" if flank_s > 0 else ""
-        fig.suptitle(f"Annotation overlap matrix{flank_lbl}", color=FG, fontsize=10, y=0.97)
+        fig.suptitle(f"Annotation overlap{flank_lbl}", color=FG, fontsize=10, y=0.97)
         canvas.draw()
 
     # ------------------------------------------------------------------

@@ -651,9 +651,10 @@ def overlap_matrix(
         ix = np.ix_(present_idx, present_idx)
         cooccupy[ix] += co_sub.astype(float)
 
-    # Derive Jaccard and directed overlap
+    # Derive Jaccard, directed overlap, joint probability
     jaccard = np.zeros((n, n), dtype=float)
     directed = np.zeros((n, n), dtype=float)
+    joint_prob = np.zeros((n, n), dtype=float)
 
     for i in range(n):
         for j in range(n):
@@ -663,6 +664,8 @@ def overlap_matrix(
                 jaccard[i, j] = co / union
             if occ_totals[i] > 0:
                 directed[i, j] = co / occ_totals[i]
+            if total_bins > 0:
+                joint_prob[i, j] = co / total_bins
 
     total_hours = (total_bins * bin_secs) / 3600.0
     event_rate = {
@@ -675,8 +678,10 @@ def overlap_matrix(
     }
 
     return {
-        "jaccard": jaccard,
+        "counts": cooccupy.copy(),
+        "joint_prob": joint_prob,
         "directed": directed,
+        "jaccard": jaccard,
         "labels": annot_classes,
         "event_rate": event_rate,
         "occ_frac": occ_frac,

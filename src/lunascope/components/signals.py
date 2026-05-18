@@ -1969,7 +1969,8 @@ class SignalsMixin:
             chs.reverse()
         else:
             chs = self._order_pp_channels( chs )
-            
+            chs.reverse()
+
         # channels
         idx = 0        
         self._pg1_channel_cache = []

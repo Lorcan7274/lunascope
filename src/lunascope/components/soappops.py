@@ -1176,9 +1176,13 @@ class SoapPopsMixin:
         fut.add_done_callback(_done)
 
     def _derive_pops(self, p, pops_chs, pops_path, pops_model, opts, has_staging):
-        cmd_str = 'EPOCH align & RUN-POPS sig=' + pops_chs
-        cmd_str += ' path=' + pops_path
-        cmd_str += ' model=' + pops_model
+        # Luna's command parser splits on whitespace with no quoting support.
+        # Bind path (and model) to Luna variables using ${var="value"} so that
+        # spaces in the path are handled correctly.
+        cmd_str  = f'${{_pops_path="{pops_path}"}} & ${{_pops_model="{pops_model}"}}'
+        cmd_str += ' & EPOCH align & RUN-POPS sig=' + pops_chs
+        cmd_str += ' path=${_pops_path}'
+        cmd_str += ' model=${_pops_model}'
         cmd_str += opts
 
         p.eval_lunascope(cmd_str)

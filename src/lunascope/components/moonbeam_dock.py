@@ -208,9 +208,9 @@ class _MbConnectWorker(QObject):
 
 
 class _MbUpdateWorker(QObject):
-    """Refresh the manifest and cohort-access metadata off the UI thread."""
+    """Refresh the manifest off the UI thread."""
 
-    success = Signal(object, object)   # (manifest_dict, allowed_cohorts)
+    success = Signal(object)   # manifest_dict
     failure = Signal(str)
 
     def __init__(self, mb):
@@ -221,11 +221,10 @@ class _MbUpdateWorker(QObject):
     def run(self):
         try:
             self._mb.refresh_manifest()
-            allowed = self._mb.allowed_cohorts(refresh=True)
         except Exception as exc:
             self.failure.emit(str(exc))
             return
-        self.success.emit(getattr(self._mb, "_mf", None), allowed)
+        self.success.emit(getattr(self._mb, "_mf", None))
 
 
 class _MbDownloadWorker(QObject):
@@ -277,8 +276,10 @@ class _MbDownloadWorker(QObject):
                     if self._force:
                         self._remove_cached_files(iid)
                     self._mb.pull(iid, subcohort=self._subcohort)
+                    self._check_html_download(iid)
                     self.item_done.emit(str(iid), True)
                 except Exception as exc:
+                    self.log_msg.emit(f"  ✗ {iid}: {exc}")
                     self.error.emit(f"{iid}: {exc}")
                     self.item_done.emit(str(iid), False)
 
@@ -308,6 +309,50 @@ class _MbDownloadWorker(QObject):
 
         if removed_any:
             self.log_msg.emit(f"[force] cleared cached files for {iid} [{sc}]")
+
+    def _check_html_download(self, iid):
+        """Raise RuntimeError if the downloaded EDF is an NSRR HTML redirect page.
+
+        NSRR returns HTTP 200 with an HTML body when the token lacks download
+        permission for a file, so pull_file() cannot detect this from the
+        status code alone.  We read the first 128 bytes of the saved EDF and
+        raise if it looks like HTML, then clean up all files for this iid.
+        """
+        try:
+            _sc, _iid, info = self._mb._resolve_iid(iid, self._subcohort)
+            local_edf = pathlib.Path(
+                self._mb._local_path(self._cohort, info['edf'].lstrip('/'))
+            )
+            if not local_edf.exists():
+                return
+            with local_edf.open('rb') as fh:
+                header = fh.read(128).lstrip()
+            low = header[:16].lower()
+            if not (low.startswith(b'<!doctype html') or low.startswith(b'<html')):
+                return
+            # HTML confirmed — delete all files for this iid so they aren't
+            # treated as cached and re-checked.
+            rel_paths = [info['edf']] + list(info.get('annots', []))
+            if re.search(r'\.(edf\.gz|edfz)$', info['edf'], re.IGNORECASE):
+                rel_paths.append(info['edf'] + '.idx')
+            for rel_path in rel_paths:
+                local = pathlib.Path(
+                    self._mb._local_path(self._cohort, rel_path.lstrip('/'))
+                )
+                try:
+                    if local.exists():
+                        local.unlink()
+                except Exception:
+                    pass
+            raise RuntimeError(
+                "NSRR returned an HTML page instead of an EDF file — "
+                "your token does not have download access to this recording. "
+                "Visit sleepdata.org to request access."
+            )
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            self.log_msg.emit(f"  Warning: could not verify download for {iid}: {exc}")
 
 
 class _MbCopyWorker(QObject):
@@ -397,7 +442,6 @@ class MoonbeamMixin:
     def _init_moonbeam(self):
         self._mb              = None   # live moonbeam instance
         self._mb_mf           = None   # manifest dict (offline or live)
-        self._mb_accessible_cohorts = None
         self._mb_curr_cohort  = None
         self._mb_curr_subcohort = None
         self._mb_df2          = None   # current individual manifest DataFrame
@@ -449,9 +493,9 @@ class MoonbeamMixin:
         connect_btn.setObjectName("mb_connect_btn")
         connect_btn.setFixedWidth(90)
 
-        update_btn = QPushButton("Update cohort permissions")
+        update_btn = QPushButton("Refresh manifest")
         update_btn.setObjectName("mb_update_btn")
-        update_btn.setToolTip("Refresh cohort permissions and access counts")
+        update_btn.setToolTip("Re-fetch the NSRR file manifest")
         update_btn.setEnabled(False)
 
         status_lbl = QLabel("Token cached — press Connect" if _has_cached else "Not connected")
@@ -489,10 +533,16 @@ class MoonbeamMixin:
         cdir_temp_btn.setFixedWidth(80)
         cdir_temp_btn.setToolTip("Reset to the system temp folder (default, may be purged by OS)")
 
+        cdir_clear_btn = QPushButton("Clear All…")
+        cdir_clear_btn.setObjectName("mb_cdir_clear_btn")
+        cdir_clear_btn.setFixedWidth(82)
+        cdir_clear_btn.setToolTip("Delete all cached EDF/annotation files from the cache directory")
+
         cdir_layout.addWidget(cdir_lbl)
         cdir_layout.addWidget(cdir_edit)
         cdir_layout.addWidget(cdir_browse_btn)
         cdir_layout.addWidget(cdir_temp_btn)
+        cdir_layout.addWidget(cdir_clear_btn)
         outer.addWidget(cdir_frame)
 
         # ---- Summary bar ------------------------------------------------
@@ -512,8 +562,6 @@ class MoonbeamMixin:
         lbl_ncohorts.setObjectName("mb_lbl_ncohorts")
         lbl_n = _stat("Individuals: -", 120)
         lbl_n.setObjectName("mb_lbl_n")
-        lbl_naccess = _stat("Accessible: -", 110)
-        lbl_naccess.setObjectName("mb_lbl_naccess")
         lbl_ncached = _stat("Downloaded: -", 110)
         lbl_ncached.setObjectName("mb_lbl_ncached")
         lbl_cdir = QLabel("Cache Folder: -")
@@ -521,7 +569,7 @@ class MoonbeamMixin:
         lbl_cdir.setFrameStyle(QFrame.Panel | QFrame.Sunken)
         lbl_cdir.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
-        for w in (lbl_ncohorts, lbl_n, lbl_naccess, lbl_ncached, lbl_cdir):
+        for w in (lbl_ncohorts, lbl_n, lbl_ncached, lbl_cdir):
             summ_layout.addWidget(w)
         outer.addWidget(summ_frame)
 
@@ -627,13 +675,21 @@ class MoonbeamMixin:
             "Default: if a file already exists in the cache, it is not downloaded again. "
             "Enable this to replace partial or corrupted cached files."
         )
+        clear_sel_btn = QPushButton("Clear EDF(s)…")
+        clear_sel_btn.setObjectName("mb_clear_sel_btn")
+        clear_sel_btn.setToolTip(
+            "Delete cached EDF/annotation files for the checked individuals"
+        )
         cancel_btn  = QPushButton("Cancel")
         cancel_btn.setObjectName("mb_cancel_btn")
         cancel_btn.setVisible(False)
         pop_slist_btn = QPushButton("S-List: Cached View")
         pop_slist_btn.setObjectName("mb_pop_slist_btn")
-        pop_sel_slist_btn = QPushButton("S-List: Selected")
+        pop_sel_slist_btn = QPushButton("S-List: Checked")
         pop_sel_slist_btn.setObjectName("mb_pop_sel_slist_btn")
+        pop_sel_slist_btn.setToolTip(
+            "Load checked individuals that are cached into the S-List"
+        )
 
         progress     = QProgressBar()
         progress.setObjectName("mb_progress")
@@ -648,6 +704,7 @@ class MoonbeamMixin:
 
         bot_layout.addWidget(dl_sel_btn)
         bot_layout.addWidget(force_redownload_chk)
+        bot_layout.addWidget(clear_sel_btn)
         bot_layout.addWidget(cancel_btn)
         bot_layout.addStretch(1)
         bot_layout.addWidget(progress_lbl)
@@ -680,15 +737,16 @@ class MoonbeamMixin:
         self.ui.mb_cdir_edit     = cdir_edit
         self.ui.mb_cdir_browse_btn = cdir_browse_btn
         self.ui.mb_cdir_temp_btn   = cdir_temp_btn
+        self.ui.mb_cdir_clear_btn  = cdir_clear_btn
         self._mb_proxy           = mb_proxy
         self._mb_cdir            = _default_cdir   # tracks user's chosen path
         self.ui.mb_lbl_ncohorts  = lbl_ncohorts
         self.ui.mb_lbl_n         = lbl_n
-        self.ui.mb_lbl_naccess   = lbl_naccess
         self.ui.mb_lbl_ncached   = lbl_ncached
         self.ui.mb_lbl_cdir      = lbl_cdir
         self.ui.mb_dl_sel_btn    = dl_sel_btn
         self.ui.mb_force_redownload_chk = force_redownload_chk
+        self.ui.mb_clear_sel_btn = clear_sel_btn
         self.ui.mb_cancel_btn    = cancel_btn
         self.ui.mb_pop_slist_btn = pop_slist_btn
         self.ui.mb_pop_sel_slist_btn = pop_sel_slist_btn
@@ -701,8 +759,10 @@ class MoonbeamMixin:
         update_btn.clicked.connect(self._mb_update)
         cdir_browse_btn.clicked.connect(self._mb_browse_cache)
         cdir_temp_btn.clicked.connect(self._mb_use_temp_cache)
+        cdir_clear_btn.clicked.connect(self._mb_clear_all_cache)
         tree.clicked.connect(self._mb_on_tree_click)
         dl_sel_btn.clicked.connect(self._mb_download_selected)
+        clear_sel_btn.clicked.connect(self._mb_clear_selected_cache)
         cancel_btn.clicked.connect(self._mb_cancel_download)
         pop_sel_slist_btn.clicked.connect(self._mb_populate_slist_selected)
         pop_slist_btn.clicked.connect(self._mb_populate_slist)
@@ -750,12 +810,11 @@ class MoonbeamMixin:
         if w:
             w.setEnabled(enabled and not self._mb_thread_running())
         has_data = self._mb_mf is not None
-        slist_btn = getattr(self.ui, "mb_pop_slist_btn", None)
-        if slist_btn:
-            slist_btn.setEnabled(has_data)
-        sel_slist_btn = getattr(self.ui, "mb_pop_sel_slist_btn", None)
-        if sel_slist_btn:
-            sel_slist_btn.setEnabled(has_data)
+        for name in ("mb_pop_slist_btn", "mb_pop_sel_slist_btn",
+                     "mb_clear_sel_btn", "mb_cdir_clear_btn"):
+            w = getattr(self.ui, name, None)
+            if w:
+                w.setEnabled(has_data)
 
     # -----------------------------------------------------------------------
     # Offline manifest helpers
@@ -849,49 +908,11 @@ class MoonbeamMixin:
         self._mb_connect_worker = worker
         thread.start()
 
-    @staticmethod
-    def _mb_truthy(value) -> bool:
-        if isinstance(value, bool):
-            return value
-        if value is None:
-            return False
-        if isinstance(value, (int, float)):
-            return value != 0
-        txt = str(value).strip().lower()
-        return txt in {"1", "true", "t", "yes", "y", "access", "accessible"}
-
-    def _mb_get_accessible_cohorts(self, df1=None):
-        """Derive the accessible cohort slugs from moonbeam.cohorts()."""
-        if df1 is None and self._mb is not None:
-            df1 = getattr(self._mb, "df1", None)
-        if df1 is None or getattr(df1, "empty", True) or "Cohort" not in df1.columns:
-            return None
-
-        for col in ("Accessible", "Access", "HasAccess", "Authorized"):
-            if col in df1.columns:
-                return {
-                    str(row["Cohort"])
-                    for _, row in df1.iterrows()
-                    if self._mb_truthy(row[col])
-                }
-
-        if self._mb is not None and hasattr(self._mb, "allowed_cohorts"):
-            try:
-                return {str(x) for x in self._mb.allowed_cohorts()}
-            except Exception:
-                return None
-
-        return None
-
     def _mb_on_connect_success(self, mb):
         self._mb = mb
-        # Merge live manifest into self._mb_mf
         live_mf = getattr(mb, '_mf', None)
         if live_mf:
             self._mb_mf = live_mf
-        self._mb_accessible_cohorts = self._mb_get_accessible_cohorts(
-            getattr(mb, "df1", None)
-        )
         self.ui.mb_connect_btn.setEnabled(True)
         self.ui.mb_status_lbl.setText("Connected")
         self._mb_populate_tree()
@@ -899,7 +920,6 @@ class MoonbeamMixin:
 
     def _mb_on_connect_failure(self, msg):
         self._mb = None
-        self._mb_accessible_cohorts = None
         self.ui.mb_connect_btn.setEnabled(True)
         self._mb_set_action_enabled(False)
         self.ui.mb_status_lbl.setText(f"Error: {msg[:100]}")
@@ -927,15 +947,12 @@ class MoonbeamMixin:
         self._mb_update_worker = worker
         self._mb_set_action_enabled(False)
         self.ui.mb_connect_btn.setEnabled(False)
-        self.ui.mb_status_lbl.setText("Updating studies…")
+        self.ui.mb_status_lbl.setText("Refreshing manifest…")
         thread.start()
 
-    def _mb_on_update_success(self, manifest, allowed):
+    def _mb_on_update_success(self, manifest):
         if manifest:
             self._mb_mf = manifest
-        self._mb_accessible_cohorts = {str(x) for x in allowed} if allowed is not None else None
-        if self._mb is not None:
-            self._mb.df1 = self._mb.cohorts()
         self.ui.mb_status_lbl.setText("Connected")
         self._mb_populate_tree()
         if self._mb_curr_cohort:
@@ -944,11 +961,8 @@ class MoonbeamMixin:
         self.ui.mb_connect_btn.setEnabled(True)
 
     def _mb_on_update_failure(self, msg):
-        self._mb_accessible_cohorts = self._mb_get_accessible_cohorts(
-            getattr(self._mb, "df1", None) if self._mb is not None else None
-        )
         self.ui.mb_status_lbl.setText("Connected")
-        self.ui.mb_log.append(f"Update failed: {msg}")
+        self.ui.mb_log.append(f"Manifest refresh failed: {msg}")
         self._mb_set_action_enabled(self._mb is not None)
         self.ui.mb_connect_btn.setEnabled(True)
 
@@ -956,6 +970,118 @@ class MoonbeamMixin:
         if self._mb is None:
             return
         self._mb_start_update()
+
+    # -----------------------------------------------------------------------
+    # Clear cache
+    # -----------------------------------------------------------------------
+
+    def _mb_clear_all_cache(self):
+        """Delete all cached EDF/annotation files from the cache directory."""
+        if self._mb_thread_running():
+            QMessageBox.information(
+                self.ui, "Moonbeam",
+                "A download or copy is in progress — please wait."
+            )
+            return
+        cdir = pathlib.Path(self._mb_cdir)
+        if not cdir.exists():
+            QMessageBox.information(self.ui, "Clear Cache", "Cache directory does not exist.")
+            return
+        files = [f for f in cdir.rglob('*') if f.is_file() and not f.name.startswith('.')]
+        if not files:
+            QMessageBox.information(self.ui, "Clear Cache", "No cached files to remove.")
+            return
+        total_size = sum(f.stat().st_size for f in files)
+        reply = QMessageBox.question(
+            self.ui, "Clear All Cached Files",
+            f"Delete all {len(files):,} cached file(s) ({_fmt_size(total_size)}) from:\n"
+            f"  {self._mb_cdir}\n\n"
+            "The manifest index will be preserved. This cannot be undone.",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        errors = 0
+        for f in files:
+            try:
+                f.unlink()
+            except Exception:
+                errors += 1
+        for d in sorted(cdir.rglob('*'), reverse=True):
+            if d.is_dir() and not any(d.iterdir()):
+                try:
+                    d.rmdir()
+                except Exception:
+                    pass
+        msg = f"Cleared {len(files) - errors:,} file(s)"
+        if errors:
+            msg += f" ({errors} error(s))"
+        self.ui.mb_log.append(msg)
+        self._mb_refresh_cache_status()
+
+    def _mb_clear_selected_cache(self):
+        """Delete cached files for the checked individuals."""
+        if self._mb_thread_running():
+            QMessageBox.information(
+                self.ui, "Moonbeam",
+                "A download or copy is in progress — please wait."
+            )
+            return
+        if self._mb_mf is None or self._mb_curr_cohort is None:
+            QMessageBox.information(self.ui, "Moonbeam", "No cohort selected.")
+            return
+        iids = self._mb_get_checked_iids()
+        if not iids:
+            QMessageBox.information(
+                self.ui, "Moonbeam",
+                "No individuals selected.\n"
+                "Use the checkboxes in the first column to select individuals to clear."
+            )
+            return
+        cohort = self._mb_curr_cohort
+        cdir = pathlib.Path(self._mb_cdir)
+        mf = self._mb_mf
+        iids_set = set(iids)
+        files_to_delete = []
+        cohort_data = mf.get(cohort, {})
+        for sc, subjects in cohort_data.items():
+            if self._mb_curr_subcohort and sc != self._mb_curr_subcohort:
+                continue
+            for iid, info in subjects.items():
+                if iid not in iids_set:
+                    continue
+                rel_paths = [info['edf']] + list(info.get('annots', []))
+                for rel_path in rel_paths:
+                    local = cdir / cohort / rel_path.lstrip('/')
+                    if local.exists():
+                        files_to_delete.append(local)
+        if not files_to_delete:
+            QMessageBox.information(
+                self.ui, "Moonbeam",
+                "None of the selected individuals have cached files."
+            )
+            return
+        total_size = sum(f.stat().st_size for f in files_to_delete)
+        reply = QMessageBox.question(
+            self.ui, "Clear Cached Files",
+            f"Delete {len(files_to_delete):,} cached file(s) "
+            f"({_fmt_size(total_size)}) for {len(iids):,} individual(s)?\n\n"
+            "This cannot be undone.",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        errors = 0
+        for f in files_to_delete:
+            try:
+                f.unlink()
+            except Exception:
+                errors += 1
+        msg = f"Cleared {len(files_to_delete) - errors:,} file(s) for {len(iids):,} individual(s)"
+        if errors:
+            msg += f" ({errors} error(s))"
+        self.ui.mb_log.append(msg)
+        self._mb_refresh_cache_status()
 
     # -----------------------------------------------------------------------
     # Cache directory controls
@@ -1109,18 +1235,10 @@ class MoonbeamMixin:
             return
 
         cdir_path = pathlib.Path(self._mb_cdir)
-        accessible = self._mb_accessible_cohorts
-        access_known = accessible is not None
 
         total_n = sum(
             len(subjects)
             for cohort_data in mf.values()
-            for subjects in cohort_data.values()
-        )
-        total_access = sum(
-            len(subjects)
-            for cohort, cohort_data in mf.items()
-            if access_known and cohort in accessible
             for subjects in cohort_data.values()
         )
         total_cached = sum(
@@ -1131,25 +1249,16 @@ class MoonbeamMixin:
             if (cdir_path / cohort / info['edf'].lstrip('/')).exists()
         )
 
-        if access_known:
-            n_accessible_cohorts = sum(1 for cohort in mf if cohort in accessible)
-            self.ui.mb_lbl_ncohorts.setText(
-                f"Studies: {len(mf)} ({n_accessible_cohorts:,} accessible)"
-            )
-            self.ui.mb_lbl_naccess.setText(f"Accessible: {total_access:,}")
-        else:
-            self.ui.mb_lbl_ncohorts.setText(f"Studies: {len(mf)}")
-            self.ui.mb_lbl_naccess.setText("Accessible: ?")
+        self.ui.mb_lbl_ncohorts.setText(f"Studies: {len(mf)}")
         self.ui.mb_lbl_n.setText(f"Individuals: {total_n:,}")
         self.ui.mb_lbl_ncached.setText(f"Downloaded: {total_cached:,}")
         self.ui.mb_lbl_cdir.setText(f"Cache Folder: {self._mb_cdir}")
 
         model = QStandardItemModel()
-        model.setHorizontalHeaderLabels(["Study / Subcohort", "Available", "Access", "Cached"])
+        model.setHorizontalHeaderLabels(["Study / Subcohort", "Available", "Cached"])
 
         for cohort, subcohort_data in mf.items():
             n_cohort = sum(len(s) for s in subcohort_data.values())
-            access_cohort = n_cohort if access_known and cohort in accessible else 0
             cached_cohort = sum(
                 1
                 for sc, subjects in subcohort_data.items()
@@ -1157,17 +1266,12 @@ class MoonbeamMixin:
                 if (cdir_path / cohort / info['edf'].lstrip('/')).exists()
             )
 
-            if access_known:
-                marker = "[access]" if cohort in accessible else "[no access]"
-            else:
-                marker = "[access ?]"
-            coh_item = QStandardItem(f"{cohort}  {marker}")
+            coh_item = QStandardItem(cohort)
             coh_item.setData(('cohort', cohort, None), Qt.UserRole)
             coh_item.setEditable(False)
 
             for sc, subjects in subcohort_data.items():
                 sc_n = len(subjects)
-                sc_access = sc_n if access_known and cohort in accessible else 0
                 sc_cached = sum(
                     1 for info in subjects.values()
                     if (cdir_path / cohort / info['edf'].lstrip('/')).exists()
@@ -1178,14 +1282,12 @@ class MoonbeamMixin:
                 coh_item.appendRow([
                     sc_item,
                     _right_item(str(sc_n)),
-                    _right_item(str(sc_access) if access_known else "?"),
                     _right_item(str(sc_cached)),
                 ])
 
             model.appendRow([
                 coh_item,
                 _right_item(str(n_cohort)),
-                _right_item(str(access_cohort) if access_known else "?"),
                 _right_item(str(cached_cohort)),
             ])
 
@@ -1202,14 +1304,12 @@ class MoonbeamMixin:
         h.setSectionResizeMode(0, QHeaderView.Interactive)
         h.setSectionResizeMode(1, QHeaderView.Fixed)
         h.setSectionResizeMode(2, QHeaderView.Fixed)
-        h.setSectionResizeMode(3, QHeaderView.Fixed)
         tree.expandAll()
         if not self._mb_tree_sized:
             tree.resizeColumnToContents(0)
             tree.setColumnWidth(0, min(max(tree.columnWidth(0) + 18, 170), 360))
             tree.setColumnWidth(1, 74)
-            tree.setColumnWidth(2, 74)
-            tree.setColumnWidth(3, 68)
+            tree.setColumnWidth(2, 68)
             total_w = sum(tree.columnWidth(col) for col in range(model.columnCount()))
             total_w += tree.frameWidth() * 2 + 28
             if tree.verticalScrollBar().isVisible():
@@ -1493,7 +1593,7 @@ class MoonbeamMixin:
         for r in range(src.rowCount()):
             id_it = src.item(r, 1)
             if id_it and id_it.text() == iid:
-                src.setItem(r, 5, _cached_item(is_cached))
+                src.setItem(r, 3, _cached_item(is_cached))
                 break
 
     def _mb_on_dl_finished(self):
@@ -1613,12 +1713,12 @@ class MoonbeamMixin:
                 "The current cohort view is empty."
             )
             return
-        iids = self._mb_get_selected_iids()
+        iids = self._mb_get_checked_iids()
         if not iids:
             QMessageBox.information(
                 self.ui, "Moonbeam",
-                "No recordings selected.\n"
-                "Select one or more rows in the table, then try again."
+                "No individuals checked.\n"
+                "Use the checkboxes in the first column to select individuals, then try again."
             )
             return
         df = self._mb_df2[self._mb_df2['ID'].astype(str).isin(iids)].copy()
@@ -1626,7 +1726,7 @@ class MoonbeamMixin:
         if rows is None:
             return
         label = self._mb_curr_subcohort or self._mb_curr_cohort
-        self._mb_load_rows_into_slist(rows, label, f"the selected recordings in '{label}'")
+        self._mb_load_rows_into_slist(rows, label, f"the checked recordings in '{label}'")
 
 
 # ---------------------------------------------------------------------------
