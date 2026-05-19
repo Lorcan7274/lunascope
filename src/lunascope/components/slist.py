@@ -29,6 +29,8 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QHeaderView,
     QAbstractItemView,
+    QLabel,
+    QLineEdit,
     QMessageBox,
     QSizePolicy,
     QStyledItemDelegate,
@@ -36,7 +38,7 @@ from PySide6.QtWidgets import (
     QStyleOptionViewItem,
 )
 from PySide6.QtCore import Qt, QDir, QEvent, QRegularExpression, QSortFilterProxyModel, QAbstractTableModel, QModelIndex, QSize, QTimer
-from PySide6.QtGui import QStandardItemModel, QStandardItem, QPalette, QIcon
+from PySide6.QtGui import QColor, QIcon, QPainter, QPalette, QPixmap, QStandardItemModel, QStandardItem
 
 import pandas as pd
 import numpy as np
@@ -175,6 +177,7 @@ class SampleListCompactDelegate(QStyledItemDelegate):
         self._expanded_keys = set()
         self._meta_rows = {}   # id -> {col: val}
         self._meta_cols = []   # ordered display columns (up to 10)
+        self._ch_highlighted_ids: set[str] = set()
 
     @staticmethod
     def _clean_detail(value):
@@ -235,6 +238,10 @@ class SampleListCompactDelegate(QStyledItemDelegate):
 
         style = opt.widget.style() if opt.widget else QApplication.style()
         style.drawControl(QStyle.CE_ItemViewItem, opt, painter, opt.widget)
+
+        id_text = str(index.data(Qt.DisplayRole) or "")
+        if id_text in self._ch_highlighted_ids:
+            painter.fillRect(option.rect, QColor(20, 180, 160, 42))
 
         painter.save()
 
@@ -310,10 +317,86 @@ class SListMixin:
         else:
             label.setToolTip("")
 
+    _CH_COLOR      = QColor(20, 180, 160)      # teal  — channel highlight
+    _ID_COLOR      = QColor(80, 140, 230)      # blue  — ID filter
+    _TAG_COLOR_IDLE = QColor(130, 130, 130)
+    _CH_ACTIVE_SS  = "QLineEdit { background: rgba(20,180,160,18); }"
+    _ID_ACTIVE_SS  = "QLineEdit { background: rgba(80,140,230,38); }"
+
+    @staticmethod
+    def _make_tag_icon(text, color):
+        """Render a short uppercase tag onto a HiDPI-aware pixmap for addAction."""
+        screen = QApplication.primaryScreen()
+        dpr = screen.devicePixelRatio() if screen else 2.0
+        pw, ph = int(32 * dpr), int(16 * dpr)
+        pix = QPixmap(pw, ph)
+        pix.setDevicePixelRatio(dpr)
+        pix.fill(Qt.transparent)
+        p = QPainter(pix)
+        p.setRenderHint(QPainter.Antialiasing)
+        font = p.font()
+        font.setPointSize(9)
+        font.setBold(True)
+        p.setFont(font)
+        p.setPen(color)
+        from PySide6.QtCore import QRect
+        p.drawText(QRect(0, 0, 32, 16), Qt.AlignCenter, text)
+        p.end()
+        return QIcon(pix)
+
+    def _refresh_filter_styles(self, *_args):
+        """Refresh both filter field styles based on their current focus/text state.
+        Connected to QApplication.focusChanged so it fires reliably on any focus move."""
+        if not hasattr(self, "_ch_flt_edit"):
+            return
+        ch_active = bool(self._ch_flt_edit.text()) or self._ch_flt_edit.hasFocus()
+        self._ch_flt_edit.setStyleSheet(self._CH_ACTIVE_SS if ch_active else "")
+        if hasattr(self, "_ch_flt_action"):
+            self._ch_flt_action.setIcon(
+                self._make_tag_icon("CH", self._CH_COLOR if ch_active else self._TAG_COLOR_IDLE)
+            )
+
+        id_active = bool(self.ui.flt_slist.text()) or self.ui.flt_slist.hasFocus()
+        self.ui.flt_slist.setStyleSheet(self._ID_ACTIVE_SS if id_active else "")
+        if hasattr(self, "_id_flt_action"):
+            self._id_flt_action.setIcon(
+                self._make_tag_icon("ID", self._ID_COLOR if id_active else self._TAG_COLOR_IDLE)
+            )
+
+    def _on_ch_flt_text_changed(self, _text):
+        self._refresh_filter_styles()
+        self._ch_flt_timer.start()
+
+    def _sync_filter_heights(self):
+        """Pin filter inputs and hint label to the same height — no layout jump on swap."""
+        if not hasattr(self, "_ch_flt_edit"):
+            return
+        h = self.ui.flt_slist.sizeHint().height()
+        if h > 0:
+            self.ui.flt_slist.setFixedHeight(h)
+            self._ch_flt_edit.setFixedHeight(h)
+            self._ch_flt_hint.setFixedHeight(h)
+
     def eventFilter(self, obj, event):
         if hasattr(self, "ui") and obj is getattr(self.ui, "lbl_slist", None):
             if event.type() in (QEvent.Resize, QEvent.Show):
                 self._refresh_slist_label()
+
+        # Clear filter-field highlight when the user clicks on a non-focusable area
+        # (QLabel, dock background, etc.) — those clicks don't trigger focusChanged.
+        if event.type() == QEvent.MouseButtonPress and hasattr(self, "_ch_flt_edit"):
+            focused = QApplication.focusWidget()
+            if focused in (self.ui.flt_slist, self._ch_flt_edit):
+                w, inside = obj, False
+                while w is not None:
+                    if w is focused:
+                        inside = True
+                        break
+                    w = w.parent() if hasattr(w, "parent") else None
+                if not inside:
+                    focused.clearFocus()
+                    QTimer.singleShot(0, self._refresh_filter_styles)
+
         return super().eventFilter(obj, event)
 
     def _annotation_paths_from_cell(self, value):
@@ -537,14 +620,81 @@ class SListMixin:
         self.ui.lbl_slist.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         self.ui.lbl_slist.installEventFilter(self)
         self._set_slist_label(self.ui.lbl_slist.text())
-        
+
+        # ── Filter bar: ID (existing) + CH (new), both styled consistently ──
+
+        # "ID" tag icon — stored so we can swap its colour on focus/text changes
+        self._id_flt_action = self.ui.flt_slist.addAction(
+            self._make_tag_icon("ID", self._TAG_COLOR_IDLE),
+            QLineEdit.LeadingPosition,
+        )
+        self.ui.flt_slist.setPlaceholderText("filter…")
+        self.ui.flt_slist.textChanged.connect(self._refresh_filter_styles)
+
+        # Channel highlight filter — stacked below flt_slist
+        self._ch_highlighted_ids: set[str] = set()
+        self._ch_flt_edit = QLineEdit()
+        self._ch_flt_edit.setPlaceholderText("C3&C4, N1   |   & = and   |   , = or")
+        self._ch_flt_edit.setClearButtonEnabled(True)
+        self._ch_flt_action = self._ch_flt_edit.addAction(
+            self._make_tag_icon("CH", self._TAG_COLOR_IDLE),
+            QLineEdit.LeadingPosition,
+        )
+
+        # Hint label — occupies the same slot as the filter, visible when no scan yet
+        self._ch_flt_hint = QLabel("Scan All in Explorer to enable channel / annotation filter")
+        self._ch_flt_hint.setAlignment(Qt.AlignCenter)
+        self._ch_flt_hint.setToolTip(
+            "Open the Explorer tab → Harmonizer → click  Scan All.\n"
+            "The filter will appear here automatically once scanning is complete."
+        )
+        self._ch_flt_hint.setStyleSheet("""
+            QLabel {
+                color: rgba(150, 150, 150, 150);
+                font-style: italic;
+                font-size: 11px;
+                padding: 3px 8px;
+                border: 1px dashed rgba(150, 150, 150, 55);
+                border-radius: 3px;
+            }
+        """)
+
+        vlayout = self.ui.tbl_slist.parentWidget().layout()
+        tbl_idx = vlayout.indexOf(self.ui.tbl_slist)
+        if tbl_idx >= 0:
+            # Insert filter first, hint second — both at tbl_idx so they share the slot.
+            # Qt collapses hidden widgets, so only one takes space at a time.
+            vlayout.insertWidget(tbl_idx, self._ch_flt_hint)
+            vlayout.insertWidget(tbl_idx, self._ch_flt_edit)
+
+        # Filter hidden until Scan All / Load cache fires scan_ready
+        self._ch_flt_edit.setVisible(False)
+
+        # focusChanged handles proper focus transfers (focusable → focusable).
+        # installEventFilter on the app catches mouse clicks on non-focusable areas
+        # (labels, empty dock background) that don't trigger focusChanged.
+        QApplication.instance().focusChanged.connect(self._refresh_filter_styles)
+        QApplication.instance().installEventFilter(self)
+
+        # Sync both filter heights after layout is complete
+        QTimer.singleShot(0, self._sync_filter_heights)
+
+        self._ch_flt_timer = QTimer()
+        self._ch_flt_timer.setSingleShot(True)
+        self._ch_flt_timer.setInterval(200)
+        self._ch_flt_timer.timeout.connect(self._apply_channel_highlight)
+        self._ch_flt_edit.textChanged.connect(self._on_ch_flt_text_changed)
+
+        # Defer harmonizer connection until after all __init__ methods complete
+        QTimer.singleShot(0, self._late_connect_harmonizer)
+
         # wire buttons
         self.ui.butt_load_slist.clicked.connect(self.open_file)
         self.ui.butt_build_slist.clicked.connect(self.open_folder)
-        self.ui.butt_load_edf.clicked.connect(lambda _checked=False: self.open_edf())        
+        self.ui.butt_load_edf.clicked.connect(lambda _checked=False: self.open_edf())
         self.ui.butt_load_annot.clicked.connect(lambda _checked=False: self.open_annot())
         self.ui.butt_refresh.clicked.connect(self._refresh)
-        
+
         # wire select ID from slist --> load + show details
         self.ui.tbl_slist.selectionModel().currentRowChanged.connect(self._on_slist_current_row_changed)
         
@@ -613,6 +763,8 @@ class SListMixin:
         self._proxy.setSourceModel(model)
         self._configure_slist_view()
         self._set_slist_label(label)
+        if hasattr(self, "_ch_flt_edit"):
+            self._ch_flt_edit.clear()
 
     def _configure_slist_view(self):
         view = self.ui.tbl_slist
@@ -659,6 +811,86 @@ class SListMixin:
         """Reset flag after the proxy has finished re-filtering, then repaint."""
         self._slist_filter_changing = False
         self._refresh_slist_row_heights()
+        self.ui.tbl_slist.viewport().update()
+
+    def _late_connect_harmonizer(self):
+        """Connect to the harmonizer's scan_ready signal after all __init__ runs."""
+        harm = getattr(self, "_tab_harm", None)
+        if harm is None:
+            return
+        harm.scan_ready.connect(self._on_harmonizer_scan_ready)
+        if harm._scan is not None:
+            self._on_harmonizer_scan_ready()
+
+    def _on_harmonizer_scan_ready(self):
+        """Called when Scan All or Load cache completes — build lookup and show filter."""
+        harm = getattr(self, "_tab_harm", None)
+        if harm is None or harm._scan is None:
+            return
+        ch_df = harm._scan.channels_df
+        an_df = harm._scan.annots_df
+        self._scan_ch_map: dict[str, set[str]] = {}
+        self._scan_an_map: dict[str, set[str]] = {}
+        if not ch_df.empty and "ID" in ch_df.columns and "CH" in ch_df.columns:
+            for id_str, grp in ch_df.groupby("ID"):
+                self._scan_ch_map[str(id_str)] = set(grp["CH"].dropna().astype(str))
+        if not an_df.empty and "ID" in an_df.columns and "ANNOT" in an_df.columns:
+            for id_str, grp in an_df.groupby("ID"):
+                self._scan_an_map[str(id_str)] = set(grp["ANNOT"].dropna().astype(str))
+        if hasattr(self, "_ch_flt_edit"):
+            self._ch_flt_hint.setVisible(False)
+            self._ch_flt_edit.setVisible(True)
+            self._apply_channel_highlight()
+
+    @staticmethod
+    def _parse_ch_query(query_text: str) -> list[list[str]]:
+        """Parse query into OR-groups of AND-terms.
+
+        Syntax:  comma = OR between groups,  & = AND within a group.
+        Examples:
+          "C3,C4"        → [["C3"], ["C4"]]          — C3 OR C4
+          "C3&C4,CZ"     → [["C3","C4"], ["CZ"]]     — (C3 AND C4) OR CZ
+          "C3&C4,CZ&CX"  → [["C3","C4"], ["CZ","CX"]]
+        """
+        groups = []
+        for or_part in query_text.split(","):
+            and_terms = [t.strip().upper() for t in or_part.split("&") if t.strip()]
+            if and_terms:
+                groups.append(and_terms)
+        return groups
+
+    @staticmethod
+    def _subject_matches(combined: set[str], or_groups: list[list[str]]) -> bool:
+        """True if ANY OR-group has ALL its AND-terms matching (partial, case-insensitive)."""
+        combined_up = {c.upper() for c in combined}
+        for and_terms in or_groups:
+            if all(any(term in item for item in combined_up) for term in and_terms):
+                return True
+        return False
+
+    def _apply_channel_highlight(self):
+        if not hasattr(self, "_scan_ch_map") or not hasattr(self, "_ch_flt_edit"):
+            return
+        query_text = self._ch_flt_edit.text().strip()
+        if not query_text:
+            self._ch_highlighted_ids = set()
+            self._slist_delegate._ch_highlighted_ids = set()
+            self.ui.tbl_slist.viewport().update()
+            return
+        or_groups = self._parse_ch_query(query_text)
+        if not or_groups:
+            return
+        matched: set[str] = set()
+        for row in self._sample_rows_from_source_model():
+            id_str = row[0]
+            combined = (
+                self._scan_ch_map.get(id_str, set()) |
+                self._scan_an_map.get(id_str, set())
+            )
+            if self._subject_matches(combined, or_groups):
+                matched.add(id_str)
+        self._ch_highlighted_ids = matched
+        self._slist_delegate._ch_highlighted_ids = matched
         self.ui.tbl_slist.viewport().update()
 
     def _on_slist_current_row_changed(self, current, previous):
