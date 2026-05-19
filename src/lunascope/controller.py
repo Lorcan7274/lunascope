@@ -762,7 +762,10 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
             self._sync_multiday_actigraphy_dock()
         else:
             self._sync_multiday_actigraphy_dock()
-            self._calc_hypnostats()
+            if self.ui.isVisible():
+                self._calc_hypnostats()
+            else:
+                QTimer.singleShot(0, self._calc_hypnostats)
 
         
     # ------------------------------------------------------------

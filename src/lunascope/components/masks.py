@@ -21,13 +21,63 @@
 
 import numpy as np
 
-from PySide6 import QtCore, QtWidgets
+import pyqtgraph as pg
+from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import Qt, QModelIndex
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView, QHBoxLayout, QHeaderView, QLabel, QMessageBox,
     QPushButton, QSizePolicy, QSpinBox, QTableView, QVBoxLayout, QWidget,
 )
+
+
+# ---------------------------------------------------------------------------
+# Difference-mode overlay item (XOR-like: inverts whatever is underneath)
+# ---------------------------------------------------------------------------
+
+def _to_qcolor(color):
+    """Convert any pyqtgraph-compatible color spec to QColor."""
+    if isinstance(color, QtGui.QColor):
+        return color
+    if color is None:
+        return QtGui.QColor(255, 255, 255)
+    return QtGui.QColor(pg.mkColor(color))
+
+
+class _DiffOverlayItem(pg.GraphicsObject):
+    """Rectangles painted with CompositionMode_Difference.
+
+    Using the channel's own signal color as the Difference source:
+      |channel_color - black_bg|   = channel_color  → colored box background
+      |channel_color - signal|     ≈ 0 where signal matches  → dark/black trace
+    Result: signal appears as dark trace on a colored box, always legible.
+    """
+
+    def __init__(self, rects, color=None):
+        super().__init__()
+        self._rects = rects   # list[QRectF] in data coordinates
+        c = _to_qcolor(color)
+        self._brush = QtGui.QBrush(c)
+        if rects:
+            x0 = min(r.left()   for r in rects)
+            x1 = max(r.right()  for r in rects)
+            y0 = min(r.top()    for r in rects)
+            y1 = max(r.bottom() for r in rects)
+            self._br = QtCore.QRectF(x0, y0, x1 - x0, y1 - y0)
+        else:
+            self._br = QtCore.QRectF()
+
+    def boundingRect(self):
+        return self._br
+
+    def paint(self, painter, option, widget=None):
+        painter.save()
+        painter.setCompositionMode(QtGui.QPainter.CompositionMode_Difference)
+        painter.setBrush(self._brush)
+        painter.setPen(QtCore.Qt.NoPen)
+        for r in self._rects:
+            painter.drawRect(r)
+        painter.restore()
 
 
 # ---------------------------------------------------------------------------
@@ -44,7 +94,7 @@ _C_CHEP_FLAGGED = QColor("#8b1a1a")   # CHEP=0 (flagged bad)   → dark red
 # ---------------------------------------------------------------------------
 
 class _ChepModel(QtCore.QAbstractTableModel):
-    """Virtual colour model: rows=channels (+EPOCH summary), cols=original epochs."""
+    """Virtual colour model: rows=channels, cols=original epochs."""
 
     ST_REMOVED = 0   # epoch removed by RE (or no data)
     ST_CLEAN   = 1   # CHEP=1 — present and clean
@@ -58,7 +108,7 @@ class _ChepModel(QtCore.QAbstractTableModel):
 
     def __init__(self, row_names, n_epochs, matrix, parent=None):
         super().__init__(parent)
-        self._rows = row_names          # list[str] — channel names + "EPOCH"
+        self._rows = row_names          # list[str] — channel names
         self._ne   = n_epochs           # total original epoch count
         self._mat  = matrix             # np.ndarray int8 [n_rows × n_epochs]
 
@@ -371,7 +421,7 @@ class MasksMixin:
                 except (ValueError, TypeError):
                     pass
 
-        n_rows = len(chs) + 1        # last row = EPOCH summary
+        n_rows = len(chs)
         mat    = np.zeros((n_rows, ne_orig), dtype=np.int8)   # 0 = removed
 
         ch_idx = {ch: i for i, ch in enumerate(chs)}
@@ -391,22 +441,13 @@ class MasksMixin:
             if ch in ch_idx:
                 mat[ch_idx[ch], eidx] = state
 
-        # EPOCH summary row: present (clean or flagged) if any channel data exists
-        for eidx in range(ne_orig):
-            col = mat[:n_rows - 1, eidx]
-            if np.any(col != _ChepModel.ST_REMOVED):
-                if np.all(col[col != _ChepModel.ST_REMOVED] == _ChepModel.ST_FLAGGED):
-                    mat[n_rows - 1, eidx] = _ChepModel.ST_FLAGGED
-                else:
-                    mat[n_rows - 1, eidx] = _ChepModel.ST_CLEAN
-
-        row_names = list(chs) + ["EPOCH"]
+        row_names = list(chs)
         model     = _ChepModel(row_names, ne_orig, mat)
         self._chep_view.setModel(model)
         self._apply_chep_cell_size()
 
-        n_flagged = int(np.sum(mat[:n_rows - 1] == _ChepModel.ST_FLAGGED))
-        n_removed = int(np.sum(mat[n_rows - 1]  == _ChepModel.ST_REMOVED))
+        n_flagged = int(np.sum(mat == _ChepModel.ST_FLAGGED))
+        n_removed = int(np.sum(np.all(mat == _ChepModel.ST_REMOVED, axis=0)))
         self._chep_info_lbl.setText(
             f"{ne_orig} ep × {len(chs)} ch  |  "
             f"{n_flagged} CHEP-flagged  |  {n_removed} ep removed"
@@ -478,8 +519,6 @@ class MasksMixin:
         self._chep_overlay_items.clear()
 
     def _draw_chep_overlay(self):
-        import pyqtgraph as pg
-        from PySide6 import QtGui
 
         pw = getattr(self.ui, 'pg1', None)
         if pw is None:
@@ -497,11 +536,11 @@ class MasksMixin:
         ne_orig   = model._ne
         row_names = model._rows
         mat       = model._mat
-        n_ch_rows = len(row_names) - 1   # exclude EPOCH summary row
+        n_ch_rows = len(row_names)
 
-        # channel → (y_lo, y_hi) from _pg1_channel_cache (always populated)
+        # channel → (y_lo, y_hi, color) from _pg1_channel_cache
         ch_bands: dict[str, tuple] = {
-            e['ch']: (float(e['band_lo']), float(e['band_hi']))
+            e['ch']: (float(e['band_lo']), float(e['band_hi']), e.get('color'))
             for e in getattr(self, '_pg1_channel_cache', [])
         }
 
@@ -516,9 +555,8 @@ class MasksMixin:
         rem_w:   list = []
 
         # CHEP-flagged per channel: bars within the channel's Y band
-        # key = (y0, y1), value = (cx_list, w_list)
-        from collections import defaultdict
-        flagged_by_band: dict = defaultdict(lambda: ([], []))
+        # key = (y0, y1), value = [cx_list, w_list, channel_color]
+        flagged_by_band: dict = {}
 
         for oidx in range(ne_orig):
             xs = float(oidx) * epoch_dur
@@ -529,9 +567,9 @@ class MasksMixin:
             if xe < win_x1 or xs > win_x2:
                 continue
 
-            epoch_row_state = int(mat[n_ch_rows, oidx])
+            epoch_removed = bool(np.all(mat[:n_ch_rows, oidx] == _ChepModel.ST_REMOVED))
 
-            if epoch_row_state == _ChepModel.ST_REMOVED:
+            if epoch_removed:
                 rem_cx.append(cx)
                 rem_w.append(epoch_dur)
 
@@ -543,9 +581,12 @@ class MasksMixin:
                 band = ch_bands.get(ch)
                 if band is None:
                     continue
-                y0, y1 = band
-                flagged_by_band[(y0, y1)][0].append(cx)
-                flagged_by_band[(y0, y1)][1].append(epoch_dur)
+                y0, y1, ch_color = band
+                key = (y0, y1)
+                if key not in flagged_by_band:
+                    flagged_by_band[key] = ([], [], ch_color)
+                flagged_by_band[key][0].append(cx)
+                flagged_by_band[key][1].append(epoch_dur)
 
         # --- draw removed-epoch bars ---
         if rem_cx:
@@ -559,17 +600,15 @@ class MasksMixin:
             pi.addItem(bg)
             self._chep_overlay_items.append(bg)
 
-        # --- draw CHEP-flagged channel bars ---
-        for (y0, y1), (cxs, ws) in flagged_by_band.items():
+        # --- draw CHEP-flagged channel bars (Difference / XOR-like) ---
+        for (y0, y1), (cxs, ws, ch_color) in flagged_by_band.items():
             h = max(float(y1) - float(y0), 0.0)
             if h <= 0:
                 continue
-            bg = pg.BarGraphItem(
-                x=cxs, width=ws,
-                y0=[float(y0)] * len(cxs), height=[h] * len(cxs),
-                brush=QtGui.QColor(180, 40, 40, 100), pen=None,
-            )
-            bg.setZValue(-4)
-            bg.setAcceptedMouseButtons(Qt.NoButton)
-            pi.addItem(bg)
-            self._chep_overlay_items.append(bg)
+            rects = [QtCore.QRectF(cx - w * 0.5, float(y0), w, h)
+                     for cx, w in zip(cxs, ws)]
+            item = _DiffOverlayItem(rects, color=_to_qcolor(ch_color))
+            item.setZValue(5)
+            item.setAcceptedMouseButtons(Qt.NoButton)
+            pi.addItem(item)
+            self._chep_overlay_items.append(item)

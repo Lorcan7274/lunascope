@@ -29,16 +29,19 @@ Two sub-tabs:
              current EDF at variable speed with selectable window size.
 """
 
+import math
+import time
 import traceback
 from concurrent.futures import Future
 
 import numpy as np
+import pandas as pd
 from PySide6 import QtCore, QtWidgets
 from PySide6.QtCore import Qt, QMetaObject, QTimer
 from PySide6.QtWidgets import (
     QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFrame,
     QHBoxLayout, QLabel, QPushButton, QRadioButton, QSizePolicy,
-    QSlider, QSplitter, QTabWidget, QVBoxLayout, QWidget,
+    QSlider, QSpinBox, QSplitter, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
@@ -46,7 +49,7 @@ from matplotlib.figure import Figure
 
 from .explorer_base import BG, FG, GRID, _ExplorerTab
 from .topo_clocs import get_positions, load_clocs_file
-from .topo_core import draw_topo, TopoRenderer
+from .topo_core import create_topo_axes, draw_topo, TopoRenderer
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +79,10 @@ _TRACE_PALETTE = [
 
 _TIMER_MS       = 50    # ~20 fps target
 _MIN_INTERP_DEF = 8
+_MIN_TOPO_CHANS = 16
+_MAX_SCALE_WINDOWS = 1500
+_WELCH_SEG_SEC  = 2.0
+_DYN_SCALE_RELEASE_SEC = 3.0
 
 
 # ---------------------------------------------------------------------------
@@ -153,7 +160,7 @@ def _band_power(sig: np.ndarray, sr: float, flo: float, fhi: float) -> float:
     n = len(sig)
     if n < 4:
         return np.nan
-    nperseg = min(n, max(4, int(sr)))          # 1-second segments if possible
+    nperseg = min(n, max(4, int(_WELCH_SEG_SEC * sr)))  # 2-second segments if possible
     freqs, psd = welch(sig.astype(float), fs=sr, nperseg=nperseg)
     idx = (freqs >= flo) & (freqs <= fhi)
     if not idx.any():
@@ -178,7 +185,7 @@ class _TopoCanvas(FigureCanvas):
         super().__init__(fig)
         if parent:
             self.setParent(parent)
-        self._ax = fig.add_subplot(111)
+        self._ax, self._cax = create_topo_axes(fig)
         self._ax.set_facecolor(BG)
         self._ax.set_axis_off()
         fig.patch.set_facecolor(BG)
@@ -231,14 +238,14 @@ class _ResultsPanel(QWidget):
         self._combo_step_col = _combo([])
         self._combo_step_col.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self._btn_step_back = _button("◀", fixed_w=28)
-        self._lbl_step      = _label("—", color="#888")
-        self._lbl_step.setMinimumWidth(80)
-        self._lbl_step.setAlignment(Qt.AlignCenter)
         self._btn_step_fwd  = _button("▶", fixed_w=28)
+        self._lbl_step      = _label("—", color="#888")
+        self._lbl_step.setMinimumWidth(120)
+        self._lbl_step.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self._btn_step_back.clicked.connect(lambda: self._step(-1))
         self._btn_step_fwd.clicked.connect(lambda:  self._step(+1))
         outer.addLayout(_row(_label("Step:"), self._combo_step_col,
-                             self._btn_step_back, self._lbl_step, self._btn_step_fwd))
+                             self._btn_step_back, self._btn_step_fwd, self._lbl_step))
 
         # --- Value column ---
         self._combo_val_col = _combo([])
@@ -261,9 +268,17 @@ class _ResultsPanel(QWidget):
         self._chk_labels   = QCheckBox("Labels")
         self._chk_labels.setChecked(True)
         self._chk_labels.setStyleSheet(f"color: {FG};")
+        self._chk_labels.toggled.connect(lambda *_: self._plot())
+        self._spin_dot_size = QSpinBox()
+        self._spin_dot_size.setRange(8, 160)
+        self._spin_dot_size.setValue(35)
+        self._spin_dot_size.setFixedWidth(64)
+        self._spin_dot_size.setStyleSheet(
+            f"background: #161b22; color: {FG}; border: 1px solid {GRID};")
+        self._spin_dot_size.valueChanged.connect(lambda *_: self._plot())
         outer.addLayout(_row(_label("Mode:"), self._radio_dots, self._radio_interp,
                              self._radio_both, _label("  Cmap:"), self._combo_cmap,
-                             self._chk_labels))
+                             self._chk_labels, _label("Dot size:"), self._spin_dot_size))
 
         # --- Clocs override ---
         btn_clocs = _button("Load coords…")
@@ -413,10 +428,19 @@ class _ResultsPanel(QWidget):
             if val_col is None:
                 return
 
+            # Value columns must be numeric. When a table has no numeric
+            # columns, the combo can still contain strings as a fallback.
+            coerced = np.asarray(pd.to_numeric(df[val_col], errors="coerce"), dtype=float)
+            if not np.isfinite(coerced).any():
+                self._show_msg(f"Value column '{val_col}' is not numeric")
+                return
+
             # build values dict
-            sub = df[[ch_col, val_col]].dropna()
+            sub = df[[ch_col, val_col]].copy()
+            sub[val_col] = coerced
+            sub = sub.dropna()
             values = {
-                str(row[ch_col]).upper(): float(row[val_col])
+                str(row[ch_col]).upper(): row[val_col]
                 for _, row in sub.iterrows()
             }
             if not values:
@@ -427,19 +451,25 @@ class _ResultsPanel(QWidget):
             if not positions:
                 self._show_msg("No channel positions matched")
                 return
+            if len(positions) < _MIN_TOPO_CHANS:
+                self._show_msg(
+                    f"Need at least {_MIN_TOPO_CHANS} mappable channels "
+                    f"(found {len(positions)})"
+                )
+                return
 
             # render
             mode = ("dots"  if self._radio_dots.isChecked()  else
                     "interp" if self._radio_interp.isChecked() else "both")
             fig  = self._canvas.figure
-            fig.clear()
-            ax   = fig.add_subplot(111)
+            ax, cax = create_topo_axes(fig)
             draw_topo(ax, values, positions,
+                      cax=cax,
                       mode=mode,
                       cmap=self._combo_cmap.currentText(),
+                      dot_size=float(self._spin_dot_size.value()),
                       show_labels=self._chk_labels.isChecked(),
                       bg=BG, fg=FG)
-            fig.tight_layout(pad=0.3)
             self._canvas.draw_idle()
 
         except Exception:
@@ -447,8 +477,8 @@ class _ResultsPanel(QWidget):
 
     def _show_msg(self, msg: str):
         fig = self._canvas.figure
-        fig.clear()
-        ax  = fig.add_subplot(111)
+        ax, cax = create_topo_axes(fig)
+        cax.set_visible(False)
         ax.set_facecolor(BG)
         ax.set_axis_off()
         ax.text(0.5, 0.5, msg, color=FG, ha="center", va="center",
@@ -473,10 +503,21 @@ class _LiveTopoPanel(QWidget):
         self._total_sec: float = 0.0
         self._topo_renderer: TopoRenderer | None = None
         self._user_clocs: dict | None = None
+        self._pending_load_payload = None
+        self._pending_load_error: str | None = None
+        self._scale_samples_cache: dict[tuple, np.ndarray] = {}
+        self._scale_job_key = None
+        self._pending_scale_key = None
+        self._pending_scale_samples = None
+        self._pending_scale_error: str | None = None
+        self._dynamic_scale_vmin: float | None = None
+        self._dynamic_scale_vmax: float | None = None
+        self._dynamic_scale_wall: float | None = None
 
         # playback state
         self._cursor_sec: float = 0.0
         self._playing:    bool  = False
+        self._last_tick_wall: float | None = None
         self._timer = QTimer(self)
         self._timer.setInterval(_TIMER_MS)
         self._timer.timeout.connect(self._tick)
@@ -542,15 +583,20 @@ class _LiveTopoPanel(QWidget):
         bg2 = QButtonGroup(self)
         bg2.addButton(self._radio_amp)
         bg2.addButton(self._radio_band)
+        bg2.buttonClicked.connect(self._on_metric_controls_changed)
         self._combo_band = _combo(list(BANDS.keys()))
         self._combo_band.setCurrentText("sigma")
         self._combo_band.setFixedWidth(80)
+        self._combo_band.currentIndexChanged.connect(self._on_metric_controls_changed)
         self._chk_custom_band = QCheckBox("Custom Hz:")
         self._chk_custom_band.setStyleSheet(f"color: {FG};")
+        self._chk_custom_band.toggled.connect(self._on_metric_controls_changed)
         self._spin_flo = QDoubleSpinBox(); self._spin_flo.setRange(0.1, 200); self._spin_flo.setValue(11.0); self._spin_flo.setFixedWidth(60)
         self._spin_fhi = QDoubleSpinBox(); self._spin_fhi.setRange(0.1, 200); self._spin_fhi.setValue(16.0); self._spin_fhi.setFixedWidth(60)
         for sp in (self._spin_flo, self._spin_fhi):
             sp.setStyleSheet(f"background: #161b22; color: {FG}; border: 1px solid {GRID};")
+        self._spin_flo.valueChanged.connect(self._on_metric_controls_changed)
+        self._spin_fhi.valueChanged.connect(self._on_metric_controls_changed)
         outer.addLayout(_row(self._radio_amp, self._radio_band, self._combo_band,
                              self._chk_custom_band, self._spin_flo, _label("–"), self._spin_fhi))
 
@@ -570,9 +616,39 @@ class _LiveTopoPanel(QWidget):
         self._chk_labels = QCheckBox("Labels")
         self._chk_labels.setChecked(True)
         self._chk_labels.setStyleSheet(f"color: {FG};")
+        self._chk_labels.toggled.connect(self._on_labels_toggled)
+        self._spin_dot_size = QSpinBox()
+        self._spin_dot_size.setRange(8, 160)
+        self._spin_dot_size.setValue(35)
+        self._spin_dot_size.setFixedWidth(64)
+        self._spin_dot_size.setStyleSheet(
+            f"background: #161b22; color: {FG}; border: 1px solid {GRID};")
+        self._spin_dot_size.valueChanged.connect(self._on_dot_size_changed)
         outer.addLayout(_row(_label("Mode:"), self._radio_dots2, self._radio_interp2,
                              self._radio_both2, _label("  Cmap:"), self._combo_cmap,
-                             self._chk_labels))
+                             self._chk_labels, _label("Dot size:"), self._spin_dot_size))
+
+        # --- Color scale row ---
+        self._combo_scale = _combo(["Dynamic", "Whole record"])
+        self._combo_scale.setFixedWidth(120)
+        self._combo_scale.currentIndexChanged.connect(self._on_scale_controls_changed)
+        self._spin_clip = QSpinBox()
+        self._spin_clip.setRange(0, 25)
+        self._spin_clip.setValue(0)
+        self._spin_clip.setSuffix("%")
+        self._spin_clip.setFixedWidth(70)
+        self._spin_clip.setStyleSheet(
+            f"background: #161b22; color: {FG}; border: 1px solid {GRID};")
+        self._spin_clip.valueChanged.connect(self._on_scale_controls_changed)
+        self._lbl_scale_status = _label("", color="#888")
+        self._lbl_scale_status.setMinimumWidth(110)
+        self._chk_show_traces = QCheckBox("Show traces")
+        self._chk_show_traces.setChecked(True)
+        self._chk_show_traces.setStyleSheet(f"color: {FG};")
+        self._chk_show_traces.toggled.connect(self._on_show_traces_toggled)
+        outer.addLayout(_row(_label("Scale:"), self._combo_scale,
+                             _label("Clip tails:"), self._spin_clip,
+                             self._lbl_scale_status, self._chk_show_traces))
 
         outer.addWidget(_sep())
 
@@ -585,6 +661,7 @@ class _LiveTopoPanel(QWidget):
 
         self._pg_widget = self._build_trace_widget()
         splitter.addWidget(self._pg_widget)
+        self._trace_splitter = splitter
         splitter.setSizes([380, 620])
 
         outer.addWidget(splitter, stretch=1)
@@ -642,6 +719,22 @@ class _LiveTopoPanel(QWidget):
             return float(self._spin_flo.value()), float(self._spin_fhi.value())
         return BANDS[self._combo_band.currentText()]
 
+    def _scale_mode(self) -> str:
+        return "record" if self._combo_scale.currentIndex() == 1 else "dynamic"
+
+    def _clip_tail_pct(self) -> int:
+        return int(self._spin_clip.value())
+
+    def _metric_cache_key(self) -> tuple:
+        win = self._window_sec()
+        if self._radio_band.isChecked():
+            flo, fhi = self._get_band()
+            return ("band", round(flo, 4), round(fhi, 4), round(win, 4))
+        return ("amp", round(win, 4))
+
+    def _show_traces(self) -> bool:
+        return self._chk_show_traces.isChecked()
+
     # ------------------------------------------------------------------
     # Load data
     # ------------------------------------------------------------------
@@ -689,6 +782,15 @@ class _LiveTopoPanel(QWidget):
         ctrl.sb_progress.setVisible(True)
         ctrl.sb_progress.setRange(0, 0)
         ctrl.lock_ui("Loading topo data…")
+        self._scale_samples_cache.clear()
+        self._scale_job_key = None
+        self._pending_scale_key = None
+        self._pending_scale_samples = None
+        self._pending_scale_error = None
+        self._dynamic_scale_vmin = None
+        self._dynamic_scale_vmax = None
+        self._dynamic_scale_wall = None
+        self._lbl_scale_status.setText("")
 
         fut: Future = ctrl._exec.submit(
             self._fetch_data, ctrl.p, chs, total_sec_hint
@@ -697,17 +799,16 @@ class _LiveTopoPanel(QWidget):
         def _done(f: Future):
             err = f.exception()
             if err:
+                self._pending_load_error = str(err)
                 QMetaObject.invokeMethod(
-                    self, "_load_error",
+                    self, "_deliver_load_error",
                     Qt.QueuedConnection,
-                    QtCore.Q_ARG(str, str(err)),
                 )
             else:
-                raw, gaps, total = f.result()
+                self._pending_load_payload = f.result()
                 QMetaObject.invokeMethod(
-                    self, "_load_ok",
+                    self, "_deliver_load_ok",
                     Qt.QueuedConnection,
-                    QtCore.Q_ARG("PyObject", (raw, gaps, total)),
                 )
 
         fut.add_done_callback(_done)
@@ -770,8 +871,10 @@ class _LiveTopoPanel(QWidget):
 
         return raw, gaps, total_sec
 
-    @QtCore.Slot(str)
-    def _load_error(self, msg: str):
+    @QtCore.Slot()
+    def _deliver_load_error(self):
+        msg = self._pending_load_error or "Unknown load error"
+        self._pending_load_error = None
         self.ctrl._busy = False
         self.ctrl.sb_progress.setRange(0, 100)
         self.ctrl.sb_progress.setVisible(False)
@@ -779,8 +882,13 @@ class _LiveTopoPanel(QWidget):
         self._btn_load.setEnabled(True)
         self._lbl_status.setText(f"Error: {msg}")
 
-    @QtCore.Slot("PyObject")
-    def _load_ok(self, payload):
+    @QtCore.Slot()
+    def _deliver_load_ok(self):
+        payload = self._pending_load_payload
+        self._pending_load_payload = None
+        if payload is None:
+            self._deliver_load_error()
+            return
         raw, gaps, total_sec = payload
         self.ctrl._busy = False
         self.ctrl.sb_progress.setRange(0, 100)
@@ -834,25 +942,34 @@ class _LiveTopoPanel(QWidget):
 
         # set up topo renderer (pre-compute interpolation weights)
         if topo_chs:
-            mode = self._topo_mode()
-            self._topo_renderer = TopoRenderer(
-                positions, min_interp=_MIN_INTERP_DEF,
-                bg=BG, fg=FG,
-            )
-            fig = self._topo_canvas.figure
-            fig.clear()
-            ax  = fig.add_subplot(111)
-            self._topo_renderer.setup(
-                ax, fig,
-                cmap=self._combo_cmap.currentText(),
-                show_labels=self._chk_labels.isChecked(),
-            )
-            self._topo_canvas.draw_idle()
+            if len(topo_chs) < _MIN_TOPO_CHANS:
+                self._topo_renderer = None
+                self._show_topo_msg(
+                    f"Need at least {_MIN_TOPO_CHANS} mappable channels "
+                    f"for topo view (found {len(topo_chs)})"
+                )
+            else:
+                self._topo_renderer = TopoRenderer(
+                    positions, min_interp=_MIN_INTERP_DEF,
+                    bg=BG, fg=FG,
+                )
+                fig = self._topo_canvas.figure
+                ax, cax = create_topo_axes(fig)
+                self._topo_renderer.setup(
+                    ax, fig, cax=cax,
+                    cmap=self._combo_cmap.currentText(),
+                    dot_size=float(self._spin_dot_size.value()),
+                    show_labels=self._chk_labels.isChecked(),
+                    mode=self._topo_mode(),
+                )
+                self._topo_canvas.draw_idle()
         else:
+            self._topo_renderer = None
             self._show_topo_msg("No channels with known coordinates")
 
         # render first frame
         self._render_frame(0.0)
+        self._ensure_record_scale()
 
     # ------------------------------------------------------------------
     # Trace widget setup
@@ -889,15 +1006,21 @@ class _LiveTopoPanel(QWidget):
         else:
             self._play()
 
+    def pause_playback(self):
+        if self._playing:
+            self._pause()
+
     def _play(self):
         if not self._raw:
             return
         self._playing = True
+        self._last_tick_wall = time.perf_counter()
         self._btn_play.setText("⏸ Pause")
         self._timer.start()
 
     def _pause(self):
         self._playing = False
+        self._last_tick_wall = None
         self._btn_play.setText("▶ Play")
         self._timer.stop()
 
@@ -907,6 +1030,8 @@ class _LiveTopoPanel(QWidget):
 
     def _seek(self, sec: float):
         self._cursor_sec = max(0.0, min(sec, self._total_sec))
+        if self._playing:
+            self._last_tick_wall = time.perf_counter()
         self._update_scrubber()
         self._render_frame(self._cursor_sec)
 
@@ -919,6 +1044,8 @@ class _LiveTopoPanel(QWidget):
             return
         sec = (val / 10000.0) * self._total_sec
         self._cursor_sec = sec
+        if self._playing:
+            self._last_tick_wall = time.perf_counter()
         self._render_frame(sec)
 
     def _update_scrubber(self):
@@ -930,17 +1057,24 @@ class _LiveTopoPanel(QWidget):
         self._lbl_cursor.setText(_fmt_time(self._cursor_sec))
 
     def _tick(self):
-        win   = self._window_sec()
-        spd   = self._speed()
-        # advance cursor by (real elapsed / real window) * speed * window_sec
-        # at 1× speed, we advance window_sec * (timer_interval / 1000 / window_sec) = timer_interval/1000 per tick
-        step  = (_TIMER_MS / 1000.0) * spd
-        self._cursor_sec += step
-        if self._cursor_sec >= self._total_sec:
-            self._cursor_sec = self._total_sec
+        try:
+            now = time.perf_counter()
+            prev = self._last_tick_wall
+            self._last_tick_wall = now
+            elapsed = (_TIMER_MS / 1000.0) if prev is None else max(0.0, now - prev)
+            # Avoid a huge jump if the app was stalled or backgrounded.
+            elapsed = min(elapsed, 0.25)
+
+            self._cursor_sec += elapsed * self._speed()
+            if self._cursor_sec >= self._total_sec:
+                self._cursor_sec = self._total_sec
+                self._pause()
+            self._update_scrubber()
+            self._render_frame(self._cursor_sec)
+        except Exception as exc:
             self._pause()
-        self._update_scrubber()
-        self._render_frame(self._cursor_sec)
+            self._lbl_status.setText(f"Playback error: {exc}")
+            traceback.print_exc()
 
     # ------------------------------------------------------------------
     # Frame rendering
@@ -978,11 +1112,13 @@ class _LiveTopoPanel(QWidget):
                     ax.set_title("— gap —", color="#888", fontsize=8, pad=2)
                 else:
                     ax.set_title("", color=FG, fontsize=8, pad=2)
-                self._topo_renderer.update(topo_values)
+                vmin, vmax = self._topo_scale_limits(topo_values)
+                self._topo_renderer.update(topo_values, vmin=vmin, vmax=vmax)
                 self._topo_canvas.draw_idle()
 
         # update traces
-        self._update_traces(t0, t1)
+        if self._show_traces():
+            self._update_traces(t0, t1)
 
     def _slice_raw(self, r: dict, t0: float, t1: float):
         """Return (times, vals) numpy slice for window [t0, t1] from channel record r."""
@@ -1035,38 +1171,275 @@ class _LiveTopoPanel(QWidget):
             return
         self._rebuild_renderer()
 
+    def _on_labels_toggled(self, *_):
+        if self._topo_renderer is None or not self._raw:
+            return
+        self._rebuild_renderer()
+
+    def _on_dot_size_changed(self, *_):
+        if self._topo_renderer is None or not self._raw:
+            return
+        self._topo_renderer.set_dot_size(float(self._spin_dot_size.value()))
+        self._topo_canvas.draw_idle()
+
     def _on_window_changed(self, *_):
-        pass   # just affects next tick
+        self._invalidate_metric_cache()
+        self._ensure_record_scale()
+        if self._raw:
+            self._render_frame(self._cursor_sec)
+
+    def _on_scale_controls_changed(self, *_):
+        self._dynamic_scale_vmin = None
+        self._dynamic_scale_vmax = None
+        self._dynamic_scale_wall = None
+        self._ensure_record_scale()
+        if self._raw:
+            self._render_frame(self._cursor_sec)
+
+    def _on_show_traces_toggled(self, checked: bool):
+        self._pg_widget.setVisible(checked)
+        if hasattr(self, "_trace_splitter"):
+            if checked:
+                self._trace_splitter.setSizes([380, 620])
+            else:
+                self._trace_splitter.setSizes([1, 0])
+        if checked and self._raw:
+            t0 = self._cursor_sec
+            t1 = t0 + self._window_sec()
+            self._update_traces(t0, t1)
+
+    def _on_metric_controls_changed(self, *_):
+        self._invalidate_metric_cache()
+        self._ensure_record_scale()
+        if self._raw:
+            self._render_frame(self._cursor_sec)
+
+    def _invalidate_metric_cache(self):
+        self._scale_job_key = None
+        self._pending_scale_key = None
+        self._pending_scale_samples = None
+        self._pending_scale_error = None
+        self._lbl_scale_status.setText("")
 
     def _rebuild_renderer(self):
         positions = get_positions(self._loaded_chs, self._user_clocs)
         if not positions:
+            self._topo_renderer = None
+            self._show_topo_msg("No channels with known coordinates")
+            return
+        if len(positions) < _MIN_TOPO_CHANS:
+            self._topo_renderer = None
+            self._show_topo_msg(
+                f"Need at least {_MIN_TOPO_CHANS} mappable channels "
+                f"for topo view (found {len(positions)})"
+            )
             return
         self._topo_renderer = TopoRenderer(
             positions, min_interp=_MIN_INTERP_DEF, bg=BG, fg=FG,
         )
         fig = self._topo_canvas.figure
-        fig.clear()
-        ax  = fig.add_subplot(111)
+        ax, cax = create_topo_axes(fig)
         self._topo_renderer.setup(
-            ax, fig,
+            ax, fig, cax=cax,
             cmap=self._combo_cmap.currentText(),
+            dot_size=float(self._spin_dot_size.value()),
             show_labels=self._chk_labels.isChecked(),
+            mode=self._topo_mode(),
         )
         self._topo_canvas.draw_idle()
         self._render_frame(self._cursor_sec)
+        self._ensure_record_scale()
 
     def _show_topo_msg(self, msg: str):
         fig = self._topo_canvas.figure
-        fig.clear()
+        ax, cax = create_topo_axes(fig)
+        cax.set_visible(False)
         fig.patch.set_facecolor(BG)
-        ax  = fig.add_subplot(111)
         ax.set_facecolor(BG)
         ax.set_axis_off()
         ax.text(0.5, 0.5, msg, color=FG, ha="center", va="center",
                 transform=ax.transAxes, fontsize=9, wrap=True,
                 multialignment="center")
         self._topo_canvas.draw_idle()
+
+    def _topo_scale_limits(self, topo_values: dict[str, float]) -> tuple[float | None, float | None]:
+        frame_vals = np.asarray(list(topo_values.values()), dtype=float)
+        frame_vals = frame_vals[np.isfinite(frame_vals)]
+        if frame_vals.size == 0:
+            return None, None
+
+        if self._scale_mode() == "record":
+            samples = self._scale_samples_cache.get(self._metric_cache_key())
+            if samples is not None and len(samples):
+                vals = samples
+            else:
+                vals = frame_vals
+                self._ensure_record_scale()
+            lo, hi = self._apply_clip(vals)
+        else:
+            lo, hi = self._smoothed_dynamic_limits(frame_vals)
+        if lo == hi:
+            pad = 1.0 if lo == 0 else max(abs(lo) * 0.05, 1e-6)
+            lo -= pad
+            hi += pad
+        return float(lo), float(hi)
+
+    def _smoothed_dynamic_limits(self, frame_vals: np.ndarray) -> tuple[float, float]:
+        lo_now, hi_now = self._apply_clip(frame_vals)
+        now = time.perf_counter()
+
+        if self._dynamic_scale_vmin is None or self._dynamic_scale_vmax is None:
+            self._dynamic_scale_vmin = lo_now
+            self._dynamic_scale_vmax = hi_now
+            self._dynamic_scale_wall = now
+            return lo_now, hi_now
+
+        prev_lo = self._dynamic_scale_vmin
+        prev_hi = self._dynamic_scale_vmax
+        prev_wall = self._dynamic_scale_wall
+        dt = 0.0 if prev_wall is None else max(0.0, now - prev_wall)
+        alpha = math.exp(-dt / _DYN_SCALE_RELEASE_SEC) if _DYN_SCALE_RELEASE_SEC > 0 else 0.0
+
+        # Expand immediately to include new extremes, but contract more slowly
+        # so the color scale has some visual memory and doesn't breathe per-frame.
+        if lo_now < prev_lo:
+            lo = lo_now
+        else:
+            lo = alpha * prev_lo + (1.0 - alpha) * lo_now
+
+        if hi_now > prev_hi:
+            hi = hi_now
+        else:
+            hi = alpha * prev_hi + (1.0 - alpha) * hi_now
+
+        self._dynamic_scale_vmin = float(lo)
+        self._dynamic_scale_vmax = float(hi)
+        self._dynamic_scale_wall = now
+        return self._dynamic_scale_vmin, self._dynamic_scale_vmax
+
+    def _apply_clip(self, vals: np.ndarray) -> tuple[float, float]:
+        vals = np.asarray(vals, dtype=float)
+        vals = vals[np.isfinite(vals)]
+        if vals.size == 0:
+            return 0.0, 1.0
+        pct = self._clip_tail_pct()
+        if pct > 0:
+            lo = float(np.percentile(vals, pct))
+            hi = float(np.percentile(vals, 100 - pct))
+        else:
+            lo = float(np.min(vals))
+            hi = float(np.max(vals))
+        return lo, hi
+
+    def _ensure_record_scale(self):
+        if self._scale_mode() != "record":
+            self._lbl_scale_status.setText("")
+            return
+        if not self._raw:
+            self._lbl_scale_status.setText("")
+            return
+
+        key = self._metric_cache_key()
+        if key in self._scale_samples_cache:
+            n = len(self._scale_samples_cache[key])
+            self._lbl_scale_status.setText(f"fixed ({n} pts)")
+            return
+        if self._scale_job_key == key:
+            self._lbl_scale_status.setText("computing…")
+            return
+
+        self._scale_job_key = key
+        self._lbl_scale_status.setText("computing…")
+        use_band = self._radio_band.isChecked()
+        flo, fhi = self._get_band()
+        win = self._window_sec()
+        fut: Future = self.ctrl._exec.submit(
+            self._compute_record_scale_samples,
+            self._raw, self._total_sec, use_band, flo, fhi, win
+        )
+
+        def _done(f: Future, cache_key=key):
+            err = f.exception()
+            if err:
+                self._pending_scale_error = str(err)
+                self._pending_scale_key = cache_key
+                QMetaObject.invokeMethod(
+                    self, "_deliver_scale_error",
+                    Qt.QueuedConnection,
+                )
+            else:
+                self._pending_scale_key = cache_key
+                self._pending_scale_samples = f.result()
+                QMetaObject.invokeMethod(
+                    self, "_deliver_scale_ok",
+                    Qt.QueuedConnection,
+                )
+
+        fut.add_done_callback(_done)
+
+    @staticmethod
+    def _compute_record_scale_samples(
+        raw: dict,
+        total_sec: float,
+        use_band: bool,
+        flo: float,
+        fhi: float,
+        win: float,
+    ) -> np.ndarray:
+        if not raw or total_sec <= 0 or win <= 0:
+            return np.array([], dtype=float)
+
+        max_start = max(total_sec - win, 0.0)
+        if max_start == 0.0:
+            starts = [0.0]
+        else:
+            n_windows = int(min(_MAX_SCALE_WINDOWS, max(1, np.ceil(max_start / win) + 1)))
+            starts = np.linspace(0.0, max_start, n_windows)
+
+        samples: list[float] = []
+        for t0 in starts:
+            t1 = t0 + win
+            for r in raw.values():
+                i0 = max(0, int((t0 - r["t_start"]) * r["sr"]))
+                i1 = min(r["n"], int((t1 - r["t_start"]) * r["sr"]) + 1)
+                if i0 >= i1:
+                    continue
+                seg_v = r["vals"][i0:i1]
+                if seg_v is None or len(seg_v) < 4:
+                    continue
+                if use_band:
+                    val = _band_power(seg_v, r["sr"], flo, fhi)
+                else:
+                    val = _rms(seg_v)
+                if np.isfinite(val):
+                    samples.append(float(val))
+
+        return np.asarray(samples, dtype=float)
+
+    @QtCore.Slot()
+    def _deliver_scale_ok(self):
+        key = self._pending_scale_key
+        samples = self._pending_scale_samples
+        self._pending_scale_key = None
+        self._pending_scale_samples = None
+        self._scale_job_key = None
+        if key is None or samples is None:
+            return
+        self._scale_samples_cache[key] = samples
+        if self._scale_mode() == "record" and key == self._metric_cache_key():
+            n = len(samples)
+            self._lbl_scale_status.setText(f"fixed ({n} pts)")
+            if self._raw:
+                self._render_frame(self._cursor_sec)
+
+    @QtCore.Slot()
+    def _deliver_scale_error(self):
+        self._scale_job_key = None
+        self._pending_scale_key = None
+        self._pending_scale_samples = None
+        msg = self._pending_scale_error or "scale error"
+        self._pending_scale_error = None
+        self._lbl_scale_status.setText(msg)
 
 
 # ---------------------------------------------------------------------------
@@ -1086,10 +1459,10 @@ class TopoTab(_ExplorerTab):
         layout = QVBoxLayout(root)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        sub = QTabWidget()
-        sub.setTabPosition(QTabWidget.North)
-        sub.setDocumentMode(True)
-        sub.setStyleSheet(
+        self._subtabs = QTabWidget()
+        self._subtabs.setTabPosition(QTabWidget.North)
+        self._subtabs.setDocumentMode(True)
+        self._subtabs.setStyleSheet(
             f"QTabWidget::pane {{ border: 1px solid {GRID}; }}"
             f"QTabBar::tab {{ background: {BG}; color: {FG}; padding: 4px 12px; }}"
             f"QTabBar::tab:selected {{ background: #21262d; }}"
@@ -1098,10 +1471,11 @@ class TopoTab(_ExplorerTab):
         self._results = _ResultsPanel(self.ctrl)
         self._live    = _LiveTopoPanel(self.ctrl)
 
-        sub.addTab(self._results, "Results")
-        sub.addTab(self._live,    "Live")
+        self._subtabs.addTab(self._results, "Results")
+        self._subtabs.addTab(self._live,    "Live")
+        self._subtabs.currentChanged.connect(self._on_subtab_changed)
 
-        layout.addWidget(sub)
+        layout.addWidget(self._subtabs)
         self._root = root
 
     # ------------------------------------------------------------------
@@ -1111,3 +1485,10 @@ class TopoTab(_ExplorerTab):
     def refresh_tables(self):
         """Called when ctrl.sig_results_changed fires."""
         self._results.refresh_tables()
+
+    def pause_live_playback(self):
+        self._live.pause_playback()
+
+    def _on_subtab_changed(self, idx):
+        if idx != 1:
+            self.pause_live_playback()

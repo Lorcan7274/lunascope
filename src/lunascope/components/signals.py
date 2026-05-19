@@ -1809,7 +1809,7 @@ class SignalsMixin:
             self.annot_mgr.update_track( ann , x0 = a0 , x1 = a1 , y0 = y0 , y1 = y1 , reduce = True , wpx = float(getattr(self, 'cfg_line_weight', 1.0)))
             # labels
             yv[idx] = ( y0[0] * 2 + y1[0]  ) / 3.0
-            if self.show_labels: 
+            if self.show_labels:
                 if ann and str(ann).strip():
                     tv[idx] = ann
             idx = idx + 1
@@ -2078,7 +2078,7 @@ class SignalsMixin:
             self.annot_mgr.update_track( ann , x0 = a0 , x1 = a1 , y0 = y0 , y1 = y1 , reduce = True , wpx = float(getattr(self, 'cfg_line_weight', 1.0)))
 
             # labels
-            yv[idx] = ( y0[0] * 2 + y1[0]  ) / 3.0 
+            yv[idx] = ( y0[0] * 2 + y1[0]  ) / 3.0
             if self.show_labels: tv[idx] = ann
 
             # next annot

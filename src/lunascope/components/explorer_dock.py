@@ -92,10 +92,9 @@ class ExplorerMixin:
         tabs.addTab(self._tab_two_channel.widget(), "Player")      # 4  (hidden)
         tabs.addTab(self._tab_plot.widget(),       "Plotter")      # 5
         tabs.addTab(self._tab_gpa.widget(),        "Assoc")        # 6
-        tabs.addTab(self._tab_topo.widget(),       "Topo")         # 7  (hidden)
+        tabs.addTab(self._tab_topo.widget(),       "Topo (Experimental)")  # 7
 
         tabs.setTabVisible(4, False)   # Player
-        tabs.setTabVisible(7, False)   # Topo
 
         tabs.currentChanged.connect(self._explorer_tab_changed)
 
@@ -145,6 +144,8 @@ class ExplorerMixin:
 
     def _explorer_tab_changed(self, idx):
         """Refresh context-sensitive controls when switching tabs."""
+        if idx != 7:
+            self._tab_topo.pause_live_playback()
         if idx == 0:     # Harmonizer tab
             self._tab_harm.refresh_controls()
         elif idx == 1:   # Annotations tab: reload from Dock 4 unless cache is pinned
@@ -155,5 +156,5 @@ class ExplorerMixin:
             self._tab_two_channel.refresh_controls()
         elif idx == 5:   # Plotter tab: reload available result tables
             self._tab_plot.refresh_tables()
-        elif idx == 7:   # Topo tab (hidden): sync results table list
+        elif idx == 7:   # Topo tab: sync results table list
             self._tab_topo.refresh_tables()

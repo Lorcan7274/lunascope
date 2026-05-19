@@ -133,6 +133,29 @@ def _collect_docks(ui: QMainWindow) -> dict[str, dict[str, Any]]:
             "window_title": dock.windowTitle(),
             "geometry_b64": geom_b64,
         }
+    # Auxiliary dock-like windows (Explorer, Predict, Moonbeam, etc.) are
+    # plain QWidget top-levels rather than QDockWidget, but they still expose
+    # stable object names and save/restoreGeometry().
+    for name, widget in _iter_named_widgets(ui, QWidget):
+        if name in docks or not name.startswith("dock_"):
+            continue
+        if isinstance(widget, QDockWidget):
+            continue
+        geom_b64 = ""
+        try:
+            geom_b64 = _b64_qba(widget.saveGeometry())
+        except Exception:
+            geom_b64 = ""
+        try:
+            floating = bool(getattr(widget, "isFloating", lambda: False)())
+        except Exception:
+            floating = False
+        docks[name] = {
+            "visible": bool(widget.isVisible()),
+            "floating": floating,
+            "window_title": widget.windowTitle(),
+            "geometry_b64": geom_b64,
+        }
     return docks
 
 
@@ -338,43 +361,47 @@ def apply_session_state(ui: QMainWindow, state: dict[str, Any]) -> RestoreReport
     docks = state.get("docks", {})
     for name, rec in docks.items():
         d = ui.findChild(QDockWidget, name)
-        if d is None:
+        widget = d if d is not None else ui.findChild(QWidget, name)
+        if widget is None:
             report.missing += 1
-            report.missing_items.append(f"QDockWidget:{name}")
+            report.missing_items.append(f"QWidget:{name}")
             continue
         try:
             if "floating" in rec:
-                d.setFloating(bool(rec["floating"]))
+                set_floating = getattr(widget, "setFloating", None)
+                if callable(set_floating):
+                    set_floating(bool(rec["floating"]))
                 report.restored += 1
             geom_b64 = rec.get("geometry_b64")
             if geom_b64:
-                ok = d.restoreGeometry(_qba_from_b64(str(geom_b64)))
+                ok = widget.restoreGeometry(_qba_from_b64(str(geom_b64)))
                 report.restored += 1 if ok else 0
                 report.skipped += 0 if ok else 1
                 if not ok:
-                    report.skipped_items.append(f"QDockWidget:{name}:restoreGeometry:false")
+                    report.skipped_items.append(f"QWidget:{name}:restoreGeometry:false")
             if "visible" in rec:
                 vis = bool(rec["visible"])
-                d.setVisible(vis)
+                widget.setVisible(vis)
                 if vis:
-                    d.show()
-                    d.raise_()
+                    widget.show()
+                    widget.raise_()
                 report.restored += 1
         except Exception:
             report.skipped += 1
-            report.skipped_items.append(f"QDockWidget:{name}:setFloating/setVisible_exception")
+            report.skipped_items.append(f"QWidget:{name}:setFloating/setVisible_exception")
 
     # Final visibility enforcement for floating docks after all state operations.
     for name, rec in docks.items():
         if not bool(rec.get("visible", False)):
             continue
         d = ui.findChild(QDockWidget, name)
-        if d is None:
+        widget = d if d is not None else ui.findChild(QWidget, name)
+        if widget is None:
             continue
         try:
-            d.show()
+            widget.show()
             if bool(rec.get("floating", False)):
-                d.raise_()
+                widget.raise_()
         except Exception:
             pass
 

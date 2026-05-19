@@ -48,6 +48,23 @@ _GRID_PAD   = 1.35    # grid extends to HEAD_RADIUS * _GRID_PAD
 
 
 # ---------------------------------------------------------------------------
+# Layout helpers
+# ---------------------------------------------------------------------------
+
+_TOPO_AX_RECT = [0.20, 0.08, 0.56, 0.84]
+_TOPO_CBAR_RECT = [0.82, 0.18, 0.025, 0.64]
+
+
+def create_topo_axes(fig):
+    """Create fixed-position axes for the topo plot and its colorbar."""
+    fig.clear()
+    ax = fig.add_axes(_TOPO_AX_RECT)
+    cax = fig.add_axes(_TOPO_CBAR_RECT)
+    fig.patch.set_facecolor("#0d1117")
+    return ax, cax
+
+
+# ---------------------------------------------------------------------------
 # Head outline helper
 # ---------------------------------------------------------------------------
 
@@ -81,10 +98,12 @@ def draw_topo(
     values:    dict[str, float],
     positions: dict[str, tuple[float, float]],
     *,
+    cax=None,
     mode:        str   = "both",    # "dots" | "interp" | "both"
     cmap:        str   = "RdBu_r",
     vmin:        float | None = None,
     vmax:        float | None = None,
+    dot_size:    float | None = None,
     show_labels: bool  = True,
     min_interp:  int   = _MIN_INTERP,
     grid_res:    int   = 180,
@@ -142,11 +161,13 @@ def draw_topo(
     _draw_head_outline(ax, color=fg, zorder=5)
 
     # --- electrode dots ---
-    dot_size  = 70 if not do_interp else 35
-    dot_alpha = 1.0 if not do_interp else 0.75
-    ax.scatter(xs, ys, c=zs, cmap=cmap, norm=norm,
-               s=dot_size, zorder=6, edgecolors=bg, linewidths=0.6,
-               alpha=dot_alpha)
+    show_scatter = mode in ("dots", "both") or (mode == "interp" and not do_interp)
+    if show_scatter:
+        dot_size  = (70 if not do_interp else 35) if dot_size is None else float(dot_size)
+        dot_alpha = 1.0 if not do_interp else 0.75
+        ax.scatter(xs, ys, c=zs, cmap=cmap, norm=norm,
+                   s=dot_size, zorder=6, edgecolors=bg, linewidths=0.6,
+                   alpha=dot_alpha)
 
     # --- channel labels ---
     if show_labels:
@@ -159,8 +180,7 @@ def draw_topo(
     # --- colorbar ---
     sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
     sm.set_array([])
-    cbar = fig.colorbar(sm, ax=ax, fraction=0.03, pad=0.01, shrink=0.55,
-                        aspect=20)
+    cbar = fig.colorbar(sm, cax=cax) if cax is not None else fig.colorbar(sm, ax=ax)
     cbar.ax.tick_params(colors=fg, labelsize=7)
     cbar.outline.set_edgecolor(fg)
 
@@ -204,6 +224,9 @@ class TopoRenderer:
         self._scatter    = None   # scatter artist
         self._cbar       = None   # colorbar
         self._head_drawn = False
+        self._mode       = "both"
+        self._dot_size   = None
+        self._labels     = []
 
         # pre-compute interpolation grid and weights
         self._Xi = self._Yi = self._mask = None
@@ -247,11 +270,23 @@ class TopoRenderer:
 
     # ------------------------------------------------------------------
 
-    def setup(self, ax, fig, cmap: str = "RdBu_r", show_labels: bool = True):
+    def setup(
+        self,
+        ax,
+        fig,
+        cax=None,
+        cmap: str = "RdBu_r",
+        dot_size: float | None = None,
+        show_labels: bool = True,
+        mode: str = "both",
+    ):
         """Create all static artists on *ax*.  Must be called before :meth:`update`."""
         self._ax   = ax
         self._fig  = fig
+        self._cax  = cax
         self._cmap = cmap
+        self._mode = mode
+        self._dot_size = dot_size
 
         ax.clear()
         ax.set_aspect("equal")
@@ -273,12 +308,13 @@ class TopoRenderer:
         chs = self._channels
         xs  = np.array([self.positions[ch][0] for ch in chs])
         ys  = np.array([self.positions[ch][1] for ch in chs])
-        dot_size = 70 if not self._do_interp else 35
+        dot_size = (70 if not self._do_interp else 35) if dot_size is None else float(dot_size)
         self._scatter = ax.scatter(
             xs, ys, c=np.zeros(len(chs)), cmap=cmap,
             vmin=-1, vmax=1,
             s=dot_size, zorder=6, edgecolors=self.bg, linewidths=0.6,
         )
+        self._apply_mode()
 
         # head outline
         _draw_head_outline(ax, color=self.fg, zorder=5)
@@ -287,13 +323,18 @@ class TopoRenderer:
         if show_labels:
             for ch in chs:
                 px, py = self.positions[ch]
-                ax.text(px, py + 0.03, ch,
-                        color=self.fg, ha="center", va="bottom",
-                        fontsize=6, zorder=7)
+                self._labels.append(
+                    ax.text(px, py + 0.03, ch,
+                            color=self.fg, ha="center", va="bottom",
+                            fontsize=6, zorder=7)
+                )
 
         # colorbar
-        self._cbar = fig.colorbar(self._mesh, ax=ax,
-                                  fraction=0.03, pad=0.01, shrink=0.55, aspect=20)
+        self._cbar = (
+            fig.colorbar(self._mesh, cax=cax)
+            if cax is not None else
+            fig.colorbar(self._mesh, ax=ax)
+        )
         self._cbar.ax.tick_params(colors=self.fg, labelsize=7)
         self._cbar.outline.set_edgecolor(self.fg)
 
@@ -341,8 +382,31 @@ class TopoRenderer:
         # update scatter
         self._scatter.set_array(zs)
         self._scatter.set_norm(norm)
+        if self._dot_size is not None:
+            self._scatter.set_sizes(np.full(len(chs), float(self._dot_size)))
 
         # update colorbar limits
         if self._cbar is not None:
             self._cbar.mappable.set_norm(norm)
             self._cbar.update_normal(self._cbar.mappable)
+        self._apply_mode()
+
+    def set_mode(self, mode: str):
+        self._mode = mode
+        self._apply_mode()
+
+    def _apply_mode(self):
+        show_mesh = self._mode in ("interp", "both") and self._do_interp
+        show_scatter = self._mode in ("dots", "both") or (
+            self._mode == "interp" and not self._do_interp
+        )
+        if self._mesh is not None:
+            self._mesh.set_visible(show_mesh)
+        if self._scatter is not None:
+            self._scatter.set_visible(show_scatter)
+
+    def set_dot_size(self, dot_size: float | None):
+        self._dot_size = dot_size
+        if self._scatter is not None and dot_size is not None:
+            n = len(self._channels)
+            self._scatter.set_sizes(np.full(n, float(dot_size)))
