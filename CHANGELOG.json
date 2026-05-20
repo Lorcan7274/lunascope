@@ -1,0 +1,8 @@
+{
+  "1.6.0": [
+    "Channel / annotation filter in the sample list — search by channel name or annotation class across your project (requires Scan All in Explorer)",
+    "What's New dialog — shows release highlights after each update",
+    "GPA dump export and overlap handling improvements",
+    "Window geometry is now saved and restored across sessions"
+  ]
+}

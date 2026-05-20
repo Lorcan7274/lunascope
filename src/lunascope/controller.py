@@ -919,14 +919,17 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
 
         box.exec()
 
-    def _on_update_available(self, latest: str):
+    def _on_update_available(self, latest: str, bullets=None):
+        self._latest_version = latest
+        self._latest_bullets = bullets or []
         self._sb_update_badge.setToolTip(
             f"Lunascope v{latest} is available — click to update"
         )
         self._sb_update_badge.show()
 
     def _check_for_updates(self):
-        _updater.check_and_prompt(__version__, parent=self.ui)
+        bullets = getattr(self, "_latest_bullets", None)
+        _updater.check_and_prompt(__version__, bullets=bullets, parent=self.ui)
 
     def _save_session_state(self):
         filename, _ = save_file_name(
