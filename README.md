@@ -66,6 +66,14 @@ pip install lunascope
 lunascope
 ```
 
+If `lunascope` is on your `PATH`, that is the simplest launch command.
+If the console script is not available in your shell, the module entry
+point is equivalent:
+
+- `python -m lunascope` works when `python` points to the interpreter where `lunascope` was installed
+- `python3 -m lunascope` is often the right choice on macOS/Linux when the Python 3 executable is named `python3`
+- `py -m lunascope` is the usual Windows launcher form when using Python from python.org
+
 **Using a virtual environment (recommended)**
 
 ```bash

@@ -165,7 +165,7 @@ def _band_power(sig: np.ndarray, sr: float, flo: float, fhi: float) -> float:
     idx = (freqs >= flo) & (freqs <= fhi)
     if not idx.any():
         return np.nan
-    power = float(np.trapz(psd[idx], freqs[idx]))
+    power = float(np.trapezoid(psd[idx], freqs[idx]))
     return float(np.log10(max(power, 1e-30)))
 
 
