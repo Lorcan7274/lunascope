@@ -1128,8 +1128,8 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
 
         w = self.ui.width()
         h = self.ui.height()
-        left_w  = max(220, int(w * 0.20))
-        right_w = max(220, int(w * 0.20))
+        left_w  = max(210, int(w * 0.185))
+        right_w = max(210, int(w * 0.185))
         bottom_left_w  = max(220, int(w * 0.60))
         bottom_right_w = max(180, w - bottom_left_w)
 
@@ -1175,13 +1175,13 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         screen = self.ui.screen() or QGuiApplication.primaryScreen()
         if screen is not None:
             avail = screen.availableGeometry()
-            win_w = min(1200, int(avail.width() * 0.92))
+            win_w = min(1260, int(avail.width() * 0.92))
             win_h = min(800, int(avail.height() * 0.92))
             small_screen = avail.height() < 900
             target_x = avail.x() + max(0, (avail.width() - win_w) // 2)
             target_y = avail.y() + max(0, (avail.height() - win_h) // 2)
         else:
-            win_w, win_h = 1200, 800
+            win_w, win_h = 1260, 800
             small_screen = False
             target_x = target_y = 0
 

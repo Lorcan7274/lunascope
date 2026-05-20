@@ -945,7 +945,11 @@ class CMapsMixin:
                 )
             
     def _update_cols(self):
-        lw = float(getattr(self, "cfg_line_weight", 1.0))
+        lw = (
+            float(self._effective_line_weight())
+            if hasattr(self, "_effective_line_weight")
+            else float(getattr(self, "cfg_line_weight", 1.0))
+        )
         for c, col in zip(self.curves, self.colors):
             c.setPen(pg.mkPen(col, width=lw, cosmetic=True))
         for c, col in zip(getattr(self, "fill_curves", []), self.colors):

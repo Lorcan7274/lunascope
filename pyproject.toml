@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lunascope"
-version = "1.6.0"
+version = "1.6.1"
 description = "Desktop sleep-EEG viewer and annotation interface for Luna"
 readme = "README.md"
 requires-python = ">=3.9, <3.15"
@@ -46,6 +46,8 @@ dependencies = [
   "PySide6>=6.9,<6.11",
   "pyqtgraph>=0.13.7,<0.14",
   "numpy>=2.0,<3",
+  "scipy>=1.13,<1.17; python_version < '3.11'",
+  "scipy>=1.17,<2; python_version >= '3.11'",
   "pandas>=2.2,<3",
   "matplotlib>=3.8,<4",
   "psutil>=5.9",
@@ -57,7 +59,6 @@ test = [
   "pytest>=7",
   "pytest-qt>=4.2",
   "pytest-mock>=3.10",
-  "scipy>=1.10",
 ]
 
 [project.urls]

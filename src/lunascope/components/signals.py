@@ -222,6 +222,17 @@ class SignalsMixin:
         self._line_weight_widget = holder
         self._line_weight_spin = spin
 
+    def _effective_line_weight(self) -> float:
+        value = float(getattr(self, "cfg_line_weight", 1.0))
+        spin = getattr(self, "_line_weight_spin", None)
+        if spin is not None:
+            value = float(spin.value())
+        self.cfg_line_weight = value
+        if hasattr(self, "cfg") and isinstance(self.cfg, dict):
+            self.cfg.setdefault("par", {})
+            self.cfg["par"]["line-weight"] = str(value)
+        return value
+
     def _banner_section(self, title: str, object_name: str) -> tuple[QFrame, QVBoxLayout]:
         frame = QFrame(self.ui.ctrframe)
         frame.setObjectName(object_name)
@@ -363,7 +374,7 @@ class SignalsMixin:
             scaling_lay.addLayout(merged_grid)
             toggles = QHBoxLayout()
             toggles.setContentsMargins(0, 0, 0, 0)
-            toggles.setSpacing(10)
+            toggles.setSpacing(8)
             toggles.addWidget(self.ui.check_labels)
             toggles.addWidget(self.ui.radio_clip)
             toggles.addWidget(self.ui.radio_empiric)
@@ -391,8 +402,8 @@ class SignalsMixin:
 
             # Always-visible cards keep a hard minimum so the banner never
             # collapses below a usable size.
-            status_card.setMinimumWidth(210)
-            status_card.setMaximumWidth(210)
+            status_card.setMinimumWidth(158)
+            status_card.setMaximumWidth(158)
             status_card.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
             action_card.setMinimumWidth(100)
             action_card.setMaximumWidth(100)
@@ -402,7 +413,7 @@ class SignalsMixin:
             # them before the layout would compress them, so they appear either
             # at full width or not at all.
             scaling_card.setMinimumWidth(0)
-            scaling_card.setMaximumWidth(300)
+            scaling_card.setMaximumWidth(286)
             scaling_card.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
 
             host.setStyleSheet(
@@ -448,6 +459,12 @@ class SignalsMixin:
                 QFrame#banner_status QLabel#label_jump_width {
                     font-size: 11px;
                     font-weight: 600;
+                }
+                QCheckBox#check_labels,
+                QCheckBox#radio_clip,
+                QCheckBox#radio_empiric,
+                QCheckBox#radio_fixedscale {
+                    font-size: 9px;
                 }
                 """
             )
@@ -569,11 +586,7 @@ class SignalsMixin:
 
     def _on_line_weight_changed(self, value: float):
         self.cfg_line_weight = float(value)
-
-        # Keep parsed cfg in sync for runtime operations that inspect cfg dict.
-        if hasattr(self, "cfg") and isinstance(self.cfg, dict):
-            self.cfg.setdefault("par", {})
-            self.cfg["par"]["line-weight"] = str(self.cfg_line_weight)
+        self._effective_line_weight()
 
         if hasattr(self, "_update_cols"):
             self._update_cols()
@@ -1012,6 +1025,7 @@ class SignalsMixin:
     
         
     def _render_signals(self):
+        self._effective_line_weight()
         if getattr(self, "_pg1_probe", None) is not None:
             self._pg1_probe.clear_pinned()
 
@@ -1212,6 +1226,7 @@ class SignalsMixin:
     # --------------------------------------------------------------------------------
     
     def _render_signals_simple(self):
+        self._effective_line_weight()
 
         # update hypnogram and segment plot
         self._update_hypnogram()
@@ -1300,6 +1315,7 @@ class SignalsMixin:
     # --------------------------------------------------------------------------------
     
     def _initiate_curves(self):
+        lw = self._effective_line_weight()
 
 
         #
@@ -1368,7 +1384,7 @@ class SignalsMixin:
         #
         
         for i in range(nchan):
-            pen = pg.mkPen( self.colors[i], width= self.cfg_line_weight , cosmetic=True )
+            pen = pg.mkPen( self.colors[i], width=lw , cosmetic=True )
             c = _fast_curve(pen)
             fill = _fast_curve(None)
             fill.setZValue(c.zValue() - 1)
@@ -1414,7 +1430,7 @@ class SignalsMixin:
             colors = self.sigmod_colors.get(pal_label, self.rwb_sigmod_colors)
             for j in range(18):
                 col = colors[j % len(colors)]
-                pen = pg.mkPen(col, width=self.cfg_line_weight, cosmetic=True)
+                pen = pg.mkPen(col, width=lw, cosmetic=True)
                 c = _fast_curve(pen)
                 pi.addItem(c)
                 self.sigmod_curves.append(c)
@@ -1646,6 +1662,7 @@ class SignalsMixin:
 
     
     def _update_pg1(self):
+        self._effective_line_weight()
         if getattr(self, "_pg1_probe", None) is not None:
             self._pg1_probe.clear_pinned()
 
@@ -1911,6 +1928,7 @@ class SignalsMixin:
     # --------------------------------------------------------------------------------
 
     def _update_pg1_simple(self):
+        self._effective_line_weight()
         if getattr(self, "_pg1_probe", None) is not None:
             self._pg1_probe.clear_pinned()
 
