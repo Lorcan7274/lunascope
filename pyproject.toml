@@ -42,7 +42,7 @@ maintainers = [
 ]
 
 dependencies = [
-  "lunapi>=1.6,<1.7",
+  "lunapi>=1.6.1,<1.7",
   "PySide6>=6.9,<6.11",
   "pyqtgraph>=0.13.7,<0.14",
   "numpy>=2.0,<3",
