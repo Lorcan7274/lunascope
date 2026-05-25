@@ -141,6 +141,26 @@ class _ExplorerTab(QtCore.QObject):
             self._canvas.setMaximumWidth(16777215)
             self._canvas.resize(width, self._canvas.height())
 
+    def _finalize_canvas_draw(self):
+        """Apply a freshly rendered canvas size to the scroll host immediately."""
+        if self._canvas is None:
+            return
+        self._canvas.draw()
+        self._canvas.updateGeometry()
+        try:
+            width, height = self._canvas.get_width_height()
+        except Exception:
+            width, height = 320, 240
+        width = max(320, int(width))
+        height = max(240, int(height))
+        self._canvas.setMinimumHeight(height)
+        self._canvas.resize(width, height)
+        if self._canvas_host is not None:
+            self._canvas_host.setMinimumHeight(height)
+            self._canvas_host.resize(max(self._canvas_host.width(), width), height)
+        self._sync_canvas_width()
+        QtWidgets.QApplication.processEvents(QtCore.QEventLoop.ExcludeUserInputEvents, 1)
+
     def eventFilter(self, obj, event):
         if self._canvas_scroll is not None:
             try:
@@ -216,7 +236,7 @@ class _ExplorerTab(QtCore.QObject):
                 ha="center", va="center", fontsize=10,
                 transform=ax.transAxes, wrap=True, multialignment="center")
         ax.set_axis_off()
-        canvas.draw()
+        self._finalize_canvas_draw()
 
     def _style_ax(self, ax, title="", xlabel="", ylabel=""):
         ax.set_facecolor(BG)

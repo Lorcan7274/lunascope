@@ -631,8 +631,8 @@ class SignalsMixin:
         if hasattr(self, "_set_actigraphy_epoch_default"):
             self._set_actigraphy_epoch_default(multiday=self.multiday_mode)
 
-        # option defaults
-        self.show_labels = True
+        # keep label visibility aligned with the current UI toggle
+        self.show_labels = self.ui.check_labels.isChecked()
 
         
         # ------------------------------------------------------------
@@ -1279,6 +1279,9 @@ class SignalsMixin:
         if ch in getattr(self, "cmap", {}):
             return self.cmap[ch]
         if self._channel_uses_pp_display(ch):
+            special = self._pp_special_color(ch)
+            if special is not None:
+                return special
             stage = self._pp_stage_from_channel(ch)
             if stage is not None:
                 return self.stgcols_hex.get(stage, fallback)

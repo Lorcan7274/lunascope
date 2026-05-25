@@ -171,6 +171,7 @@ _CMAP_DEFAULT_TEXT = """\
 %   - auto scale to 0..1 unless explicit ylim= is set
 %   - lightly fill under trace using the trace colour
 %   - default stage colours for PP_N1/PP_N2/PP_N3/PP_R/PP_W...
+%   - PP_INVALID defaults to white as an invalid-posterior marker
 %   - PP_family_N1 style names also resolve by their final stage token
 %   - unknown PP_* suffixes fall back to the normal/generic signal colour
 %
@@ -550,6 +551,7 @@ class CMapsMixin:
             'N1': '#20B2DA',  # rgba(32,178,218,1)
             'N2': '#0000FF',  # blue
             'N3': '#000080',  # navy
+            'NR': '#800080',  # purple
             'R':  '#FF0000',  # red
             'SP': '#800080',  # purple (blend of NREM blue and REM red)
             'WP': '#008000',  # green (CSS "green")
@@ -860,12 +862,28 @@ class CMapsMixin:
                 return tail
         return None
 
+    def _pp_special_color(self, ch):
+        if not bool(getattr(self, "cfg_pp_style", True)):
+            return None
+        if not isinstance(ch, str) or not ch.startswith("PP_"):
+            return None
+        suffix = ch[3:]
+        if suffix == "INVALID":
+            return "#FFFFFF"
+        if "_" in suffix and suffix.rsplit("_", 1)[1] == "INVALID":
+            return "#FFFFFF"
+        return None
+
     def _update_pp_signal_cols(self, pal, chs):
         updated = []
         explicit = getattr(self, "cmap", {})
         for ch_i, p_i in zip(chs, pal):
             if ch_i in explicit:
                 updated.append(explicit[ch_i])
+                continue
+            special = self._pp_special_color(ch_i)
+            if special is not None:
+                updated.append(special)
                 continue
             stage = self._pp_stage_from_channel(ch_i)
             if stage is not None:

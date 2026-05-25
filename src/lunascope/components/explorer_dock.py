@@ -59,6 +59,7 @@ class ExplorerMixin:
         from .explorer_two_channel_dynamics import TwoChannelDynamicsTab
         from .explorer_plotter    import PlotterTab
         from .explorer_gpa        import GPATab
+        from .explorer_filter_design import FilterDesignTab
         from .explorer_topo       import TopoTab
         from .explorer_harmonizer import HarmonizerTab
 
@@ -82,6 +83,7 @@ class ExplorerMixin:
         self._tab_two_channel = TwoChannelDynamicsTab(self)
         self._tab_plot   = PlotterTab(self)
         self._tab_gpa    = GPATab(self)
+        self._tab_filter_design = FilterDesignTab(self)
         self._tab_topo   = TopoTab(self)
         self._tab_harm   = HarmonizerTab(self)
 

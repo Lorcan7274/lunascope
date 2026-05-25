@@ -15,14 +15,15 @@ _F32 = struct.Struct("<f")
 _F64 = struct.Struct("<d")
 
 _MAGIC = b"LWF1"
-_VERSION = 2
+_VERSION = 3
 
 
 @dataclass(slots=True)
 class LWFChannel:
     label: str
     unit: str
-    sr: int
+    sr: float
+    sample_step_tp: int
 
 
 @dataclass(slots=True)
@@ -110,7 +111,7 @@ def _load_lwf_file(path: str | Path) -> LWFShard:
         if _read_exact(fh, 4) != _MAGIC:
             raise ValueError(f"Invalid .lwf magic: {path}")
         version = _read_i32(fh)
-        if version not in (1, _VERSION):
+        if version != _VERSION:
             raise ValueError(
                 f"{path} uses .lwf version {version}, but Lunascope expects version {_VERSION}. "
                 "Please regenerate the waveform shards with the current Luna WAVEFORMS writer."
@@ -132,15 +133,13 @@ def _load_lwf_file(path: str | Path) -> LWFShard:
             LWFChannel(
                 label=_read_string(fh),
                 unit=_read_string(fh),
-                sr=_read_i32(fh),
+                sample_step_tp=_read_u64(fh),
+                sr=_read_f64(fh),
             )
             for _ in range(n_channels)
         ]
-        if version >= 2:
-            n_features = _read_i32(fh)
-            feature_names = [_read_string(fh) for _ in range(n_features)]
-        else:
-            feature_names = []
+        n_features = _read_i32(fh)
+        feature_names = [_read_string(fh) for _ in range(n_features)]
 
         n_waves = _read_i32(fh)
         index_rows = []
@@ -292,6 +291,7 @@ def load_lwf_directory(directory: str | Path, recursive: bool = False) -> LWFDat
                     "FILE": shard.path,
                     "CH": ch.label,
                     "SR": ch.sr,
+                    "SAMPLE_STEP_TP": ch.sample_step_tp,
                     "UNIT": ch.unit,
                     "MIN_SAMPLES": min(counts) if counts else 0,
                     "MAX_SAMPLES": max(counts) if counts else 0,

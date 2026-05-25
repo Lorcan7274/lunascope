@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
     QTextBrowser,
     QStyle,
     QFrame,
+    QWidget,
     QListWidget,
     QListWidgetItem,
 )
@@ -49,6 +50,7 @@ from pathlib import Path
 import pandas as pd
 
 from ..runtime_paths import app_cache_root, app_state_file
+from ..file_dialogs import existing_directory
 
 
 POPS_DOWNLOAD_URL = "https://zzz.nyspi.org/dist/luna/pops.zip"
@@ -403,6 +405,31 @@ class SoapPopsMixin:
             self._save_cached_pops_path(text)
         except Exception:
             pass
+
+    def _choose_pops_resources_folder(self) -> None:
+        current = self.ui.txt_pops_path.text().strip()
+        try:
+            start_dir = str(self._resolve_pops_path(current)) if current else ""
+        except Exception:
+            start_dir = current
+
+        folder = existing_directory(
+            self.ui,
+            "Select POPS resource folder",
+            start_dir,
+            show_files=True,
+        )
+        if not folder:
+            return
+
+        try:
+            self._set_pops_path(folder, persist=True)
+        except Exception as e:
+            QMessageBox.critical(
+                self.ui,
+                "POPS Resources",
+                f"Could not use selected folder.\n\n{type(e).__name__}: {e}",
+            )
 
     def _download_pops_resources(self) -> None:
         bundle_dir = self._default_pops_bundle_dir()
@@ -863,23 +890,71 @@ class SoapPopsMixin:
 
         pops_layout = self.ui.butt_pops.parentWidget().layout()
         if pops_layout is not None:
+            self.ui.label_10.setVisible(False)
+            if getattr(self.ui, "pops_folder_header", None) is None:
+                folder_header = QWidget(self.ui.butt_pops.parentWidget())
+                folder_header.setObjectName("pops_folder_header")
+                folder_header_layout = QHBoxLayout(folder_header)
+                folder_header_layout.setContentsMargins(0, 0, 0, 0)
+                folder_header_layout.setSpacing(8)
+
+                folder_label = QLabel("POPS resource folder", folder_header)
+                folder_label.setObjectName("label_pops_folder_header")
+                folder_header_layout.addWidget(folder_label)
+
+                folder_header_layout.addSpacing(24)
+
+                butt_pops_browse = QToolButton(folder_header)
+                butt_pops_browse.setObjectName("butt_pops_browse")
+                butt_pops_browse.setText("Set folder")
+                butt_pops_browse.setToolTip("Choose the POPS resource folder")
+                butt_pops_browse.setAutoRaise(True)
+                butt_pops_browse.clicked.connect(self._choose_pops_resources_folder)
+                folder_header_layout.addWidget(butt_pops_browse)
+
+                butt_pops_resource = QToolButton(folder_header)
+                butt_pops_resource.setObjectName("butt_pops_resource")
+                butt_pops_resource.setText("Download...")
+                butt_pops_resource.setToolTip("Download POPS resources and set the POPS resource folder path")
+                butt_pops_resource.setAutoRaise(True)
+                butt_pops_resource.clicked.connect(self._download_pops_resources)
+                folder_header_layout.addWidget(butt_pops_resource)
+                folder_header_layout.addStretch(1)
+
+                pops_layout.addWidget(folder_header, 0, 1)
+                self.ui.pops_folder_header = folder_header
+                self.ui.butt_pops_browse = butt_pops_browse
+                self.ui.butt_pops_resource = butt_pops_resource
+
+            if getattr(self.ui, "label_pops_model", None) is None:
+                label_pops_model = QLabel("Model", self.ui.butt_pops.parentWidget())
+                label_pops_model.setObjectName("label_pops_model")
+                pops_layout.addWidget(label_pops_model, 0, 2)
+                self.ui.label_pops_model = label_pops_model
+
+            pops_layout.removeWidget(self.ui.check_pops_ignore_obs)
+            pops_layout.removeWidget(self.ui.check_pops_emit_pp)
+            pops_layout.removeWidget(self.ui.radio_pops_hypnodens)
+            pops_layout.removeWidget(self.ui.txt_pops_model)
+            pops_layout.addWidget(self.ui.txt_pops_model, 1, 2)
+            pops_layout.addWidget(self.ui.check_pops_ignore_obs, 0, 3)
+            pops_layout.addWidget(self.ui.check_pops_emit_pp, 0, 4)
+            pops_layout.addWidget(self.ui.radio_pops_hypnodens, 1, 3, 1, 2)
             pops_layout.setColumnStretch(0, 0)
-            pops_layout.setColumnStretch(1, 1)
+            pops_layout.setColumnStretch(1, 0)
             pops_layout.setColumnStretch(2, 0)
-            pops_layout.setColumnStretch(3, 0)
+            pops_layout.setColumnStretch(3, 1)
             pops_layout.setColumnStretch(4, 0)
-        self.ui.combo_pops.setMinimumWidth(180)
-        self.ui.txt_pops_path.setMinimumWidth(360)
-        self.ui.txt_pops_model.setMaximumWidth(160)
-        if pops_layout is not None and getattr(self.ui, "butt_pops_resource", None) is None:
-            butt_pops_resource = QToolButton(self.ui.butt_pops.parentWidget())
-            butt_pops_resource.setObjectName("butt_pops_resource")
-            butt_pops_resource.setText("Get…")
-            butt_pops_resource.setToolTip("Download POPS resources and set the POPS folder path")
-            butt_pops_resource.setAutoRaise(True)
-            butt_pops_resource.clicked.connect(self._download_pops_resources)
-            pops_layout.addWidget(butt_pops_resource, 1, 4)
-            self.ui.butt_pops_resource = butt_pops_resource
+            pops_layout.setColumnStretch(5, 0)
+            pops_layout.setHorizontalSpacing(10)
+
+        self.ui.combo_pops.setMinimumWidth(120)
+        self.ui.combo_pops.setMaximumWidth(150)
+        self.ui.txt_pops_path.setMinimumWidth(220)
+        self.ui.txt_pops_path.setMaximumWidth(420)
+        self.ui.txt_pops_model.setMinimumWidth(70)
+        self.ui.txt_pops_model.setMaximumWidth(90)
+        self.ui.butt_pops.setMinimumHeight(56)
 
         cached_pops_path = self._load_cached_pops_path()
         if cached_pops_path:
@@ -997,7 +1072,8 @@ class SoapPopsMixin:
                 pass
 
         df_epoch = p.table('SOAP', 'CH_E')
-        df_epoch = df_epoch[['PRIOR', 'PRED', 'PP_N1', 'PP_N2', 'PP_N3', 'PP_R', 'PP_W', 'DISC']].copy()
+        cols = ['PRIOR', 'PRED', 'PP_N1', 'PP_N2', 'PP_N3', 'PP_R', 'PP_W', 'DISC']
+        df_epoch = df_epoch[[c for c in cols if c in df_epoch.columns]].copy()
         return df_ch, df_epoch
 
     @Slot()
@@ -1089,6 +1165,7 @@ class SoapPopsMixin:
         pops_path = self.ui.txt_pops_path.text()
         pops_model = self.ui.txt_pops_model.text()
         ignore_obs = self.ui.check_pops_ignore_obs.checkState() == Qt.Checked
+        emit_pp = self.ui.check_pops_emit_pp.checkState() == Qt.Checked
         
         diag = self._stage_validation_diagnostics()
         has_staging = diag["ok"]
@@ -1102,9 +1179,12 @@ class SoapPopsMixin:
             opts += " ignore-obs=T"
             has_staging = False
 
+        if emit_pp:
+            opts += " emit-pp=T"
+
         # coda
         if self.cfg_pops_coda:
-            opts += " predict-coda"
+            opts += " coda"
 
         # test if resource file exists
         base = Path(pops_path).expanduser()
@@ -1188,10 +1268,12 @@ class SoapPopsMixin:
         p.eval_lunascope(cmd_str)
 
         df = p.table('RUN_POPS', 'E')
+        pp_cols = ['PP_N1', 'PP_N2', 'PP_N3', 'PP_R', 'PP_W']
         if has_staging:
-            df = df[['E', 'START', 'PRIOR', 'PRED', 'PP_N1', 'PP_N2', 'PP_N3', 'PP_R', 'PP_W']].copy()
+            cols = ['E', 'START', 'PRIOR', 'PRED', *pp_cols]
         else:
-            df = df[['E', 'START', 'PRED', 'PP_N1', 'PP_N2', 'PP_N3', 'PP_R', 'PP_W']].copy()
+            cols = ['E', 'START', 'PRED', *pp_cols]
+        df = df[[c for c in cols if c in df.columns]].copy()
 
         tbls = p.strata()
         return df, bool(has_staging), tbls

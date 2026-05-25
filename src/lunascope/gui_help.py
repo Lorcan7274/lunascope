@@ -105,12 +105,14 @@ WIDGET_HELP: dict[str, str] = {
     "spin_soap_pc": "SOAP P_C threshold.",
     "butt_soap": "Run SOAP and plot hypnodensity output.",
     "combo_pops": "Channel(s) used for POPS. Open dropdown and check one or more channels.",
-    "txt_pops_path": "Folder containing POPS model files (*.mod).",
+    "txt_pops_path": "Resource folder containing POPS model files (*.mod).",
     "txt_pops_model": "POPS model basename (for example: s2).",
+    "butt_pops_browse": "Choose the POPS resource folder and update the cached path field.",
     "check_pops_ignore_obs": "Ignore observed staging and run POPS in prediction-only mode.",
+    "check_pops_emit_pp": "Emit POPS posterior channels such as PP_N1, PP_N2, PP_N3, PP_R, PP_W, and PP_VALID into the in-memory EDF.",
     "radio_pops_hypnodens": "Toggle POPS hypnodensity rendering mode.",
     "butt_pops": "Run POPS and populate output tables/plots.",
-    "butt_pops_resource": "Download POPS resources and update the POPS folder field.",
+    "butt_pops_resource": "Download POPS resources and update the POPS resource folder field.",
 
     # Masks
     "txt_generic_mask": "Manual MASK expression (use exactly one mask input mode).",

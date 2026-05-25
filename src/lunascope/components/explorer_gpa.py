@@ -132,6 +132,27 @@ def _coerce_numeric_series(series):
     return pd.to_numeric(series, errors="coerce")
 
 
+def _with_dump_qc_disabled(opts):
+    """Return GPA dump options with robust normalization disabled."""
+    out = dict(opts or {})
+    out["qc"] = "F"
+    return out
+
+
+def _safe_corrcoef(x, y, atol: float = 1e-12):
+    """Return Pearson r or NaN when either input is too short or constant."""
+    x_arr = np.asarray(x, dtype=float)
+    y_arr = np.asarray(y, dtype=float)
+    valid = np.isfinite(x_arr) & np.isfinite(y_arr)
+    if valid.sum() < 2:
+        return float("nan")
+    xv = x_arr[valid]
+    yv = y_arr[valid]
+    if np.std(xv) <= atol or np.std(yv) <= atol:
+        return float("nan")
+    return float(np.corrcoef(xv, yv)[0, 1])
+
+
 def _binary_level_values(values, atol: float = 1e-8, rtol: float = 1e-8):
     """Return the low/high levels if *values* are effectively binary, else None."""
     arr = np.asarray(values, dtype=float)
@@ -287,6 +308,487 @@ def _fmt_float(value):
     except TypeError:
         pass
     return f"{float(value):.4g}"
+
+
+def _manifest_var_frame(manifest_df):
+    """Return one metadata row per long variable from the GPA manifest."""
+    core_cols = ["VAR", "BASE", "GRP", "NI"]
+    if manifest_df is None or manifest_df.empty or "VAR" not in manifest_df.columns:
+        return pd.DataFrame(columns=core_cols)
+    out = manifest_df.copy()
+    out = out[out["VAR"] != "ID"].copy()
+    out["VAR"] = out["VAR"].astype(str)
+    if "BASE" not in out.columns:
+        out["BASE"] = out["VAR"]
+    else:
+        out["BASE"] = out["BASE"].astype(str)
+    if "GRP" not in out.columns:
+        out["GRP"] = "."
+    else:
+        out["GRP"] = out["GRP"].astype(str)
+    if "NI" not in out.columns:
+        out["NI"] = ""
+    ordered = [col for col in core_cols if col in out.columns]
+    extras = [col for col in out.columns if col not in ordered]
+    return out[ordered + extras].drop_duplicates(subset=["VAR"], keep="first").reset_index(drop=True)
+
+
+def _rank_seed_correlations(
+    df: pd.DataFrame,
+    seed_var: str,
+    candidate_vars,
+    meta_df: pd.DataFrame | None = None,
+    min_n: int = 3,
+):
+    """Rank pairwise-complete correlations between *seed_var* and candidates."""
+    if seed_var not in df.columns:
+        raise ValueError(f"Seed variable not found in data: {seed_var}")
+
+    meta_lookup = {}
+    if meta_df is not None and not meta_df.empty and "VAR" in meta_df.columns:
+        for row in meta_df.itertuples(index=False):
+            meta_lookup[str(row.VAR)] = {
+                "TARGET_BASE": getattr(row, "BASE", str(row.VAR)),
+                "TARGET_GRP": getattr(row, "GRP", "."),
+                "TARGET_NI": getattr(row, "NI", ""),
+            }
+
+    x = pd.to_numeric(df[seed_var], errors="coerce").to_numpy(dtype=float)
+    rows = []
+    seen = set()
+    for target in candidate_vars:
+        target = str(target)
+        if not target or target == seed_var or target in seen or target not in df.columns:
+            continue
+        seen.add(target)
+        y = pd.to_numeric(df[target], errors="coerce").to_numpy(dtype=float)
+        valid = np.isfinite(x) & np.isfinite(y)
+        n_obs = int(valid.sum())
+        if n_obs < min_n:
+            continue
+        xv = x[valid]
+        yv = y[valid]
+        r = _safe_corrcoef(xv, yv)
+        if not np.isfinite(r):
+            continue
+        if abs(r) >= 1.0:
+            p_val = 0.0
+        else:
+            t_stat = r * np.sqrt(max(n_obs - 2, 1) / max(1.0 - r * r, 1e-12))
+            p_val = float(2.0 * stats.t.sf(abs(t_stat), max(n_obs - 2, 1)))
+        meta = meta_lookup.get(target, {})
+        rows.append(
+            {
+                "SEED": seed_var,
+                "TARGET": target,
+                "TARGET_BASE": meta.get("TARGET_BASE", target),
+                "TARGET_GRP": meta.get("TARGET_GRP", "."),
+                "TARGET_NI": meta.get("TARGET_NI", ""),
+                "N": n_obs,
+                "R": r,
+                "ABS_R": abs(r),
+                "P": p_val,
+            }
+        )
+
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return pd.DataFrame(
+            columns=["SEED", "TARGET", "TARGET_BASE", "TARGET_GRP", "TARGET_NI", "N", "R", "ABS_R", "P"]
+        )
+    return out.sort_values(["ABS_R", "P", "TARGET"], ascending=[False, True, True]).reset_index(drop=True)
+
+
+def _fit_variable_pca(
+    df: pd.DataFrame,
+    meta_df: pd.DataFrame | None = None,
+    min_col_prop: float = 1.0,
+    row_mode: str = "complete",
+    standardize: bool = True,
+    max_components: int = 6,
+):
+    """Fit a simple PCA on variables and return per-variable component coordinates."""
+    work = df.copy()
+    for col in work.columns:
+        work[col] = pd.to_numeric(work[col], errors="coerce")
+
+    observed = work.notna().mean(axis=0)
+    keep_cols = [col for col in work.columns if float(observed.get(col, 0.0)) >= float(min_col_prop)]
+    low_obs_cols = [col for col in work.columns if col not in keep_cols]
+    work = work[keep_cols].copy()
+    if work.empty:
+        return {
+            "error": "No variables passed the missingness threshold.",
+            "loadings": pd.DataFrame(),
+            "explained_ratio": [],
+            "n_rows_input": int(len(df)),
+            "n_rows_used": 0,
+            "n_cols_used": 0,
+            "low_obs_cols": low_obs_cols,
+            "dropped_constant": [],
+        }
+
+    n_rows_input = int(len(work))
+    if row_mode == "median":
+        work = work.apply(lambda s: s.fillna(s.median()), axis=0)
+    else:
+        work = work.dropna(axis=0, how="any")
+    n_rows_used = int(len(work))
+    if n_rows_used < 2:
+        return {
+            "error": "Need at least two usable rows after missing-data handling.",
+            "loadings": pd.DataFrame(),
+            "explained_ratio": [],
+            "n_rows_input": n_rows_input,
+            "n_rows_used": n_rows_used,
+            "n_cols_used": 0,
+            "low_obs_cols": low_obs_cols,
+            "dropped_constant": [],
+        }
+
+    std = work.std(axis=0, ddof=1).replace(0, np.nan)
+    keep_nonconst = std[std > 1e-12].index.tolist()
+    dropped_constant = [col for col in work.columns if col not in keep_nonconst]
+    work = work[keep_nonconst].copy()
+    if work.shape[1] < 2:
+        return {
+            "error": "Need at least two non-constant variables for PCA.",
+            "loadings": pd.DataFrame(),
+            "explained_ratio": [],
+            "n_rows_input": n_rows_input,
+            "n_rows_used": n_rows_used,
+            "n_cols_used": int(work.shape[1]),
+            "low_obs_cols": low_obs_cols,
+            "dropped_constant": dropped_constant,
+        }
+
+    x = work.to_numpy(dtype=float)
+    x = x - x.mean(axis=0, keepdims=True)
+    if standardize:
+        scale = np.std(x, axis=0, ddof=1)
+        scale[~np.isfinite(scale) | (scale <= 1e-12)] = 1.0
+        x = x / scale
+
+    _, singular, vt = np.linalg.svd(x, full_matrices=False)
+    denom = max(x.shape[0] - 1, 1)
+    eigenvalues = (singular ** 2) / denom
+    total = float(np.sum(eigenvalues))
+    explained_ratio = (eigenvalues / total).tolist() if total > 0 else [0.0] * len(eigenvalues)
+    n_comp = max(1, min(int(max_components), vt.shape[0]))
+    coords = vt.T[:, :n_comp] * (singular[:n_comp] / np.sqrt(denom))
+
+    loadings = pd.DataFrame({"VAR": keep_nonconst})
+    for idx in range(n_comp):
+        loadings[f"PC{idx + 1}"] = coords[:, idx]
+    if meta_df is not None and not meta_df.empty:
+        loadings = loadings.merge(meta_df, on="VAR", how="left")
+    if "BASE" not in loadings.columns:
+        loadings["BASE"] = loadings["VAR"]
+    if "GRP" not in loadings.columns:
+        loadings["GRP"] = "."
+    if "NI" not in loadings.columns:
+        loadings["NI"] = ""
+
+    return {
+        "error": "",
+        "loadings": loadings,
+        "explained_ratio": explained_ratio[:n_comp],
+        "n_rows_input": n_rows_input,
+        "n_rows_used": n_rows_used,
+        "n_cols_used": int(work.shape[1]),
+        "low_obs_cols": low_obs_cols,
+        "dropped_constant": dropped_constant,
+        "row_mode": row_mode,
+        "standardize": bool(standardize),
+    }
+
+
+def _fit_observation_pca(
+    df: pd.DataFrame,
+    metric_cols,
+    min_col_prop: float = 1.0,
+    row_mode: str = "complete",
+    standardize: bool = True,
+    max_components: int = 6,
+):
+    """Fit PCA with observations as points and metrics as axes."""
+    metric_cols = [str(col) for col in metric_cols if str(col).strip() and col in df.columns]
+    if len(metric_cols) < 2:
+        return {
+            "error": "Need at least two metric columns for observation PCA.",
+            "scores": pd.DataFrame(),
+            "explained_ratio": [],
+            "n_rows_input": int(len(df)),
+            "n_rows_used": 0,
+            "n_cols_used": 0,
+            "low_obs_cols": [],
+            "dropped_constant": [],
+        }
+
+    work = df[metric_cols].copy()
+    for col in metric_cols:
+        work[col] = pd.to_numeric(work[col], errors="coerce")
+    observed = work.notna().mean(axis=0)
+    keep_cols = [col for col in metric_cols if float(observed.get(col, 0.0)) >= float(min_col_prop)]
+    low_obs_cols = [col for col in metric_cols if col not in keep_cols]
+    work = work[keep_cols].copy()
+    if work.shape[1] < 2:
+        return {
+            "error": "Need at least two metric columns after missingness filtering.",
+            "scores": pd.DataFrame(),
+            "explained_ratio": [],
+            "n_rows_input": int(len(df)),
+            "n_rows_used": 0,
+            "n_cols_used": int(work.shape[1]),
+            "low_obs_cols": low_obs_cols,
+            "dropped_constant": [],
+        }
+
+    n_rows_input = int(len(work))
+    if row_mode == "median":
+        work = work.apply(lambda s: s.fillna(s.median()), axis=0)
+        keep_index = work.index
+    else:
+        keep_index = work.dropna(axis=0, how="any").index
+        work = work.loc[keep_index].copy()
+    n_rows_used = int(len(work))
+    if n_rows_used < 2:
+        return {
+            "error": "Need at least two usable observations after missing-data handling.",
+            "scores": pd.DataFrame(),
+            "explained_ratio": [],
+            "n_rows_input": n_rows_input,
+            "n_rows_used": n_rows_used,
+            "n_cols_used": 0,
+            "low_obs_cols": low_obs_cols,
+            "dropped_constant": [],
+        }
+
+    std = work.std(axis=0, ddof=1).replace(0, np.nan)
+    keep_nonconst = std[std > 1e-12].index.tolist()
+    dropped_constant = [col for col in work.columns if col not in keep_nonconst]
+    work = work[keep_nonconst].copy()
+    if work.shape[1] < 2:
+        return {
+            "error": "Need at least two non-constant metrics for observation PCA.",
+            "scores": pd.DataFrame(),
+            "explained_ratio": [],
+            "n_rows_input": n_rows_input,
+            "n_rows_used": n_rows_used,
+            "n_cols_used": int(work.shape[1]),
+            "low_obs_cols": low_obs_cols,
+            "dropped_constant": dropped_constant,
+        }
+
+    x = work.to_numpy(dtype=float)
+    x = x - x.mean(axis=0, keepdims=True)
+    if standardize:
+        scale = np.std(x, axis=0, ddof=1)
+        scale[~np.isfinite(scale) | (scale <= 1e-12)] = 1.0
+        x = x / scale
+
+    u, singular, _vt = np.linalg.svd(x, full_matrices=False)
+    denom = max(x.shape[0] - 1, 1)
+    eigenvalues = (singular ** 2) / denom
+    total = float(np.sum(eigenvalues))
+    explained_ratio = (eigenvalues / total).tolist() if total > 0 else [0.0] * len(eigenvalues)
+    n_comp = max(1, min(int(max_components), len(singular)))
+    coords = u[:, :n_comp] * singular[:n_comp]
+
+    non_metric_cols = [col for col in df.columns if col not in metric_cols]
+    scores = df.loc[keep_index, non_metric_cols].copy().reset_index(drop=True)
+    for idx in range(n_comp):
+        scores[f"PC{idx + 1}"] = coords[:, idx]
+
+    return {
+        "error": "",
+        "scores": scores,
+        "explained_ratio": explained_ratio[:n_comp],
+        "n_rows_input": n_rows_input,
+        "n_rows_used": n_rows_used,
+        "n_cols_used": int(work.shape[1]),
+        "low_obs_cols": low_obs_cols,
+        "dropped_constant": dropped_constant,
+        "row_mode": row_mode,
+        "standardize": bool(standardize),
+    }
+
+
+def _present_columns(df: pd.DataFrame, requested):
+    requested = [str(col) for col in requested if str(col).strip()]
+    present = [col for col in requested if col in df.columns]
+    missing = [col for col in requested if col not in df.columns]
+    return present, missing
+
+
+def _assoc_dump_cache_key(dat_path, requested_cols, dump_filters):
+    filt = tuple(sorted((dump_filters or {}).items()))
+    cols = tuple(_unique_preserve([str(col) for col in requested_cols if str(col).strip()]))
+    real_path = os.path.realpath(str(dat_path))
+    try:
+        stat = os.stat(real_path)
+        file_id = (int(stat.st_mtime_ns), int(stat.st_size))
+    except OSError:
+        file_id = None
+    return (real_path, file_id, filt, cols)
+
+
+def _assoc_pca_color_fields(manifest_df):
+    meta = _manifest_var_frame(manifest_df)
+    if meta.empty:
+        return []
+    skip = {"VAR", "BASE", "GRP", "NI", "NV"}
+    return [col for col in meta.columns if col not in skip]
+
+
+def _full_source_table(path, member=None, proj=None):
+    """Return the full DataFrame for one source-table selection."""
+    ext = os.path.splitext(path)[1].lower()
+
+    if ext in (".txt", ".tsv", ".csv"):
+        sep = "\t" if ext in (".txt", ".tsv") else ","
+        return pd.read_csv(path, sep=sep)
+
+    if ext == ".zip":
+        if not member:
+            raise ValueError("ZIP source requires a member selection.")
+        with zipfile.ZipFile(path, "r") as zf:
+            with zf.open(member) as fh:
+                return pd.read_csv(fh, sep="\t")
+
+    if ext in (".pkl", ".pickle"):
+        obj = pd.read_pickle(path)
+        if isinstance(obj, pd.DataFrame):
+            return obj.copy()
+        if isinstance(obj, dict):
+            key = member or ""
+            if "results" in obj and isinstance(obj["results"], dict) and key in obj["results"]:
+                df = obj["results"][key]
+            elif key in obj:
+                df = obj[key]
+            else:
+                raise KeyError(f"Table not found in pickle source: {key}")
+            if not isinstance(df, pd.DataFrame):
+                raise ValueError(f"Selected pickle table is not a DataFrame: {key}")
+            return df.copy()
+        raise ValueError("Unsupported pickle source format.")
+
+    if ext == ".db" and proj is not None:
+        if not member or "_" not in member:
+            raise ValueError("DB source requires a Command_Strata member name.")
+        cmd, strata = member.split("_", 1)
+        df = proj.table(cmd, strata)
+        if df is None:
+            raise ValueError(f"Table not found in DB source: {member}")
+        return df.copy()
+
+    raise ValueError(f"Unsupported source type: {path}")
+
+
+def _repeated_manifest_from_columns(metric_cols, meta_cols=None):
+    """Build a minimal manifest-like frame for repeated-observation metrics."""
+    metric_cols = [str(col) for col in metric_cols if str(col).strip()]
+    meta_cols = [str(col) for col in (meta_cols or []) if str(col).strip()]
+    rows = []
+    for col in metric_cols:
+        row = {"VAR": col, "BASE": col, "GRP": ".", "NI": ""}
+        for meta_col in meta_cols:
+            row[meta_col] = ""
+        rows.append(row)
+    return pd.DataFrame(rows, columns=["VAR", "BASE", "GRP", "NI"] + meta_cols)
+
+
+def _build_repeated_matrix(
+    source_df: pd.DataFrame,
+    subject_id_col: str,
+    obs_key_cols,
+    metric_cols,
+    meta_cols=None,
+    filters=None,
+):
+    """Return an explorer-local repeated-observation matrix plus metadata."""
+    if source_df is None or source_df.empty:
+        raise ValueError("Selected source table is empty.")
+
+    obs_key_cols = [str(col) for col in (obs_key_cols or []) if str(col).strip()]
+    metric_cols = [str(col) for col in (metric_cols or []) if str(col).strip()]
+    meta_cols = [str(col) for col in (meta_cols or []) if str(col).strip()]
+    if not subject_id_col:
+        raise ValueError("Select a subject ID column.")
+    if not obs_key_cols:
+        raise ValueError("Select at least one observation key column.")
+    if not metric_cols:
+        raise ValueError("Select at least one metric column.")
+
+    needed = _unique_preserve([subject_id_col] + obs_key_cols + metric_cols + meta_cols)
+    missing = [col for col in needed if col not in source_df.columns]
+    if missing:
+        raise ValueError("Missing source columns: " + ", ".join(missing[:8]))
+
+    work = source_df[needed].copy()
+    work = work.replace(".", np.nan)
+    filters = filters or {}
+    applied_filters = {}
+    for col, keep_vals in filters.items():
+        vals = [str(v).strip() for v in keep_vals if str(v).strip()]
+        if not vals or col not in work.columns:
+            continue
+        applied_filters[col] = vals
+        work = work[work[col].astype(str).isin(set(vals))].copy()
+    if work.empty:
+        raise ValueError("No rows remain after applying repeated-observation filters.")
+
+    key_block = work[[subject_id_col] + obs_key_cols].copy()
+    missing_mask = key_block.isna() | key_block.astype(str).apply(lambda s: s.str.strip() == "")
+    if bool(missing_mask.any(axis=1).any()):
+        bad = work.loc[missing_mask.any(axis=1), [subject_id_col] + obs_key_cols].head(5)
+        raise ValueError(
+            "Missing subject/key values in repeated-observation columns.\n"
+            + bad.to_string(index=False)
+        )
+
+    safe = key_block.astype(str).apply(lambda s: s.str.replace("|", "/", regex=False))
+    tmp_id = safe[[subject_id_col] + obs_key_cols].agg("|".join, axis=1)
+    dup_mask = tmp_id.duplicated(keep=False)
+    if bool(dup_mask.any()):
+        dup = work.loc[dup_mask, [subject_id_col] + obs_key_cols].head(8)
+        raise ValueError(
+            "Repeated-observation key does not uniquely identify rows.\n"
+            + dup.to_string(index=False)
+        )
+
+    matrix = work.copy()
+    matrix.insert(0, "RID", tmp_id.tolist())
+    if subject_id_col != "ID":
+        matrix.insert(1, "ID", work[subject_id_col].astype(str).tolist())
+    else:
+        matrix["ID"] = matrix["ID"].astype(str)
+    for col in metric_cols:
+        matrix[col] = pd.to_numeric(matrix[col], errors="coerce")
+
+    manifest = _repeated_manifest_from_columns(metric_cols, meta_cols=meta_cols)
+    for col in meta_cols:
+        levels = sorted({
+            str(v).strip()
+            for v in work[col].dropna().astype(str).tolist()
+            if str(v).strip() and str(v).strip() != "."
+        })
+        joined = ", ".join(levels[:8])
+        if len(levels) > 8:
+            joined += ", …"
+        manifest[col] = joined
+
+    return {
+        "matrix": matrix,
+        "manifest": manifest,
+        "row_count": int(len(matrix)),
+        "subject_count": int(matrix["ID"].astype(str).nunique()) if "ID" in matrix.columns else int(len(matrix)),
+        "metric_cols": metric_cols,
+        "meta_cols": meta_cols,
+        "obs_key_cols": obs_key_cols,
+        "subject_id_col": subject_id_col,
+        "filters": applied_filters,
+    }
 
 
 def _rank_select_predictors(df: pd.DataFrame, names, roles):
@@ -641,10 +1143,13 @@ class _VarPicker(QWidget):
 
     def __init__(self, label, parent=None):
         super().__init__(parent)
+        self._label_text = str(label)
         self._manifest = None
         self._pair_rows = pd.DataFrame()
         self._selected_pairs = set()
         self._updating_list = False
+        self._single_select = False
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -655,13 +1160,16 @@ class _VarPicker(QWidget):
         hdr.setContentsMargins(0, 0, 0, 0)
         lbl = QLabel(f"<b>{label}</b>")
         lbl.setStyleSheet(f"color:{FG}; font-size:11px;")
+        self._title_lbl = lbl
         self._summary_lbl = QLabel("")
         self._summary_lbl.setStyleSheet(f"color:#888; font-size:10px;")
         self._summary_lbl.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self._summary_lbl.setMinimumWidth(0)
         self._summary_lbl.setWordWrap(True)
         self._grp_combo = QComboBox()
-        self._grp_combo.setFixedWidth(110)
+        self._grp_combo.setFixedWidth(92)
+        self._grp_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self._grp_combo.setMinimumContentsLength(6)
         self._grp_combo.setToolTip("Filter by group")
         self._grp_combo.addItem("(all groups)", None)
         btn_none = QPushButton("✕")
@@ -679,16 +1187,22 @@ class _VarPicker(QWidget):
         self._search = QLineEdit()
         self._search.setPlaceholderText("search base names…")
         self._search.setClearButtonEnabled(True)
+        self._search.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
 
         # List
         self._list = QListWidget()
         self._list.setSelectionMode(QAbstractItemView.NoSelection)
         self._list.setUniformItemSizes(True)
+        self._list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._list.setTextElideMode(Qt.ElideRight)
+        self._list.setWordWrap(False)
         self._list.setSpacing(0)
         self._list.setStyleSheet(
             "QListWidget { background:#0d1117; border:1px solid #21262d; font-size:11px; }"
             "QListWidget::item { padding:1px 2px; }"
         )
+        self._list.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
+        self._list.viewport().installEventFilter(self)
         self._list.itemChanged.connect(self._on_item_changed)
 
         layout.addLayout(hdr)
@@ -703,6 +1217,13 @@ class _VarPicker(QWidget):
 
     def set_summary(self, text: str):
         self._summary_lbl.setText(text or "")
+
+    def set_title(self, text: str):
+        self._label_text = str(text or "")
+        self._title_lbl.setText(f"<b>{self._label_text}</b>")
+
+    def set_single_selection(self, enabled: bool):
+        self._single_select = bool(enabled)
 
     # ------------------------------------------------------------------
 
@@ -835,8 +1356,12 @@ class _VarPicker(QWidget):
             return
         pairs = item.data(Qt.UserRole) or []
         if item.checkState() == Qt.Checked:
-            for pair in pairs:
-                self._selected_pairs.add(tuple(pair))
+            if self._single_select:
+                self._selected_pairs = {tuple(pair) for pair in pairs}
+                self._refilter()
+            else:
+                for pair in pairs:
+                    self._selected_pairs.add(tuple(pair))
         elif item.checkState() == Qt.Unchecked:
             for pair in pairs:
                 self._selected_pairs.discard(tuple(pair))
@@ -887,13 +1412,28 @@ class _VarPicker(QWidget):
 
     def set_selected(self, names):
         """Check entries whose base names are in *names* across all groups."""
-        wanted = set(names)
+        names = [str(name) for name in names if str(name).strip()]
+        wanted = set(names[:1] if self._single_select and names else names)
         self._selected_pairs = set()
         for row in self._pair_rows.itertuples(index=False):
             if row.BASE in wanted:
                 self._selected_pairs.add((row.GRP, row.BASE))
         self._refilter()
         self.selectionChanged.emit()
+
+    def eventFilter(self, obj, event):
+        if obj is self._list.viewport() and event.type() == QtCore.QEvent.MouseButtonRelease:
+            if event.button() == Qt.LeftButton:
+                item = self._list.itemAt(event.pos())
+                if item is not None:
+                    self._updating_list = True
+                    try:
+                        item.setCheckState(Qt.Unchecked if item.checkState() == Qt.Checked else Qt.Checked)
+                    finally:
+                        self._updating_list = False
+                    self._on_item_changed(item)
+                    return True
+        return super().eventFilter(obj, event)
 
 
 # ---------------------------------------------------------------------------
@@ -904,7 +1444,7 @@ class GPATab(_ExplorerTab):
     """GPA / Association Explorer tab."""
 
     _sig_ok         = QtCore.Signal(object)
-    _sig_err        = QtCore.Signal(str)
+    _sig_err        = QtCore.Signal(object)
     _sig_progress   = QtCore.Signal(str)
     _sig_scatter_ok = QtCore.Signal(object)   # (ids, xs, ys, xvar, yvar)
     _sig_scatter_err= QtCore.Signal(str)
@@ -943,6 +1483,30 @@ class GPATab(_ExplorerTab):
         self._joint_result: dict | None = None
         self._pre_joint_status_text: str = ""
 
+        self._assoc_corr_df: pd.DataFrame | None = None
+        self._assoc_corr_proxy: QSortFilterProxyModel | None = None
+        self._assoc_seed_long: str = ""
+        self._assoc_scatter_seed: str = ""
+        self._assoc_scatter_target: str = ""
+        self._assoc_plot_mode: str = "ranked"
+        self._assoc_pca_result: dict | None = None
+        self._assoc_pca_df: pd.DataFrame | None = None
+        self._assoc_pca_proxy: QSortFilterProxyModel | None = None
+        self._assoc_pca_artist = None
+        self._assoc_pca_labels: list[str] = []
+        self._assoc_pca_xy: np.ndarray | None = None
+        self._assoc_pca_hover = None
+        self._assoc_suspend_auto_run = False
+        self._assoc_ranked_hover = None
+        self._assoc_ranked_bars = []
+        self._assoc_ranked_labels: list[str] = []
+        self._assoc_matrix_cache_key = None
+        self._assoc_matrix_cache_df: pd.DataFrame | None = None
+        self._assoc_repeated_manifest_df: pd.DataFrame | None = None
+        self._assoc_repeated_meta_cols: list[str] = []
+        self._assoc_repeated_metric_cols: list[str] = []
+        self._assoc_repeated_row_info: dict = {}
+
         self._render_timer = QTimer(self)
         self._render_timer.setSingleShot(True)
         self._render_timer.setInterval(250)
@@ -974,11 +1538,13 @@ class GPATab(_ExplorerTab):
         # ---- left: control panel (scrollable) ----------------------------
         left_scroll = QScrollArea()
         left_scroll.setWidgetResizable(True)
-        left_scroll.setMinimumWidth(200)
+        left_scroll.setMinimumWidth(180)
         left_scroll.setFrameShape(QFrame.NoFrame)
         left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        left_scroll.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
 
         left_inner = QWidget()
+        left_inner.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         left_layout = QVBoxLayout(left_inner)
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(0)
@@ -987,30 +1553,55 @@ class GPATab(_ExplorerTab):
         self._inner_tabs = QTabWidget()
         self._inner_tabs.setTabPosition(QTabWidget.North)
         self._inner_tabs.setDocumentMode(True)
+        self._inner_tabs.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         left_layout.addWidget(self._inner_tabs)
 
         build_w    = self._build_build_tab()
         analyze_w  = self._build_analyze_tab()
+        explore_w  = self._build_assoc_explore_tab()
         self._inner_tabs.addTab(build_w,   "Build")
         self._inner_tabs.addTab(analyze_w, "Analyze")
+        self._inner_tabs.addTab(explore_w, "Correl/PCA")
 
         # ---- right: stacked panel — Build→manifest, Analyze→results ----
         right_stack = QStackedWidget()
         manifest_frame = self._build_manifest_panel()
         results_frame  = self._build_results_panel()
+        assoc_frame    = self._build_assoc_results_panel()
         right_stack.addWidget(manifest_frame)   # index 0
         right_stack.addWidget(results_frame)    # index 1
+        right_stack.addWidget(assoc_frame)      # index 2
         right_stack.setCurrentIndex(0)
         self._inner_tabs.currentChanged.connect(
-            lambda idx: right_stack.setCurrentIndex(0 if idx == 0 else 1))
+            lambda idx: right_stack.setCurrentIndex(min(idx, 2)))
 
         outer.addWidget(left_scroll)
         outer.addWidget(right_stack)
-        outer.setSizes([400, 900])
+        outer.setSizes([250, 1050])
+        outer.setStretchFactor(0, 0)
+        outer.setStretchFactor(1, 1)
         outer.setCollapsible(0, False)
         outer.setCollapsible(1, False)
+        self._assoc_outer_splitter = outer
+        QTimer.singleShot(0, self._apply_assoc_default_splitter_sizes)
+        QTimer.singleShot(0, self._init_assoc_mode_ui)
 
         self._root = root
+
+    def _init_assoc_mode_ui(self):
+        self._refresh_assoc_repeated_sources()
+        self._on_assoc_mode_changed()
+
+    def _apply_assoc_default_splitter_sizes(self):
+        outer = getattr(self, "_assoc_outer_splitter", None)
+        if outer is None:
+            return
+        try:
+            total = max(800, outer.size().width())
+        except RuntimeError:
+            return
+        left = min(250, max(220, int(total * 0.24)))
+        outer.setSizes([left, max(400, total - left)])
 
     # ------------------------------------------------------------------
     # Build tab
@@ -1364,6 +1955,423 @@ class GPATab(_ExplorerTab):
         lay.addStretch(1)
         return w
 
+    def _build_assoc_explore_tab(self):
+        w = QWidget()
+        w.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(6, 6, 6, 6)
+        lay.setSpacing(6)
+
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel("Mode"))
+        self._assoc_mode_combo = QComboBox()
+        self._assoc_mode_combo.addItem("Standard .dat", "standard")
+        self._assoc_mode_combo.addItem("Repeated observations", "repeated")
+        mode_row.addWidget(self._assoc_mode_combo, 1)
+        lay.addLayout(mode_row)
+
+        self._assoc_standard_frame = QFrame()
+        std_lay = QVBoxLayout(self._assoc_standard_frame)
+        std_lay.setContentsMargins(0, 0, 0, 0)
+        std_lay.setSpacing(6)
+        dat_row = QHBoxLayout()
+        dat_row.setSpacing(4)
+        self._assoc_dat_edit = QLineEdit()
+        self._assoc_dat_edit.setPlaceholderText("path/to/out.dat")
+        self._assoc_dat_edit.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        btn_dat_open = QPushButton("…")
+        btn_dat_open.setFixedWidth(26)
+        btn_dat_open.clicked.connect(lambda: self._browse_dat_open(self._assoc_dat_edit))
+        self._assoc_load_btn = QPushButton("Load .dat")
+        self._assoc_load_btn.setFixedWidth(80)
+        self._assoc_load_btn.clicked.connect(self._run_load_manifest_assoc)
+        dat_row.addWidget(QLabel(".dat:"))
+        dat_row.addWidget(self._assoc_dat_edit, 1)
+        dat_row.addWidget(btn_dat_open)
+        dat_row.addWidget(self._assoc_load_btn)
+        std_lay.addLayout(dat_row)
+
+        self._assoc_seed_picker = _VarPicker("Seed variable")
+        self._assoc_seed_picker.set_single_selection(True)
+        self._assoc_seed_picker.setMinimumHeight(120)
+        self._assoc_seed_picker.setMaximumHeight(150)
+        self._assoc_seed_picker.selectionChanged.connect(self._on_assoc_seed_picker_changed)
+        std_lay.addWidget(self._assoc_seed_picker)
+
+        self._assoc_seed_long_label = QLabel("Actual seed variable")
+        std_lay.addWidget(self._assoc_seed_long_label)
+        self._assoc_seed_long_list = QListWidget()
+        self._assoc_seed_long_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        self._assoc_seed_long_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._assoc_seed_long_list.setTextElideMode(Qt.ElideRight)
+        self._assoc_seed_long_list.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        self._assoc_seed_long_list.setMinimumHeight(72)
+        self._assoc_seed_long_list.setMaximumHeight(96)
+        self._assoc_seed_long_list.setStyleSheet(
+            "QListWidget { background:#0d1117; border:1px solid #21262d; font-size:11px; }"
+            "QListWidget::item { padding:2px 4px; }"
+        )
+        self._assoc_seed_long_list.currentRowChanged.connect(self._on_assoc_seed_long_row_changed)
+        std_lay.addWidget(self._assoc_seed_long_list)
+
+        self._assoc_pool_picker = _VarPicker("Target/PCA variables")
+        self._assoc_pool_picker.setMinimumHeight(150)
+        self._assoc_pool_picker.setMaximumHeight(190)
+        self._assoc_pool_picker.set_summary(
+            "Empty selection = all variables in the manifest. Used for correlation targets and PCA."
+        )
+        std_lay.addWidget(self._assoc_pool_picker)
+        lay.addWidget(self._assoc_standard_frame)
+
+        self._assoc_repeated_frame = QFrame()
+        rep_lay = QVBoxLayout(self._assoc_repeated_frame)
+        rep_lay.setContentsMargins(0, 0, 0, 0)
+        rep_lay.setSpacing(6)
+
+        rep_src_row = QHBoxLayout()
+        rep_src_row.addWidget(QLabel("Source table"))
+        self._assoc_rep_source_combo = QComboBox()
+        self._assoc_rep_source_combo.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        btn_rep_refresh = QPushButton("Refresh")
+        btn_rep_refresh.setFixedWidth(70)
+        rep_src_row.addWidget(self._assoc_rep_source_combo, 1)
+        rep_src_row.addWidget(btn_rep_refresh)
+        rep_lay.addLayout(rep_src_row)
+
+        rep_id_row = QHBoxLayout()
+        rep_id_row.addWidget(QLabel("Subject ID"))
+        self._assoc_rep_subject_combo = QComboBox()
+        self._assoc_rep_subject_combo.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        rep_id_row.addWidget(self._assoc_rep_subject_combo, 1)
+        rep_lay.addLayout(rep_id_row)
+
+        rep_lists = QSplitter(Qt.Horizontal)
+        rep_lists.setHandleWidth(4)
+
+        self._assoc_rep_key_list = QListWidget()
+        self._assoc_rep_key_list.setSelectionMode(QAbstractItemView.MultiSelection)
+        self._assoc_rep_metric_list = QListWidget()
+        self._assoc_rep_metric_list.setSelectionMode(QAbstractItemView.MultiSelection)
+        self._assoc_rep_meta_list = QListWidget()
+        self._assoc_rep_meta_list.setSelectionMode(QAbstractItemView.MultiSelection)
+        for box, title in (
+            (self._assoc_rep_key_list, "Observation key"),
+            (self._assoc_rep_metric_list, "Metric columns"),
+            (self._assoc_rep_meta_list, "Subsetting/color columns"),
+        ):
+            frame = QFrame()
+            box_lay = QVBoxLayout(frame)
+            box_lay.setContentsMargins(0, 0, 0, 0)
+            box_lay.setSpacing(3)
+            box_lay.addWidget(QLabel(title))
+            box.setStyleSheet(
+                "QListWidget { background:#0d1117; border:1px solid #21262d; font-size:11px; }"
+                "QListWidget::item { padding:2px 4px; }"
+            )
+            box_lay.addWidget(box, 1)
+            rep_lists.addWidget(frame)
+        rep_lists.setSizes([180, 220, 220])
+        rep_lay.addWidget(rep_lists, 1)
+
+        rep_filter_lbl = QLabel("Row filters")
+        rep_lay.addWidget(rep_filter_lbl)
+        self._assoc_rep_filter_table = QTableWidget(0, 2)
+        self._assoc_rep_filter_table.setHorizontalHeaderLabels(["Column", "Keep values (comma-separated)"])
+        self._assoc_rep_filter_table.verticalHeader().setVisible(False)
+        self._assoc_rep_filter_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self._assoc_rep_filter_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self._assoc_rep_filter_table.setSelectionBehavior(QAbstractItemView.SelectItems)
+        self._assoc_rep_filter_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self._assoc_rep_filter_table.setEditTriggers(
+            QAbstractItemView.CurrentChanged
+            | QAbstractItemView.SelectedClicked
+            | QAbstractItemView.DoubleClicked
+            | QAbstractItemView.EditKeyPressed
+        )
+        self._assoc_rep_filter_table.setMinimumHeight(110)
+        self._assoc_rep_filter_table.setMaximumHeight(160)
+        rep_lay.addWidget(self._assoc_rep_filter_table)
+
+        self._assoc_rep_summary = QLabel("")
+        self._assoc_rep_summary.setWordWrap(True)
+        self._assoc_rep_summary.setStyleSheet(f"color:#888; font-size:11px;")
+        rep_lay.addWidget(self._assoc_rep_summary)
+        lay.addWidget(self._assoc_repeated_frame)
+
+        sep_targets = QFrame()
+        sep_targets.setFrameShape(QFrame.HLine)
+        sep_targets.setFrameShadow(QFrame.Plain)
+        sep_targets.setStyleSheet(f"color:{SEP};")
+        lay.addWidget(sep_targets)
+
+        corr_frame = QFrame()
+        corr_frame.setFrameShape(QFrame.StyledPanel)
+        corr_lay = QVBoxLayout(corr_frame)
+        corr_lay.setContentsMargins(6, 4, 6, 4)
+        corr_lay.setSpacing(4)
+
+        corr_opts = QHBoxLayout()
+        corr_opts.addWidget(QLabel("|r| ≥"))
+        self._assoc_abs_spin = QDoubleSpinBox()
+        self._assoc_abs_spin.setRange(0.0, 1.0)
+        self._assoc_abs_spin.setDecimals(3)
+        self._assoc_abs_spin.setSingleStep(0.05)
+        self._assoc_abs_spin.setValue(0.0)
+        self._assoc_abs_spin.setFixedWidth(70)
+        corr_opts.addWidget(self._assoc_abs_spin)
+        corr_opts.addWidget(QLabel("p ≤"))
+        self._assoc_p_spin = QDoubleSpinBox()
+        self._assoc_p_spin.setRange(0.0, 1.0)
+        self._assoc_p_spin.setDecimals(4)
+        self._assoc_p_spin.setSingleStep(0.01)
+        self._assoc_p_spin.setValue(1.0)
+        self._assoc_p_spin.setFixedWidth(80)
+        corr_opts.addWidget(self._assoc_p_spin)
+        corr_opts.addWidget(QLabel("Top"))
+        self._assoc_topn_spin = QSpinBox()
+        self._assoc_topn_spin.setRange(10, 5000)
+        self._assoc_topn_spin.setValue(200)
+        self._assoc_topn_spin.setFixedWidth(72)
+        corr_opts.addWidget(self._assoc_topn_spin)
+        corr_opts.addStretch(1)
+        corr_lay.addLayout(corr_opts)
+
+        corr_run = QHBoxLayout()
+        self._assoc_run_btn = QPushButton("Rank Correlations")
+        self._assoc_run_btn.setStyleSheet(
+            "QPushButton { background:#1e3a5f; color:#fff; padding:4px 12px; border-radius:4px; }"
+            "QPushButton:hover { background:#1d4ed8; }"
+        )
+        corr_run.addWidget(self._assoc_run_btn)
+        corr_run.addStretch(1)
+        corr_lay.addLayout(corr_run)
+        self._assoc_run_btn.clicked.connect(self._run_assoc_correlations)
+        self._assoc_abs_spin.valueChanged.connect(
+            lambda *_: self._apply_assoc_corr_filter(self._assoc_corr_filter.text())
+        )
+        self._assoc_p_spin.valueChanged.connect(
+            lambda *_: self._apply_assoc_corr_filter(self._assoc_corr_filter.text())
+        )
+        self._assoc_topn_spin.valueChanged.connect(
+            lambda *_: self._apply_assoc_corr_filter(self._assoc_corr_filter.text())
+        )
+
+        lay.addWidget(corr_frame)
+
+        sep_pca = QFrame()
+        sep_pca.setFrameShape(QFrame.HLine)
+        sep_pca.setFrameShadow(QFrame.Plain)
+        sep_pca.setStyleSheet(f"color:{SEP};")
+        lay.addWidget(sep_pca)
+
+        pca_frame = QFrame()
+        pca_frame.setFrameShape(QFrame.StyledPanel)
+        pca_lay = QVBoxLayout(pca_frame)
+        pca_lay.setContentsMargins(6, 4, 6, 4)
+        pca_lay.setSpacing(4)
+
+        pca_opts = QHBoxLayout()
+        pca_opts.addWidget(QLabel("Min obs"))
+        self._assoc_pca_prop_spin = QDoubleSpinBox()
+        self._assoc_pca_prop_spin.setRange(0.05, 1.0)
+        self._assoc_pca_prop_spin.setDecimals(2)
+        self._assoc_pca_prop_spin.setSingleStep(0.05)
+        self._assoc_pca_prop_spin.setValue(1.0)
+        self._assoc_pca_prop_spin.setFixedWidth(64)
+        pca_opts.addWidget(self._assoc_pca_prop_spin)
+        pca_opts.addWidget(QLabel("Points"))
+        self._assoc_pca_points_combo = QComboBox()
+        self._assoc_pca_points_combo.addItem("Variables", "variable")
+        self._assoc_pca_points_combo.addItem("Observations", "observation")
+        self._assoc_pca_points_combo.setToolTip(
+            "Repeated mode only: choose whether PCA points represent variables or repeated-observation rows."
+        )
+        pca_opts.addWidget(self._assoc_pca_points_combo)
+        pca_opts.addStretch(1)
+        pca_lay.addLayout(pca_opts)
+
+        pca_opts2 = QHBoxLayout()
+        pca_opts2.addWidget(QLabel("Missing"))
+        self._assoc_pca_row_mode = QComboBox()
+        self._assoc_pca_row_mode.addItem("Drop incomplete rows", "complete")
+        self._assoc_pca_row_mode.addItem("Median-impute kept cols", "median")
+        self._assoc_pca_row_mode.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        pca_opts2.addWidget(self._assoc_pca_row_mode, 1)
+        pca_lay.addLayout(pca_opts2)
+
+        pca_opts3 = QHBoxLayout()
+        pca_opts3.addWidget(QLabel(""))
+        self._assoc_pca_standardize = QCheckBox("Standardize")
+        self._assoc_pca_standardize.setChecked(True)
+        pca_opts3.addWidget(self._assoc_pca_standardize)
+        pca_opts3.addStretch(1)
+        pca_lay.addLayout(pca_opts3)
+
+        pca_run = QHBoxLayout()
+        self._assoc_pca_btn = QPushButton("Fit PCA")
+        self._assoc_pca_btn.setStyleSheet(
+            "QPushButton { background:#166534; color:#fff; padding:4px 12px; border-radius:4px; }"
+            "QPushButton:hover { background:#15803d; }"
+        )
+        pca_run.addWidget(self._assoc_pca_btn)
+        pca_run.addStretch(1)
+        pca_lay.addLayout(pca_run)
+        self._assoc_pca_btn.clicked.connect(self._run_assoc_pca)
+
+        lay.addWidget(pca_frame)
+
+        self._assoc_status = QLabel("")
+        self._assoc_status.setWordWrap(True)
+        self._assoc_status.setStyleSheet(f"color:#888; font-size:11px;")
+        lay.addWidget(self._assoc_status)
+
+        self._assoc_mode_combo.currentIndexChanged.connect(self._on_assoc_mode_changed)
+        btn_rep_refresh.clicked.connect(self._refresh_assoc_repeated_sources)
+        self._assoc_rep_source_combo.currentIndexChanged.connect(self._on_assoc_repeated_source_changed)
+        self._assoc_rep_subject_combo.currentIndexChanged.connect(self._update_assoc_repeated_summary)
+        self._assoc_rep_key_list.itemSelectionChanged.connect(self._update_assoc_repeated_summary)
+        self._assoc_rep_metric_list.itemSelectionChanged.connect(self._on_assoc_repeated_metrics_changed)
+        self._assoc_rep_meta_list.itemSelectionChanged.connect(self._on_assoc_repeated_meta_changed)
+        self._assoc_rep_filter_table.itemChanged.connect(lambda *_: self._update_assoc_repeated_summary())
+
+        lay.addStretch(1)
+        return w
+
+    def _build_assoc_results_panel(self):
+        from .mplcanvas import MplCanvas
+
+        frame = QFrame()
+        frame.setFrameShape(QFrame.NoFrame)
+        lay = QVBoxLayout(frame)
+        lay.setContentsMargins(2, 2, 2, 2)
+        lay.setSpacing(3)
+
+        self._assoc_view_tabs = QTabWidget()
+        self._assoc_view_tabs.setDocumentMode(True)
+        lay.addWidget(self._assoc_view_tabs, 1)
+
+        corr_tab = QWidget()
+        corr_lay = QVBoxLayout(corr_tab)
+        corr_lay.setContentsMargins(0, 0, 0, 0)
+        corr_lay.setSpacing(3)
+
+        corr_hdr = QHBoxLayout()
+        self._assoc_corr_filter = QLineEdit()
+        self._assoc_corr_filter.setPlaceholderText("filter correlations…")
+        self._assoc_corr_filter.setClearButtonEnabled(True)
+        self._assoc_corr_filter.setFixedWidth(180)
+        self._assoc_ranked_btn = QPushButton("Ranked")
+        self._assoc_scatter_btn = QPushButton("Scatter")
+        for btn in (self._assoc_ranked_btn, self._assoc_scatter_btn):
+            btn.setCheckable(True)
+            btn.setFixedWidth(72)
+            btn.setStyleSheet(
+                "QPushButton { padding:2px 6px; font-size:10px; border:1px solid #333; }"
+                "QPushButton:checked { background:#1e3a5f; color:#fff; border-color:#4cc9f0; }"
+            )
+        self._assoc_ranked_btn.setChecked(True)
+        btn_export_corr = QPushButton("Export…")
+        btn_export_corr.setFixedWidth(70)
+        corr_hdr.addWidget(QLabel("Correlations"))
+        corr_hdr.addStretch(1)
+        corr_hdr.addWidget(self._assoc_ranked_btn)
+        corr_hdr.addWidget(self._assoc_scatter_btn)
+        corr_hdr.addWidget(self._assoc_corr_filter)
+        corr_hdr.addWidget(btn_export_corr)
+        corr_lay.addLayout(corr_hdr)
+
+        corr_split = QSplitter(Qt.Vertical)
+        corr_split.setHandleWidth(4)
+        self._assoc_corr_view = QTableView()
+        self._assoc_corr_view.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._assoc_corr_view.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self._assoc_corr_view.setSortingEnabled(True)
+        self._assoc_corr_view.horizontalHeader().setStretchLastSection(True)
+        self._assoc_corr_view.verticalHeader().setVisible(False)
+        self._assoc_corr_view.setAlternatingRowColors(True)
+        corr_split.addWidget(self._assoc_corr_view)
+
+        self._assoc_corr_canvas = MplCanvas()
+        self._assoc_corr_canvas.figure.patch.set_facecolor(BG)
+        corr_split.addWidget(self._assoc_corr_canvas)
+        corr_split.setSizes([230, 320])
+        corr_lay.addWidget(corr_split, 1)
+
+        pca_tab = QWidget()
+        pca_tab.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        pca_lay = QVBoxLayout(pca_tab)
+        pca_lay.setContentsMargins(0, 0, 0, 0)
+        pca_lay.setSpacing(3)
+
+        pca_hdr = QHBoxLayout()
+        self._assoc_pca_summary = QLabel("No PCA fit yet.")
+        self._assoc_pca_summary.setStyleSheet(f"color:#888; font-size:11px;")
+        self._assoc_pca_filter = QLineEdit()
+        self._assoc_pca_filter.setPlaceholderText("filter PCA loadings…")
+        self._assoc_pca_filter.setClearButtonEnabled(True)
+        self._assoc_pca_filter.setFixedWidth(140)
+        self._assoc_pca_x_combo = QComboBox()
+        self._assoc_pca_y_combo = QComboBox()
+        self._assoc_pca_color_combo = QComboBox()
+        for combo in (self._assoc_pca_x_combo, self._assoc_pca_y_combo):
+            combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+            combo.setMinimumContentsLength(8)
+            combo.setFixedWidth(112)
+        self._assoc_pca_color_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self._assoc_pca_color_combo.setMinimumContentsLength(10)
+        self._assoc_pca_color_combo.setFixedWidth(140)
+        self._assoc_pca_x_combo.currentIndexChanged.connect(self._render_assoc_pca_plot)
+        self._assoc_pca_y_combo.currentIndexChanged.connect(self._render_assoc_pca_plot)
+        self._assoc_pca_color_combo.currentIndexChanged.connect(self._render_assoc_pca_plot)
+        btn_export_pca = QPushButton("Export…")
+        btn_export_pca.setFixedWidth(70)
+        pca_hdr.addWidget(self._assoc_pca_summary, 1)
+        pca_hdr.addWidget(QLabel("X"))
+        pca_hdr.addWidget(self._assoc_pca_x_combo)
+        pca_hdr.addWidget(QLabel("Y"))
+        pca_hdr.addWidget(self._assoc_pca_y_combo)
+        pca_hdr.addWidget(QLabel("Color"))
+        pca_hdr.addWidget(self._assoc_pca_color_combo)
+        pca_hdr.addWidget(self._assoc_pca_filter)
+        pca_hdr.addWidget(btn_export_pca)
+        pca_lay.addLayout(pca_hdr)
+
+        pca_split = QSplitter(Qt.Vertical)
+        pca_split.setHandleWidth(4)
+        self._assoc_pca_canvas = MplCanvas()
+        self._assoc_pca_canvas.figure.patch.set_facecolor(BG)
+        pca_split.addWidget(self._assoc_pca_canvas)
+        self._assoc_pca_view = QTableView()
+        self._assoc_pca_view.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._assoc_pca_view.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self._assoc_pca_view.setSortingEnabled(True)
+        self._assoc_pca_view.horizontalHeader().setStretchLastSection(True)
+        self._assoc_pca_view.verticalHeader().setVisible(False)
+        self._assoc_pca_view.setAlternatingRowColors(True)
+        self._assoc_pca_view.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self._assoc_pca_view.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self._assoc_pca_view.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
+        pca_split.addWidget(self._assoc_pca_view)
+        pca_split.setSizes([320, 220])
+        pca_lay.addWidget(pca_split, 1)
+
+        self._assoc_view_tabs.addTab(corr_tab, "Correlations")
+        self._assoc_view_tabs.addTab(pca_tab, "PCA")
+
+        btn_export_corr.clicked.connect(lambda: save_table_as_tsv(self._assoc_corr_view, self))
+        btn_export_pca.clicked.connect(lambda: save_table_as_tsv(self._assoc_pca_view, self))
+        self._assoc_corr_filter.textChanged.connect(self._apply_assoc_corr_filter)
+        self._assoc_pca_filter.textChanged.connect(self._apply_assoc_pca_filter)
+        self._assoc_corr_view.clicked.connect(self._on_assoc_corr_row_clicked)
+        self._assoc_pca_view.clicked.connect(self._on_assoc_pca_row_clicked)
+        self._assoc_ranked_btn.clicked.connect(self._show_assoc_ranked_plot)
+        self._assoc_scatter_btn.clicked.connect(self._show_assoc_scatter_plot)
+        self._assoc_corr_canvas.mpl_connect("motion_notify_event", self._on_assoc_ranked_hover)
+        self._assoc_pca_canvas.mpl_connect("motion_notify_event", self._on_assoc_pca_hover)
+        self._assoc_pca_canvas.mpl_connect("button_press_event", self._on_assoc_pca_click)
+
+        return frame
+
     # ------------------------------------------------------------------
     # Manifest panel (right top)
     # ------------------------------------------------------------------
@@ -1452,18 +2460,20 @@ class GPATab(_ExplorerTab):
         # Toggle row (hidden until a scatter row is selected)
         toggle_row = QHBoxLayout()
         toggle_row.setContentsMargins(4, 2, 4, 0)
+        self._summary_btn         = QPushButton("Summary")
         self._scatter_raw_btn     = QPushButton("Raw")
         self._scatter_partial_btn = QPushButton("Partial")
         self._joint_mode_btn      = QPushButton("Joint")
-        for btn in (self._scatter_raw_btn, self._scatter_partial_btn, self._joint_mode_btn):
+        for btn in (self._summary_btn, self._scatter_raw_btn, self._scatter_partial_btn, self._joint_mode_btn):
             btn.setCheckable(True)
             btn.setFixedWidth(64)
             btn.setStyleSheet(
                 "QPushButton { padding:2px 6px; font-size:10px; border:1px solid #333; }"
                 "QPushButton:checked { background:#1e3a5f; color:#fff; border-color:#4cc9f0; }")
-        self._scatter_raw_btn.setChecked(True)
+        self._summary_btn.setChecked(True)
         self._joint_mode_btn.setEnabled(False)
         toggle_row.addWidget(QLabel("View:"))
+        toggle_row.addWidget(self._summary_btn)
         toggle_row.addWidget(self._scatter_raw_btn)
         toggle_row.addWidget(self._scatter_partial_btn)
         toggle_row.addWidget(self._joint_mode_btn)
@@ -1495,6 +2505,7 @@ class GPATab(_ExplorerTab):
             lambda: save_table_as_tsv(self._results_view, self))
         self._results_filter.textChanged.connect(self._apply_results_filter)
         self._results_view.clicked.connect(self._on_result_row_clicked)
+        self._summary_btn.clicked.connect(self._on_summary_clicked)
         self._scatter_raw_btn.clicked.connect(
             lambda: self._on_scatter_toggle(partial=False))
         self._scatter_partial_btn.clicked.connect(
@@ -1602,6 +2613,7 @@ class GPATab(_ExplorerTab):
                 "Could not read columns from:\n" + "\n".join(failed))
 
         self._files_list.setCurrentRow(self._files_list.count() - 1)
+        self._refresh_assoc_repeated_sources()
         self._sync_ui_to_json()
 
     def _add_one_source_file(self, fn, proj):
@@ -1671,6 +2683,7 @@ class GPATab(_ExplorerTab):
         self._files_list.takeItem(row)
         self._col_frame.setVisible(False)
         self._col_table_path = None
+        self._refresh_assoc_repeated_sources()
         self._sync_ui_to_json()
 
     def _item_key(self, item):
@@ -1930,6 +2943,7 @@ class GPATab(_ExplorerTab):
         cur = self._files_list.currentRow()
         if cur >= 0:
             self._on_file_selected(cur)
+        self._refresh_assoc_repeated_sources()
 
     def _save_json(self):
         fn, _ = save_file_name(
@@ -1972,7 +2986,14 @@ class GPATab(_ExplorerTab):
         fn, _ = open_file_name(
             self._root, "Open .dat file", "", "GPA binary (*.dat);;All files (*)")
         if fn:
-            edit.setText(fn)
+            self._set_dat_path(fn)
+
+    def _set_dat_path(self, path):
+        path = (path or "").strip()
+        if hasattr(self, "_dat_edit"):
+            self._dat_edit.setText(path)
+        if hasattr(self, "_assoc_dat_edit"):
+            self._assoc_dat_edit.setText(path)
 
     def _run_prep(self):
         dat_path = self._build_dat_edit.text().strip()
@@ -2133,7 +3154,12 @@ class GPATab(_ExplorerTab):
     # ======================================================================
 
     def _run_load_manifest(self):
-        dat_path = self._dat_edit.text().strip()
+        self._run_load_manifest_for(self._dat_edit.text().strip())
+
+    def _run_load_manifest_assoc(self):
+        self._run_load_manifest_for(self._assoc_dat_edit.text().strip())
+
+    def _run_load_manifest_for(self, dat_path):
         if not dat_path:
             QtWidgets.QMessageBox.warning(self._root, "GPA",
                                           "Set a .dat file path first.")
@@ -2146,6 +3172,9 @@ class GPATab(_ExplorerTab):
         if not self._start_work("Loading manifest…"):
             return
         self._analyze_status.setText("Loading manifest…")
+        if hasattr(self, "_assoc_status"):
+            self._assoc_status.setText("Loading manifest…")
+        self._set_dat_path(dat_path)
 
         fut = self.ctrl._exec.submit(self._manifest_worker, dat_path)
         def _done(_f=fut):
@@ -2188,6 +3217,626 @@ class GPATab(_ExplorerTab):
         n_ids  = int(df["NI"].iloc[1]) if "NI" in df.columns and len(df) > 1 else "?"
         self._manifest_desc.setText(f"{n_vars} variables  ·  N={n_ids}")
 
+    def _assoc_mode(self):
+        return str(getattr(self, "_assoc_mode_combo", None).currentData() or "standard")
+
+    def _assoc_is_repeated_mode(self):
+        return self._assoc_mode() == "repeated"
+
+    def _active_assoc_manifest_df(self):
+        if self._assoc_is_repeated_mode() and self._assoc_repeated_manifest_df is not None:
+            return self._assoc_repeated_manifest_df
+        return self._manifest_df
+
+    def _on_assoc_mode_changed(self, *_args):
+        repeated = self._assoc_is_repeated_mode()
+        self._assoc_standard_frame.setVisible(not repeated)
+        self._assoc_repeated_frame.setVisible(repeated)
+        self._assoc_pca_points_combo.setEnabled(repeated)
+        if repeated:
+            self._assoc_seed_picker.set_title("Seed metric")
+            self._assoc_seed_long_label.setText("Selected seed metric")
+            self._assoc_seed_long_label.setVisible(False)
+            self._assoc_seed_long_list.setVisible(False)
+        else:
+            self._assoc_seed_picker.set_title("Seed variable")
+            self._assoc_seed_long_label.setText("Actual seed variable")
+            self._assoc_seed_long_label.setVisible(True)
+            self._assoc_seed_long_list.setVisible(True)
+        self._clear_assoc_matrix_cache()
+        self._assoc_corr_df = pd.DataFrame()
+        self._assoc_pca_df = pd.DataFrame()
+        self._assoc_pca_result = None
+        self._populate_assoc_corr_table(pd.DataFrame())
+        self._populate_assoc_pca_table(pd.DataFrame())
+        self._populate_assoc_pca_color_combo()
+        if repeated:
+            self._refresh_assoc_repeated_sources()
+
+    def _refresh_assoc_repeated_sources(self):
+        combo = getattr(self, "_assoc_rep_source_combo", None)
+        if combo is None:
+            return
+        current = str(combo.currentData() or "")
+        combo.blockSignals(True)
+        combo.clear()
+        for i in range(self._files_list.count()):
+            item = self._files_list.item(i)
+            key = self._item_key(item)
+            combo.addItem(item.text(), key)
+        combo.blockSignals(False)
+        idx = 0
+        for i in range(combo.count()):
+            if str(combo.itemData(i) or "") == current:
+                idx = i
+                break
+        if combo.count():
+            combo.setCurrentIndex(idx)
+        self._on_assoc_repeated_source_changed()
+
+    def _assoc_repeated_selected_key(self):
+        return str(self._assoc_rep_source_combo.currentData() or "").strip()
+
+    def _assoc_repeated_assignment(self):
+        return self._col_assignments.get(self._assoc_repeated_selected_key(), {})
+
+    def _assoc_repeated_source_parts(self):
+        key = self._assoc_repeated_selected_key()
+        if not key:
+            return "", None
+        if "::" in key:
+            path, member = key.split("::", 1)
+            return path, member
+        return key, None
+
+    def _on_assoc_repeated_source_changed(self, *_args):
+        asgn = self._assoc_repeated_assignment()
+        preview = asgn.get("_df_preview")
+        columns = list(preview.columns) if isinstance(preview, pd.DataFrame) else []
+        roles = asgn.get("_roles", {})
+
+        self._assoc_rep_subject_combo.blockSignals(True)
+        self._assoc_rep_subject_combo.clear()
+        id_candidates = [col for col in columns if roles.get(col) == "ID"] or [col for col in columns if str(col).upper() == "ID"] or columns[:1]
+        for col in columns:
+            self._assoc_rep_subject_combo.addItem(str(col), str(col))
+        if id_candidates:
+            wanted = str(id_candidates[0])
+            for i in range(self._assoc_rep_subject_combo.count()):
+                if str(self._assoc_rep_subject_combo.itemData(i) or "") == wanted:
+                    self._assoc_rep_subject_combo.setCurrentIndex(i)
+                    break
+        self._assoc_rep_subject_combo.blockSignals(False)
+
+        def _fill_list(widget, selected):
+            widget.blockSignals(True)
+            widget.clear()
+            for col in columns:
+                item = QListWidgetItem(str(col))
+                widget.addItem(item)
+                if col in selected:
+                    item.setSelected(True)
+            widget.blockSignals(False)
+
+        fac_cols = [col for col in columns if roles.get(col) == "FAC"]
+        var_cols = [col for col in columns if roles.get(col) == "VAR"]
+        if not var_cols:
+            var_cols = [
+                col for col in columns
+                if col not in id_candidates and pd.to_numeric(preview[col], errors="coerce").notna().mean() >= 0.5
+            ] if isinstance(preview, pd.DataFrame) else []
+        non_factor_cols = [col for col in columns if col not in id_candidates and roles.get(col) != "FAC"]
+        default_metric = var_cols or non_factor_cols
+        _fill_list(self._assoc_rep_key_list, fac_cols)
+        _fill_list(self._assoc_rep_metric_list, default_metric)
+        _fill_list(self._assoc_rep_meta_list, [])
+        self._rebuild_assoc_repeated_filter_rows()
+        self._on_assoc_repeated_metrics_changed()
+
+    def _selected_list_values(self, widget):
+        return [item.text() for item in widget.selectedItems()]
+
+    def _rebuild_assoc_repeated_filter_rows(self):
+        meta_cols = self._selected_list_values(self._assoc_rep_meta_list)
+        existing = {}
+        for row in range(self._assoc_rep_filter_table.rowCount()):
+            key_item = self._assoc_rep_filter_table.item(row, 0)
+            val_item = self._assoc_rep_filter_table.item(row, 1)
+            if key_item is not None and val_item is not None:
+                existing[key_item.text()] = val_item.text()
+        self._assoc_rep_filter_table.blockSignals(True)
+        self._assoc_rep_filter_table.setRowCount(0)
+        for col in meta_cols:
+            row = self._assoc_rep_filter_table.rowCount()
+            self._assoc_rep_filter_table.insertRow(row)
+            name_item = QTableWidgetItem(col)
+            name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
+            self._assoc_rep_filter_table.setItem(row, 0, name_item)
+            value_item = QTableWidgetItem(existing.get(col, ""))
+            value_item.setToolTip("Comma-separated values to keep, e.g. Cz,Pz or N2,N3")
+            self._assoc_rep_filter_table.setItem(row, 1, value_item)
+        self._assoc_rep_filter_table.blockSignals(False)
+
+    def _on_assoc_repeated_metrics_changed(self):
+        metric_cols = self._selected_list_values(self._assoc_rep_metric_list)
+        self._assoc_repeated_metric_cols = metric_cols
+        self._assoc_repeated_manifest_df = _repeated_manifest_from_columns(
+            metric_cols, meta_cols=self._selected_list_values(self._assoc_rep_meta_list)
+        )
+        self._assoc_seed_picker.populate(self._assoc_repeated_manifest_df)
+        self._assoc_pool_picker.populate(self._assoc_repeated_manifest_df)
+        self._populate_assoc_pca_color_combo()
+        self._refresh_assoc_seed_long_list(preferred=self._assoc_seed_long)
+        self._update_assoc_repeated_summary()
+
+    def _on_assoc_repeated_meta_changed(self):
+        self._assoc_repeated_meta_cols = self._selected_list_values(self._assoc_rep_meta_list)
+        self._rebuild_assoc_repeated_filter_rows()
+        self._on_assoc_repeated_metrics_changed()
+
+    def _assoc_repeated_filter_map(self):
+        filters = {}
+        for row in range(self._assoc_rep_filter_table.rowCount()):
+            key_item = self._assoc_rep_filter_table.item(row, 0)
+            val_item = self._assoc_rep_filter_table.item(row, 1)
+            if key_item is None or val_item is None:
+                continue
+            vals = [part.strip() for part in val_item.text().split(",") if part.strip()]
+            if vals:
+                filters[key_item.text()] = vals
+        return filters
+
+    def _update_assoc_repeated_summary(self):
+        summary = []
+        subject_id_col = str(self._assoc_rep_subject_combo.currentData() or "")
+        if subject_id_col:
+            summary.append(f"subject={subject_id_col}")
+        key_cols = self._selected_list_values(self._assoc_rep_key_list)
+        metric_cols = self._selected_list_values(self._assoc_rep_metric_list)
+        meta_cols = self._selected_list_values(self._assoc_rep_meta_list)
+        if key_cols:
+            summary.append("key=" + ",".join(key_cols))
+        if metric_cols:
+            summary.append(f"metrics={len(metric_cols)}")
+        if meta_cols:
+            summary.append(f"meta={len(meta_cols)}")
+        filt = self._assoc_repeated_filter_map()
+        if filt:
+            summary.append("filters=" + " ; ".join(f"{k}={','.join(v)}" for k, v in filt.items()))
+        self._assoc_rep_summary.setText("  ·  ".join(summary))
+
+    def _assoc_candidate_long_names(self):
+        selected = self._assoc_pool_picker.selected_long_names()
+        if selected:
+            return selected
+        return self._manifest_long_names()
+
+    def _manifest_long_names(self):
+        meta = _manifest_var_frame(self._active_assoc_manifest_df())
+        if meta.empty:
+            return []
+        return meta["VAR"].astype(str).tolist()
+
+    def _manifest_meta_for_vars(self, long_vars=None):
+        meta = _manifest_var_frame(self._active_assoc_manifest_df())
+        if meta.empty or not long_vars:
+            return meta
+        return meta[meta["VAR"].isin(set(long_vars))].copy()
+
+    def _populate_assoc_pca_color_combo(self):
+        combo = getattr(self, "_assoc_pca_color_combo", None)
+        if combo is None:
+            return
+        combo.blockSignals(True)
+        current = str(combo.currentData() or "")
+        combo.clear()
+        combo.addItem("(none)", "none")
+        if self._assoc_is_repeated_mode():
+            point_kind = str((self._assoc_pca_result or {}).get("point_kind") or "")
+            if point_kind == "observation" and self._assoc_pca_df is not None and not self._assoc_pca_df.empty:
+                for col in self._assoc_pca_df.columns:
+                    if col.startswith("PC") or col == "RID":
+                        continue
+                    combo.addItem(col, col)
+        else:
+            combo.addItem("group", "group")
+            combo.addItem("base var", "base")
+            for col in _assoc_pca_color_fields(self._active_assoc_manifest_df()):
+                combo.addItem(col, col)
+        idx = 0
+        for i in range(combo.count()):
+            if str(combo.itemData(i) or "") == current:
+                idx = i
+                break
+        combo.setCurrentIndex(idx)
+        combo.blockSignals(False)
+
+    def _refresh_assoc_seed_long_list(self, preferred=""):
+        self._assoc_seed_long_list.blockSignals(True)
+        self._assoc_seed_long_list.clear()
+        longs = self._assoc_seed_picker.selected_long_names()
+        for name in longs:
+            self._assoc_seed_long_list.addItem(name)
+        idx = 0
+        if preferred:
+            for i in range(self._assoc_seed_long_list.count()):
+                item = self._assoc_seed_long_list.item(i)
+                if item is not None and item.text() == preferred:
+                    idx = i
+                    break
+        if self._assoc_seed_long_list.count():
+            self._assoc_seed_long_list.setCurrentRow(idx)
+            item = self._assoc_seed_long_list.currentItem()
+            self._assoc_seed_long = item.text() if item is not None else ""
+        else:
+            self._assoc_seed_long = ""
+        self._assoc_seed_long_list.blockSignals(False)
+
+    def _on_assoc_seed_picker_changed(self):
+        if self._assoc_is_repeated_mode():
+            longs = self._assoc_seed_picker.selected_long_names()
+            self._assoc_seed_long = str(longs[0]) if longs else ""
+        else:
+            self._refresh_assoc_seed_long_list()
+        self._maybe_auto_run_assoc_corr()
+
+    def _on_assoc_seed_long_row_changed(self, row):
+        if row < 0:
+            self._assoc_seed_long = ""
+            return
+        item = self._assoc_seed_long_list.item(row)
+        self._assoc_seed_long = item.text() if item is not None else ""
+        self._maybe_auto_run_assoc_corr()
+
+    def _maybe_auto_run_assoc_corr(self):
+        if self._assoc_suspend_auto_run:
+            return
+        if getattr(self.ctrl, "_busy", False):
+            return
+        if self._assoc_is_repeated_mode():
+            if not self._assoc_repeated_selected_key():
+                return
+        else:
+            dat_path = self._assoc_dat_edit.text().strip() or self._dat_edit.text().strip()
+            if not dat_path or not os.path.exists(dat_path):
+                return
+        if not self._assoc_seed_long:
+            return
+        self._run_assoc_correlations()
+
+    def _set_assoc_seed_variable(self, long_var: str, auto_run: bool = False):
+        long_var = str(long_var or "").strip()
+        manifest_df = self._active_assoc_manifest_df()
+        if not long_var or manifest_df is None or manifest_df.empty:
+            return
+        meta = _manifest_var_frame(manifest_df)
+        row = meta[meta["VAR"] == long_var]
+        if row.empty:
+            return
+        base = str(row.iloc[0]["BASE"])
+        self._assoc_suspend_auto_run = True
+        try:
+            self._assoc_seed_picker.set_selected([base])
+            self._refresh_assoc_seed_long_list(preferred=long_var)
+            self._assoc_seed_long = long_var
+        finally:
+            self._assoc_suspend_auto_run = False
+        if auto_run:
+            self._run_assoc_correlations()
+
+    def _collect_assoc_dump_filters(self):
+        if self._assoc_is_repeated_mode():
+            return {}
+        return self._joint_dump_filters()
+
+    def _clear_assoc_matrix_cache(self):
+        self._assoc_matrix_cache_key = None
+        self._assoc_matrix_cache_df = None
+
+    def _assoc_matrix_cache_payload(self, dat_path, requested_cols):
+        if self._assoc_is_repeated_mode():
+            key = (
+                "repeated",
+                self._assoc_repeated_selected_key(),
+                tuple(sorted(self._assoc_repeated_filter_map().items())),
+                tuple(_unique_preserve([str(col) for col in requested_cols if str(col).strip()])),
+                str(self._assoc_rep_subject_combo.currentData() or ""),
+                tuple(self._selected_list_values(self._assoc_rep_key_list)),
+                tuple(self._selected_list_values(self._assoc_rep_metric_list)),
+                tuple(self._selected_list_values(self._assoc_rep_meta_list)),
+            )
+            if self._assoc_matrix_cache_key == key and self._assoc_matrix_cache_df is not None:
+                return {"cache_key": key, "df": self._assoc_matrix_cache_df, "from_cache": True, "filters": {}}
+            return {"cache_key": key, "df": None, "from_cache": False, "filters": {}}
+        dump_filters = self._collect_assoc_dump_filters()
+        cache_key = _assoc_dump_cache_key(dat_path, requested_cols, dump_filters)
+        if self._assoc_matrix_cache_key == cache_key and self._assoc_matrix_cache_df is not None:
+            return {
+                "cache_key": cache_key,
+                "df": self._assoc_matrix_cache_df,
+                "from_cache": True,
+                "filters": dump_filters,
+            }
+        return {
+            "cache_key": cache_key,
+            "df": None,
+            "from_cache": False,
+            "filters": dump_filters,
+        }
+
+    def _store_assoc_matrix_cache(self, cache_key, df):
+        self._assoc_matrix_cache_key = cache_key
+        self._assoc_matrix_cache_df = df.copy() if df is not None else None
+
+    @staticmethod
+    def _assoc_matrix_worker(dat_path, candidates, dump_filters):
+        from lunapi import gpa_dump
+
+        cols = _unique_preserve(list(candidates))
+        dump_opts = dict(dump_filters or {})
+        dump_opts["lvars"] = ",".join(cols)
+        return gpa_dump(dat_path, **dump_opts)
+
+    @staticmethod
+    def _assoc_repeated_matrix_worker(source_path, member, subject_id_col, obs_key_cols, metric_cols, meta_cols, filters):
+        df = _full_source_table(source_path, member=member)
+        built = _build_repeated_matrix(
+            df,
+            subject_id_col=subject_id_col,
+            obs_key_cols=obs_key_cols,
+            metric_cols=metric_cols,
+            meta_cols=meta_cols,
+            filters=filters,
+        )
+        return built
+
+    def _run_assoc_correlations(self):
+        seed_var = str(self._assoc_seed_long or "").strip()
+        if not seed_var:
+            QtWidgets.QMessageBox.warning(self._root, "Assoc", "Select one seed variable first.")
+            return
+        candidates = self._assoc_candidate_long_names()
+        if not candidates:
+            QtWidgets.QMessageBox.warning(self._root, "Assoc", "No candidate variables available.")
+            return
+        if not self._start_work("Ranking correlations…"):
+            return
+        self._assoc_status.setText(f"Ranking correlations for {seed_var}…")
+        self._assoc_view_tabs.setCurrentIndex(0)
+        meta = self._manifest_meta_for_vars(_unique_preserve([seed_var] + candidates))
+        requested_cols = _unique_preserve([seed_var] + candidates)
+        dat_path = self._assoc_dat_edit.text().strip() or self._dat_edit.text().strip()
+        if not self._assoc_is_repeated_mode():
+            if not dat_path or not os.path.exists(dat_path):
+                self._end_work()
+                QtWidgets.QMessageBox.warning(self._root, "Assoc", "Load a valid .dat file first.")
+                return
+            self._set_dat_path(dat_path)
+        cache = self._assoc_matrix_cache_payload(dat_path, requested_cols)
+        if cache["from_cache"]:
+            fut = self.ctrl._exec.submit(
+                self._assoc_corr_from_df_worker,
+                cache["df"],
+                seed_var,
+                candidates,
+                meta,
+            )
+        else:
+            if self._assoc_is_repeated_mode():
+                source_path, member = self._assoc_repeated_source_parts()
+                if not source_path:
+                    self._end_work()
+                    QtWidgets.QMessageBox.warning(self._root, "Assoc", "Select one source table first.")
+                    return
+                subject_id_col = str(self._assoc_rep_subject_combo.currentData() or "")
+                obs_key_cols = self._selected_list_values(self._assoc_rep_key_list)
+                metric_cols = self._selected_list_values(self._assoc_rep_metric_list)
+                meta_cols = self._selected_list_values(self._assoc_rep_meta_list)
+                filters = self._assoc_repeated_filter_map()
+                fut = self.ctrl._exec.submit(
+                    self._assoc_repeated_corr_worker,
+                    source_path,
+                    member,
+                    subject_id_col,
+                    obs_key_cols,
+                    metric_cols,
+                    meta_cols,
+                    filters,
+                    seed_var,
+                    candidates,
+                    meta,
+                    cache["cache_key"],
+                )
+            else:
+                fut = self.ctrl._exec.submit(
+                    self._assoc_corr_worker,
+                    dat_path, seed_var, candidates, cache["filters"], meta, cache["cache_key"],
+                )
+        def _done(_f=fut):
+            try:
+                self._sig_ok.emit({"type": "assoc_corr", "result": _f.result()})
+            except Exception:
+                self._sig_err.emit({"type": "assoc", "traceback": traceback.format_exc()})
+        fut.add_done_callback(_done)
+
+    @staticmethod
+    def _assoc_corr_from_df_worker(raw_df, seed_var, candidates, meta_df):
+        cols = _unique_preserve([seed_var] + list(candidates))
+        present, missing = _present_columns(raw_df, cols)
+        if seed_var not in present:
+            raise ValueError(f"Seed variable was not returned from .dat: {seed_var}")
+        meta_use = meta_df[meta_df["VAR"].isin(present)].copy() if meta_df is not None and not meta_df.empty else meta_df
+        return {
+            "seed": seed_var,
+            "table": _rank_seed_correlations(raw_df, seed_var, present, meta_df=meta_use),
+            "row_count": int(len(raw_df)),
+            "missing": missing,
+        }
+
+    @staticmethod
+    def _assoc_corr_worker(dat_path, seed_var, candidates, dump_filters, meta_df, cache_key):
+        raw_df = GPATab._assoc_matrix_worker(dat_path, _unique_preserve([seed_var] + list(candidates)), dump_filters)
+        out = GPATab._assoc_corr_from_df_worker(raw_df, seed_var, candidates, meta_df)
+        out["cache_key"] = cache_key
+        out["raw_df"] = raw_df
+        return out
+
+    @staticmethod
+    def _assoc_repeated_corr_worker(
+        source_path,
+        member,
+        subject_id_col,
+        obs_key_cols,
+        metric_cols,
+        meta_cols,
+        filters,
+        seed_var,
+        candidates,
+        meta_df,
+        cache_key,
+    ):
+        built = GPATab._assoc_repeated_matrix_worker(
+            source_path, member, subject_id_col, obs_key_cols, metric_cols, meta_cols, filters
+        )
+        out = GPATab._assoc_corr_from_df_worker(built["matrix"], seed_var, candidates, meta_df)
+        out["cache_key"] = cache_key
+        out["raw_df"] = built["matrix"]
+        out["repeated_info"] = built
+        return out
+
+    def _run_assoc_pca(self):
+        candidates = self._assoc_candidate_long_names()
+        if len(candidates) < 2:
+            QtWidgets.QMessageBox.warning(self._root, "Assoc", "Need at least two variables for PCA.")
+            return
+        if not self._start_work("Fitting PCA…"):
+            return
+        self._assoc_status.setText(f"Fitting PCA on {len(candidates)} variable(s)…")
+        self._assoc_view_tabs.setCurrentIndex(1)
+        meta = self._manifest_meta_for_vars(candidates)
+        dat_path = self._assoc_dat_edit.text().strip() or self._dat_edit.text().strip()
+        if not self._assoc_is_repeated_mode():
+            if not dat_path or not os.path.exists(dat_path):
+                self._end_work()
+                QtWidgets.QMessageBox.warning(self._root, "Assoc", "Load a valid .dat file first.")
+                return
+            self._set_dat_path(dat_path)
+        cache = self._assoc_matrix_cache_payload(dat_path, candidates)
+        if cache["from_cache"]:
+            fut = self.ctrl._exec.submit(
+                self._assoc_pca_from_df_worker,
+                cache["df"],
+                candidates,
+                meta,
+                float(self._assoc_pca_prop_spin.value()),
+                str(self._assoc_pca_row_mode.currentData()),
+                bool(self._assoc_pca_standardize.isChecked()),
+                str(self._assoc_pca_points_combo.currentData() or "variable") if self._assoc_is_repeated_mode() else "variable",
+            )
+        else:
+            if self._assoc_is_repeated_mode():
+                source_path, member = self._assoc_repeated_source_parts()
+                if not source_path:
+                    self._end_work()
+                    QtWidgets.QMessageBox.warning(self._root, "Assoc", "Select one source table first.")
+                    return
+                fut = self.ctrl._exec.submit(
+                    self._assoc_repeated_pca_worker,
+                    source_path,
+                    member,
+                    str(self._assoc_rep_subject_combo.currentData() or ""),
+                    self._selected_list_values(self._assoc_rep_key_list),
+                    self._selected_list_values(self._assoc_rep_metric_list),
+                    self._selected_list_values(self._assoc_rep_meta_list),
+                    self._assoc_repeated_filter_map(),
+                    candidates,
+                    meta,
+                    float(self._assoc_pca_prop_spin.value()),
+                    str(self._assoc_pca_row_mode.currentData()),
+                    bool(self._assoc_pca_standardize.isChecked()),
+                    cache["cache_key"],
+                    str(self._assoc_pca_points_combo.currentData() or "variable"),
+                )
+            else:
+                fut = self.ctrl._exec.submit(
+                    self._assoc_pca_worker,
+                    dat_path, candidates, cache["filters"], meta,
+                    float(self._assoc_pca_prop_spin.value()),
+                    str(self._assoc_pca_row_mode.currentData()),
+                    bool(self._assoc_pca_standardize.isChecked()), cache["cache_key"], "variable",
+                )
+        def _done(_f=fut):
+            try:
+                self._sig_ok.emit({"type": "assoc_pca", "result": _f.result()})
+            except Exception:
+                self._sig_err.emit({"type": "assoc", "traceback": traceback.format_exc()})
+        fut.add_done_callback(_done)
+
+    @staticmethod
+    def _assoc_pca_from_df_worker(raw_df, candidates, meta_df, min_prop, row_mode, standardize, point_mode="variable"):
+        cols = _unique_preserve([str(col) for col in candidates if str(col).strip()])
+        present, missing = _present_columns(raw_df, cols)
+        if point_mode == "observation":
+            result = _fit_observation_pca(
+                raw_df.copy(),
+                present,
+                min_col_prop=min_prop,
+                row_mode=row_mode,
+                standardize=standardize,
+            )
+            result["loadings"] = result.pop("scores", pd.DataFrame())
+            result["point_kind"] = "observation"
+            result["point_label_col"] = "RID" if "RID" in result["loadings"].columns else ("ID" if "ID" in result["loadings"].columns else "")
+        else:
+            meta_use = meta_df[meta_df["VAR"].isin(present)].copy() if meta_df is not None and not meta_df.empty else meta_df
+            result = _fit_variable_pca(
+                raw_df[present].copy(),
+                meta_df=meta_use,
+                min_col_prop=min_prop,
+                row_mode=row_mode,
+                standardize=standardize,
+            )
+            result["point_kind"] = "variable"
+            result["point_label_col"] = "VAR"
+        result["missing_dump_cols"] = missing
+        return result
+
+    @staticmethod
+    def _assoc_pca_worker(dat_path, candidates, dump_filters, meta_df, min_prop, row_mode, standardize, cache_key, point_mode="variable"):
+        raw_df = GPATab._assoc_matrix_worker(dat_path, candidates, dump_filters)
+        result = GPATab._assoc_pca_from_df_worker(raw_df, candidates, meta_df, min_prop, row_mode, standardize, point_mode=point_mode)
+        result["cache_key"] = cache_key
+        result["raw_df"] = raw_df
+        return result
+
+    @staticmethod
+    def _assoc_repeated_pca_worker(
+        source_path,
+        member,
+        subject_id_col,
+        obs_key_cols,
+        metric_cols,
+        meta_cols,
+        filters,
+        candidates,
+        meta_df,
+        min_prop,
+        row_mode,
+        standardize,
+        cache_key,
+        point_mode,
+    ):
+        built = GPATab._assoc_repeated_matrix_worker(
+            source_path, member, subject_id_col, obs_key_cols, metric_cols, meta_cols, filters
+        )
+        result = GPATab._assoc_pca_from_df_worker(
+            built["matrix"], candidates, meta_df, min_prop, row_mode, standardize, point_mode=point_mode
+        )
+        result["cache_key"] = cache_key
+        result["raw_df"] = built["matrix"]
+        result["repeated_info"] = built
+        return result
+
     # ======================================================================
     # Analyze tab — run GPA
     # ======================================================================
@@ -2214,7 +3863,7 @@ class GPATab(_ExplorerTab):
         if not path:
             return
 
-        opts = {"dat": dat_path, "dump": "", "lvars": ",".join(all_vars)}
+        opts = _with_dump_qc_disabled({"dat": dat_path, "dump": "", "lvars": ",".join(all_vars)})
         np_txt = self._nprop_edit.text().strip()
         if np_txt:
             try:
@@ -2717,7 +4366,8 @@ class GPATab(_ExplorerTab):
         self._scatter_mode = False
         self._scatter_gen += 1
         self._scatter_toggle_widget.setVisible(False)
-        self._scatter_raw_btn.setChecked(True)
+        self._summary_btn.setChecked(True)
+        self._scatter_raw_btn.setChecked(False)
         self._scatter_partial_btn.setChecked(False)
         self._scatter_partial_btn.setEnabled(True)
         self._joint_mode_btn.setChecked(False)
@@ -2900,7 +4550,7 @@ class GPATab(_ExplorerTab):
         for key in ("subset", "inc-ids", "ex-ids", "n-prop", "n-req", "knn", "winsor"):
             if key in opts and opts[key] not in (None, ""):
                 keep[key] = opts[key]
-        return keep
+        return _with_dump_qc_disabled(keep)
 
     def _start_joint_fit(self):
         self._joint_fit_gen += 1
@@ -2950,6 +4600,7 @@ class GPATab(_ExplorerTab):
             self._joint_zvars = list(req.get("z_vars") or [])
             self._joint_yvars = []
             self._pre_joint_status_text = self._analyze_status.text()
+            self._summary_btn.setChecked(False)
             self._joint_mode_btn.setChecked(True)
             self._scatter_raw_btn.setChecked(False)
             self._scatter_partial_btn.setChecked(False)
@@ -3053,7 +4704,8 @@ class GPATab(_ExplorerTab):
         self._scatter_mode = False
         self._scatter_gen += 1
         self._scatter_toggle_widget.setVisible(False)
-        self._scatter_raw_btn.setChecked(True)
+        self._summary_btn.setChecked(True)
+        self._scatter_raw_btn.setChecked(False)
         self._scatter_partial_btn.setChecked(False)
         self._scatter_partial_btn.setEnabled(True)
         self._results_view.clearSelection()
@@ -3070,12 +4722,32 @@ class GPATab(_ExplorerTab):
         self._update_joint_controls_visibility()
         self._render_timer.start()
 
+    @staticmethod
+    def _reorder_result_cols(cols):
+        """Return cols reordered: X Y | B | P P_* | stat cols | GROUP strata."""
+        _KNOWN_STATS = {"SE", "T", "Z", "STAT", "N", "NOBS", "OBS", "DF", "R2",
+                        "OR", "HR", "CI_LO", "CI_HI", "CI_LOW", "CI_HIGH"}
+        cols = [c for c in cols if c != "ID"]
+        col_set = set(cols)
+
+        def _pick(*names):
+            return [n for n in names if n in col_set]
+
+        front  = _pick("X", "Y")
+        b_col  = _pick("B")
+        p_main = _pick("P")
+        p_adj  = [c for c in cols if c.startswith("P_")]
+        used   = set(front + b_col + p_main + p_adj)
+        stats  = [c for c in cols if c not in used and c in _KNOWN_STATS]
+        used  |= set(stats)
+        grp    = [c for c in cols if c not in used]
+        return front + b_col + p_main + p_adj + stats + grp
+
     def _fill_results_view(self, df):
         df_disp = df.copy()
         if "ID" in df_disp.columns:
-            id_vals = df_disp["ID"]
-            if id_vals.isna().all() or id_vals.astype(str).str.strip().eq("").all():
-                df_disp = df_disp.drop(columns=["ID"])
+            df_disp = df_disp.drop(columns=["ID"])
+        df_disp = df_disp[self._reorder_result_cols(list(df_disp.columns))]
         numeric_cols = {
             col: pd.to_numeric(df_disp[col], errors="coerce")
             for col in df_disp.columns
@@ -3117,6 +4789,526 @@ class GPATab(_ExplorerTab):
         if self._results_proxy:
             self._results_proxy.setFilterRegularExpression(
                 QRegularExpression(text, QRegularExpression.CaseInsensitiveOption))
+
+    def _populate_assoc_corr_table(self, df):
+        if not hasattr(self, "_assoc_corr_view"):
+            return
+        display_cols = [c for c in ["R", "ABS_R", "P", "N", "TARGET", "TARGET_BASE", "TARGET_GRP", "TARGET_NI"] if c in df.columns]
+        df_disp = df[display_cols].copy() if display_cols else df.copy()
+        model = QStandardItemModel(len(df_disp), len(df_disp.columns), self)
+        model.setHorizontalHeaderLabels(list(df_disp.columns))
+        numeric_cols = {"N", "R", "ABS_R", "P"}
+        for r in range(len(df_disp)):
+            row = df_disp.iloc[r]
+            for c, col in enumerate(df_disp.columns):
+                raw_val = row.iloc[c]
+                if col in numeric_cols:
+                    text = _fmt_float(raw_val)
+                else:
+                    text = "" if pd.isna(raw_val) else str(raw_val)
+                item = QStandardItem(text)
+                if col in numeric_cols and pd.notna(raw_val):
+                    item.setData(float(raw_val), Qt.UserRole)
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                model.setItem(r, c, item)
+        proxy = _GpaResultsSortProxy(self)
+        proxy.setSourceModel(model)
+        proxy.setFilterCaseSensitivity(Qt.CaseInsensitive)
+        proxy.setFilterKeyColumn(-1)
+        self._assoc_corr_view.setModel(proxy)
+        hdr = self._assoc_corr_view.horizontalHeader()
+        hdr.setSectionResizeMode(QHeaderView.Interactive)
+        for col_name, width in (("R", 70), ("ABS_R", 70), ("P", 80), ("N", 55), ("TARGET", 360), ("TARGET_BASE", 120), ("TARGET_GRP", 120), ("TARGET_NI", 70)):
+            if col_name in df_disp.columns:
+                idx = df_disp.columns.get_loc(col_name)
+                self._assoc_corr_view.setColumnWidth(idx, width)
+        hdr.setStretchLastSection(True)
+        self._assoc_corr_proxy = proxy
+        self._apply_assoc_corr_filter(self._assoc_corr_filter.text())
+        selection_model = self._assoc_corr_view.selectionModel()
+        if selection_model is not None:
+            selection_model.currentRowChanged.connect(
+                lambda cur, _prev: self._on_assoc_corr_row_changed(cur) if cur.isValid() else None
+            )
+
+    def _apply_assoc_corr_filter(self, text):
+        proxy = self._assoc_corr_proxy
+        if proxy is None:
+            return
+        df = self._assoc_corr_df
+        if df is None or df.empty:
+            proxy.setFilterRegularExpression(QRegularExpression())
+            return
+        abs_min = float(self._assoc_abs_spin.value())
+        p_max = float(self._assoc_p_spin.value())
+        top_n = int(self._assoc_topn_spin.value())
+        mask = pd.Series(True, index=df.index)
+        if "ABS_R" in df.columns:
+            mask &= pd.to_numeric(df["ABS_R"], errors="coerce").fillna(-1) >= abs_min
+        if "P" in df.columns and p_max < 1.0:
+            mask &= pd.to_numeric(df["P"], errors="coerce").fillna(np.inf) <= p_max
+        keep_rows = set(df.loc[mask].index[:top_n].tolist())
+        pattern = str(text or "").strip().lower()
+        source = proxy.sourceModel()
+        for row in range(source.rowCount()):
+            visible = row in keep_rows
+            if visible and pattern:
+                values = []
+                for col in range(source.columnCount()):
+                    values.append(str(source.item(row, col).text() or "").lower())
+                visible = any(pattern in value for value in values)
+            self._assoc_corr_view.setRowHidden(proxy.mapFromSource(source.index(row, 0)).row(), not visible)
+        self._render_assoc_corr_ranked()
+
+    def _render_assoc_corr_ranked(self):
+        canvas = self._assoc_corr_canvas
+        fig = canvas.figure
+        fig.clear()
+        fig.patch.set_facecolor(BG)
+        ax = fig.add_subplot(111)
+        ax.set_facecolor(BG)
+
+        df = self._filtered_assoc_corr_df()
+        if df.empty:
+            ax.text(0.5, 0.5, "No ranked correlations to display", color=FG,
+                    ha="center", va="center", transform=ax.transAxes)
+            ax.set_axis_off()
+            canvas.draw()
+            return
+
+        show = min(len(df), 40)
+        top = df.head(show).iloc[::-1]
+        colors = [_PALETTE[0] if float(v) >= 0 else _PALETTE[1] for v in top["R"].tolist()]
+        bars = ax.barh(np.arange(show), top["R"].to_numpy(dtype=float), color=colors, alpha=0.85)
+        labels = [str(v) for v in top["TARGET"].tolist()]
+        ax.set_yticks(np.arange(show))
+        ax.set_yticklabels(labels, color=FG, fontsize=7)
+        ax.axvline(0, color="#444", lw=0.6)
+        self._style_ax(ax, title=f"Top |r| hits for {self._assoc_seed_long or 'seed'}", xlabel="Correlation r")
+        self._assoc_ranked_bars = list(bars)
+        self._assoc_ranked_labels = labels
+        self._assoc_ranked_hover = ax.annotate(
+            "",
+            xy=(0, 0),
+            xytext=(8, 8),
+            textcoords="offset points",
+            color=FG,
+            fontsize=8,
+            bbox=dict(boxstyle="round,pad=0.2", fc="#111827", ec="#374151", alpha=0.95),
+        )
+        self._assoc_ranked_hover.set_visible(False)
+        try:
+            fig.tight_layout(pad=1.2)
+        except Exception:
+            pass
+        canvas.draw()
+
+    def _filtered_assoc_corr_df(self):
+        df = self._assoc_corr_df
+        if df is None or df.empty:
+            return pd.DataFrame()
+        abs_min = float(self._assoc_abs_spin.value())
+        p_max = float(self._assoc_p_spin.value())
+        top_n = int(self._assoc_topn_spin.value())
+        out = df.copy()
+        out = out[pd.to_numeric(out["ABS_R"], errors="coerce").fillna(-1) >= abs_min]
+        if p_max < 1.0:
+            out = out[pd.to_numeric(out["P"], errors="coerce").fillna(np.inf) <= p_max]
+        text = self._assoc_corr_filter.text().strip().lower()
+        if text:
+            mask = pd.Series(False, index=out.index)
+            for col in ("TARGET", "TARGET_BASE", "TARGET_GRP"):
+                if col in out.columns:
+                    mask |= out[col].astype(str).str.lower().str.contains(text, regex=False)
+            out = out[mask]
+        return out.head(top_n).reset_index(drop=True)
+
+    def _on_assoc_ranked_hover(self, event):
+        hover = self._assoc_ranked_hover
+        if hover is None or not self._assoc_ranked_bars:
+            return
+        ax = self._assoc_ranked_bars[0].axes if self._assoc_ranked_bars else None
+        if event.inaxes != ax:
+            if hover.get_visible():
+                hover.set_visible(False)
+                self._assoc_corr_canvas.draw_idle()
+            return
+        for idx, bar in enumerate(self._assoc_ranked_bars):
+            contains, _info = bar.contains(event)
+            if not contains:
+                continue
+            hover.xy = (bar.get_width(), bar.get_y() + bar.get_height() * 0.5)
+            hover.set_text(self._assoc_ranked_labels[idx] if idx < len(self._assoc_ranked_labels) else "")
+            hover.set_visible(True)
+            self._assoc_corr_canvas.draw_idle()
+            return
+        if hover.get_visible():
+            hover.set_visible(False)
+            self._assoc_corr_canvas.draw_idle()
+
+    def _show_assoc_ranked_plot(self):
+        self._assoc_plot_mode = "ranked"
+        self._assoc_ranked_btn.setChecked(True)
+        self._assoc_scatter_btn.setChecked(False)
+        self._render_assoc_corr_ranked()
+
+    def _show_assoc_scatter_plot(self):
+        if not (self._assoc_scatter_seed and self._assoc_scatter_target):
+            self._assoc_plot_mode = "ranked"
+            self._assoc_ranked_btn.setChecked(True)
+            self._assoc_scatter_btn.setChecked(False)
+            self._render_assoc_corr_ranked()
+            return
+        self._assoc_plot_mode = "scatter"
+        self._assoc_ranked_btn.setChecked(False)
+        self._assoc_scatter_btn.setChecked(True)
+        self._request_assoc_scatter(self._assoc_scatter_seed, self._assoc_scatter_target)
+
+    def _on_assoc_corr_row_changed(self, index):
+        proxy = self._assoc_corr_proxy
+        if proxy is None:
+            return
+        src = proxy.mapToSource(index)
+        model = proxy.sourceModel()
+        headers = [str(model.headerData(c, Qt.Horizontal) or "") for c in range(model.columnCount())]
+        if "TARGET" not in headers:
+            return
+        self._assoc_scatter_seed = self._assoc_seed_long
+        self._assoc_scatter_target = model.item(src.row(), headers.index("TARGET")).text()
+        self._show_assoc_scatter_plot()
+
+    def _on_assoc_corr_row_clicked(self, index):
+        self._on_assoc_corr_row_changed(index)
+
+    def _request_assoc_scatter(self, seed_var, target_var):
+        dat_path = self._assoc_dat_edit.text().strip() or self._dat_edit.text().strip()
+        candidates = self._assoc_candidate_long_names()
+        cache = self._assoc_matrix_cache_payload(dat_path, candidates)
+        if cache["from_cache"] and all(col in cache["df"].columns for col in [seed_var, target_var]):
+            fut = self.ctrl._exec.submit(
+                self._assoc_scatter_from_df_worker, cache["df"], seed_var, target_var
+            )
+        else:
+            if self._assoc_is_repeated_mode():
+                return
+            if not dat_path or not os.path.exists(dat_path):
+                return
+            fut = self.ctrl._exec.submit(
+                self._scatter_worker, dat_path, seed_var, target_var, [], cache["filters"]
+            )
+        def _done(_f=fut):
+            try:
+                ids, xs, ys, xs_group = _f.result()
+                self._sig_ok.emit({
+                    "type": "assoc_scatter",
+                    "result": (ids, xs, ys, xs_group, seed_var, target_var, False),
+                })
+            except Exception:
+                self._sig_err.emit({"type": "assoc", "traceback": traceback.format_exc()})
+        fut.add_done_callback(_done)
+
+    @staticmethod
+    def _assoc_scatter_from_df_worker(raw_df, seed_var, target_var):
+        work = raw_df.copy()
+        for col in [seed_var, target_var]:
+            if col in work.columns:
+                work[col] = pd.to_numeric(work[col], errors="coerce")
+        missing = [c for c in [seed_var, target_var] if c not in work.columns]
+        if missing:
+            raise ValueError(f"Columns not found in cached matrix: {', '.join(missing)}")
+        work = work.dropna(subset=[seed_var, target_var])
+        ids_raw = work["ID"].tolist() if "ID" in work.columns else list(range(len(work)))
+        return ids_raw, work[seed_var].tolist(), work[target_var].tolist(), work[seed_var].tolist()
+
+    def _render_assoc_scatter(self, xs, ys, x_var, y_var):
+        canvas = self._assoc_corr_canvas
+        fig = canvas.figure
+        fig.clear()
+        fig.patch.set_facecolor(BG)
+        ax = fig.add_subplot(111)
+        ax.set_facecolor(BG)
+        xs = np.asarray(xs, dtype=float)
+        ys = np.asarray(ys, dtype=float)
+        valid = np.isfinite(xs) & np.isfinite(ys)
+        xs = xs[valid]
+        ys = ys[valid]
+        if len(xs) == 0:
+            ax.text(0.5, 0.5, "No complete pairwise observations", color=FG,
+                    ha="center", va="center", transform=ax.transAxes)
+            ax.set_axis_off()
+            canvas.draw()
+            return
+        xs_z = (xs - xs.mean()) / (xs.std() + 1e-12)
+        ys_z = (ys - ys.mean()) / (ys.std() + 1e-12)
+        r = _safe_corrcoef(xs_z, ys_z)
+        ax.scatter(xs_z, ys_z, s=8, alpha=0.55, color=_PALETTE[0], linewidths=0)
+        if len(xs_z) > 1:
+            slope, intercept = np.polyfit(xs_z, ys_z, 1)
+            line_x = np.array([xs_z.min(), xs_z.max()])
+            ax.plot(line_x, slope * line_x + intercept, color=_PALETTE[1], lw=1.2)
+        ax.axhline(0, color="#444", lw=0.5)
+        ax.axvline(0, color="#444", lw=0.5)
+        self._style_ax(
+            ax,
+            title=f"{x_var} × {y_var}  ·  r={_fmt_float(r)}  ·  N={len(xs_z)}",
+            xlabel=x_var,
+            ylabel=y_var,
+        )
+        try:
+            fig.tight_layout(pad=1.2)
+        except Exception:
+            pass
+        canvas.draw()
+
+    def _populate_assoc_pca_table(self, df):
+        if not hasattr(self, "_assoc_pca_view"):
+            return
+        model = QStandardItemModel(len(df), len(df.columns), self)
+        model.setHorizontalHeaderLabels(list(df.columns))
+        for r in range(len(df)):
+            row = df.iloc[r]
+            for c, col in enumerate(df.columns):
+                raw_val = row.iloc[c]
+                text = _fmt_float(raw_val) if col.startswith("PC") else ("" if pd.isna(raw_val) else str(raw_val))
+                item = QStandardItem(text)
+                if col.startswith("PC") and pd.notna(raw_val):
+                    item.setData(float(raw_val), Qt.UserRole)
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                model.setItem(r, c, item)
+        proxy = _GpaResultsSortProxy(self)
+        proxy.setSourceModel(model)
+        proxy.setFilterCaseSensitivity(Qt.CaseInsensitive)
+        proxy.setFilterKeyColumn(-1)
+        self._assoc_pca_view.setModel(proxy)
+        hdr = self._assoc_pca_view.horizontalHeader()
+        hdr.setSectionResizeMode(QHeaderView.Interactive)
+        hdr.setMinimumSectionSize(48)
+        for idx, col in enumerate(df.columns):
+            if col == "VAR":
+                width = 320
+            elif col == "RID":
+                width = 220
+            elif col == "ID":
+                width = 90
+            elif col == "BASE":
+                width = 120
+            elif col == "GRP":
+                width = 90
+            elif col == "NI":
+                width = 60
+            elif col.startswith("PC"):
+                width = 88
+            else:
+                width = 110
+            self._assoc_pca_view.setColumnWidth(idx, width)
+        hdr.setStretchLastSection(False)
+        self._assoc_pca_proxy = proxy
+        self._apply_assoc_pca_filter(self._assoc_pca_filter.text())
+
+    def _apply_assoc_pca_filter(self, text):
+        if self._assoc_pca_proxy:
+            self._assoc_pca_proxy.setFilterRegularExpression(
+                QRegularExpression(text, QRegularExpression.CaseInsensitiveOption)
+            )
+
+    def _render_assoc_pca_plot(self, *_args):
+        from matplotlib import colormaps
+        from matplotlib.cm import ScalarMappable
+        from matplotlib.colors import Normalize
+        from matplotlib.lines import Line2D
+
+        canvas = self._assoc_pca_canvas
+        fig = canvas.figure
+        fig.clear()
+        fig.patch.set_facecolor(BG)
+        ax = fig.add_subplot(111)
+        ax.set_facecolor(BG)
+
+        df = self._assoc_pca_df
+        if df is None or df.empty:
+            ax.text(0.5, 0.5, "No PCA results to display", color=FG,
+                    ha="center", va="center", transform=ax.transAxes)
+            ax.set_axis_off()
+            canvas.draw()
+            return
+
+        x_col = str(self._assoc_pca_x_combo.currentData() or "")
+        y_col = str(self._assoc_pca_y_combo.currentData() or "")
+        if not x_col or not y_col or x_col not in df.columns or y_col not in df.columns:
+            ax.text(0.5, 0.5, "Select PCA components to plot", color=FG,
+                    ha="center", va="center", transform=ax.transAxes)
+            ax.set_axis_off()
+            canvas.draw()
+            return
+
+        xs = pd.to_numeric(df[x_col], errors="coerce").to_numpy(dtype=float)
+        ys = pd.to_numeric(df[y_col], errors="coerce").to_numpy(dtype=float)
+        valid = np.isfinite(xs) & np.isfinite(ys)
+        xs = xs[valid]
+        ys = ys[valid]
+        plot_df = df.loc[valid].copy()
+        label_col = str((self._assoc_pca_result or {}).get("point_label_col") or "")
+        if not label_col or label_col not in plot_df.columns:
+            if "VAR" in plot_df.columns:
+                label_col = "VAR"
+            elif "RID" in plot_df.columns:
+                label_col = "RID"
+            elif "ID" in plot_df.columns:
+                label_col = "ID"
+            else:
+                label_col = plot_df.columns[0]
+        labels = plot_df[label_col].astype(str).tolist()
+        self._assoc_pca_labels = labels
+        self._assoc_pca_xy = np.column_stack([xs, ys]) if len(xs) else np.empty((0, 2))
+        color_mode = str(self._assoc_pca_color_combo.currentData() or "none")
+        self._assoc_pca_artist = None
+        title_root = "Variable PCA map" if str((self._assoc_pca_result or {}).get("point_kind") or "variable") == "variable" else "Observation PCA map"
+        if color_mode == "none":
+            self._assoc_pca_artist = ax.scatter(xs, ys, s=14, alpha=0.7, color=_PALETTE[2], picker=True)
+        else:
+            if color_mode == "group":
+                values = plot_df["GRP"] if "GRP" in plot_df.columns else pd.Series(["."] * len(plot_df))
+                title_suffix = "colored by group"
+            elif color_mode == "base":
+                values = plot_df["BASE"] if "BASE" in plot_df.columns else plot_df["VAR"]
+                title_suffix = "colored by base var"
+            else:
+                values = plot_df[color_mode] if color_mode in plot_df.columns else pd.Series(["."] * len(plot_df))
+                title_suffix = f"colored by {color_mode}"
+            raw = values.astype(str).replace({"nan": ".", "None": "."})
+            missing_mask = raw.isin(["", "."])
+            numeric = pd.to_numeric(raw.where(~missing_mask), errors="coerce")
+            nonmissing = raw[~missing_mask]
+            uniq_count = int(nonmissing.nunique()) if len(nonmissing) else 0
+            if numeric.notna().sum() == (~missing_mask).sum() and uniq_count > 10:
+                cmap = colormaps["turbo"]
+                vals = numeric.to_numpy(dtype=float)
+                finite = np.isfinite(vals)
+                vmin = float(np.nanmin(vals[finite])) if np.any(finite) else 0.0
+                vmax = float(np.nanmax(vals[finite])) if np.any(finite) else 1.0
+                if vmin == vmax:
+                    vmax = vmin + 1.0
+                norm = Normalize(vmin=vmin, vmax=vmax)
+                colors = np.tile(np.array([[0.85, 0.85, 0.85, 1.0]]), (len(plot_df), 1))
+                for i, val in enumerate(vals):
+                    if np.isfinite(val):
+                        colors[i] = cmap(norm(val))
+                self._assoc_pca_artist = ax.scatter(xs, ys, s=14, alpha=0.8, c=colors, picker=True)
+                sm = ScalarMappable(norm=norm, cmap=cmap)
+                sm.set_array([])
+                cbar = fig.colorbar(sm, ax=ax, fraction=0.045, pad=0.02)
+                cbar.ax.tick_params(colors=FG, labelsize=7)
+                cbar.outline.set_edgecolor(GRID)
+                cbar.set_label(color_mode, color=FG, fontsize=8)
+                title_suffix += f" [{_fmt_float(vmin)}–{_fmt_float(vmax)}]"
+            else:
+                levels = sorted(nonmissing.unique().tolist())
+                palette_levels = levels[:10]
+                color_map = {level: _PALETTE[i % len(_PALETTE)] for i, level in enumerate(palette_levels)}
+                point_colors = []
+                for val, miss in zip(raw.tolist(), missing_mask.tolist()):
+                    if miss:
+                        point_colors.append("#d1d5db")
+                    elif val in color_map:
+                        point_colors.append(color_map[val])
+                    else:
+                        point_colors.append("#9ca3af")
+                self._assoc_pca_artist = ax.scatter(xs, ys, s=14, alpha=0.8, c=point_colors, picker=True)
+                handles = [
+                    Line2D([0], [0], marker="o", linestyle="none", markersize=5,
+                           markerfacecolor=color_map[level], markeredgecolor=color_map[level], label=str(level))
+                    for level in palette_levels
+                ]
+                if any(missing_mask):
+                    handles.append(
+                        Line2D([0], [0], marker="o", linestyle="none", markersize=5,
+                               markerfacecolor="#d1d5db", markeredgecolor="#d1d5db", label="missing")
+                    )
+                if len(levels) > 10:
+                    handles.append(
+                        Line2D([0], [0], marker="o", linestyle="none", markersize=5,
+                               markerfacecolor="#9ca3af", markeredgecolor="#9ca3af", label="other")
+                    )
+                leg = ax.legend(handles=handles, fontsize=7, framealpha=0.35,
+                                facecolor="#111827", edgecolor=GRID, loc="best", title=color_mode)
+                if leg is not None:
+                    leg.get_title().set_color(FG)
+                    for txt in leg.get_texts():
+                        txt.set_color(FG)
+            self._assoc_pca_artist = self._assoc_pca_artist or ax.scatter(xs, ys, s=14, alpha=0.7, color=_PALETTE[2], picker=True)
+        ax.axhline(0, color="#444", lw=0.5)
+        ax.axvline(0, color="#444", lw=0.5)
+        self._style_ax(
+            ax,
+            title=title_root + (f"  ·  {title_suffix}" if color_mode != "none" else ""),
+            xlabel=x_col,
+            ylabel=y_col,
+        )
+        self._assoc_pca_hover = ax.annotate(
+            "",
+            xy=(0, 0),
+            xytext=(8, 8),
+            textcoords="offset points",
+            color=FG,
+            fontsize=8,
+            bbox=dict(boxstyle="round,pad=0.2", fc="#111827", ec="#374151", alpha=0.95),
+        )
+        self._assoc_pca_hover.set_visible(False)
+        try:
+            fig.tight_layout(pad=1.2)
+        except Exception:
+            pass
+        canvas.draw()
+
+    def _on_assoc_pca_row_clicked(self, index):
+        if str((self._assoc_pca_result or {}).get("point_kind") or "variable") != "variable":
+            return
+        proxy = self._assoc_pca_proxy
+        if proxy is None:
+            return
+        src = proxy.mapToSource(index)
+        model = proxy.sourceModel()
+        headers = [str(model.headerData(c, Qt.Horizontal) or "") for c in range(model.columnCount())]
+        if "VAR" not in headers:
+            return
+        long_var = model.item(src.row(), headers.index("VAR")).text()
+        self._set_assoc_seed_variable(long_var)
+
+    def _on_assoc_pca_hover(self, event):
+        if self._assoc_pca_artist is None or self._assoc_pca_hover is None:
+            return
+        if event.inaxes != getattr(self._assoc_pca_artist, "axes", None):
+            if self._assoc_pca_hover.get_visible():
+                self._assoc_pca_hover.set_visible(False)
+                self._assoc_pca_canvas.draw_idle()
+            return
+        contains, info = self._assoc_pca_artist.contains(event)
+        if not contains:
+            if self._assoc_pca_hover.get_visible():
+                self._assoc_pca_hover.set_visible(False)
+                self._assoc_pca_canvas.draw_idle()
+            return
+        idx = int(info["ind"][0])
+        if self._assoc_pca_xy is None or idx >= len(self._assoc_pca_labels):
+            return
+        self._assoc_pca_hover.xy = tuple(self._assoc_pca_xy[idx])
+        self._assoc_pca_hover.set_text(self._assoc_pca_labels[idx])
+        self._assoc_pca_hover.set_visible(True)
+        self._assoc_pca_canvas.draw_idle()
+
+    def _on_assoc_pca_click(self, event):
+        if str((self._assoc_pca_result or {}).get("point_kind") or "variable") != "variable":
+            return
+        if event.button != 1 or self._assoc_pca_artist is None:
+            return
+        contains, info = self._assoc_pca_artist.contains(event)
+        if not contains:
+            return
+        idx = int(info["ind"][0])
+        if idx >= len(self._assoc_pca_labels):
+            return
+        self._assoc_view_tabs.setCurrentIndex(0)
+        self._set_assoc_seed_variable(self._assoc_pca_labels[idx], auto_run=True)
 
     # ======================================================================
     # Volcano / result visualization
@@ -3218,6 +5410,7 @@ class GPATab(_ExplorerTab):
         has_z = bool(self._last_gpa_z)
         self._update_joint_controls_visibility()
         self._scatter_partial_btn.setEnabled(has_z)
+        self._summary_btn.setChecked(False)
         if not has_z:
             self._scatter_raw_btn.setChecked(True)
             self._scatter_partial_btn.setChecked(False)
@@ -3229,10 +5422,29 @@ class GPATab(_ExplorerTab):
         """Raw / Partial button clicked — redraw with same X, Y."""
         if self._joint_mode:
             self._leave_joint_mode()
+        self._summary_btn.setChecked(False)
         self._scatter_raw_btn.setChecked(not partial)
         self._scatter_partial_btn.setChecked(partial)
         if self._scatter_xvar and self._scatter_yvar:
             self._request_scatter(self._scatter_xvar, self._scatter_yvar, partial=partial)
+
+    def _on_summary_clicked(self):
+        """Return to volcano plot from scatter or joint mode."""
+        if self._joint_mode:
+            self._joint_mode = False
+            self._joint_mode_btn.setChecked(False)
+            if self._pre_joint_status_text:
+                self._analyze_status.setText(self._pre_joint_status_text)
+            self._pre_joint_status_text = ""
+            self._update_joint_action_buttons()
+        self._scatter_mode = False
+        self._scatter_gen += 1
+        self._summary_btn.setChecked(True)
+        self._scatter_raw_btn.setChecked(False)
+        self._scatter_partial_btn.setChecked(False)
+        self._viz_stack.setCurrentIndex(0)
+        self._update_joint_controls_visibility()
+        self._render_timer.start()
 
     @staticmethod
     def _joint_model_worker(dat_path, x_var, y_vars, z_vars, dump_filters):
@@ -3246,13 +5458,17 @@ class GPATab(_ExplorerTab):
 
     def _request_scatter(self, x_var, y_var, partial=False):
         self._scatter_mode = True
+        self._summary_btn.setChecked(False)
         self._render_timer.stop()
         self._scatter_gen += 1
         gen = self._scatter_gen
         zvars = self._last_gpa_z if partial else []
+        dat_path = self._dat_edit.text().strip()
+        dump_filters = self._joint_dump_filters()
         self._analyze_status.setText(
             f"Loading {'partial ' if partial else ''}scatter: {x_var} × {y_var}…")
-        fut = self.ctrl._exec.submit(self._scatter_worker, x_var, y_var, zvars)
+        fut = self.ctrl._exec.submit(
+            self._scatter_worker, dat_path, x_var, y_var, zvars, dump_filters)
         def _done(_f=fut, _g=gen, _p=partial):
             try:
                 ids, xs_plot, ys_plot, xs_group = _f.result()
@@ -3265,23 +5481,55 @@ class GPATab(_ExplorerTab):
         fut.add_done_callback(_done)
 
     @staticmethod
-    def _scatter_worker(x_var, y_var, zvars):
+    def _scatter_worker(dat_path, x_var, y_var, zvars, dump_filters=None):
         """Return (ids, xs_plot, ys_plot, xs_group).
 
         xs_plot / ys_plot  — values used for axes (residualized when partial)
         xs_group           — raw X values used for group detection / box labelling
+
+        Uses gpa_dump to read from the .dat file directly so the call is safe
+        regardless of what the C-library's cached GPA state happens to be.
         """
-        from lunapi import gpa_get_xy
-        ids_raw, xs_raw, ys_raw = gpa_get_xy(x_var, y_var)
+        from lunapi import gpa_dump
+
+        cols = _unique_preserve([x_var, y_var] + list(zvars))
+        dump_opts = dict(dump_filters or {})
+        dump_opts["lvars"] = ",".join(cols)
+        raw_df = gpa_dump(dat_path, **dump_opts)
+
+        for col in cols:
+            if col in raw_df.columns:
+                raw_df[col] = pd.to_numeric(raw_df[col], errors="coerce")
+
+        missing = [c for c in [x_var, y_var] if c not in raw_df.columns]
+        if missing:
+            raise ValueError(f"Columns not found in .dat: {', '.join(missing)}")
+
+        raw_df = raw_df.dropna(subset=[x_var, y_var])
+        ids_raw = raw_df["ID"].tolist() if "ID" in raw_df.columns else list(range(len(raw_df)))
+        xs_raw  = raw_df[x_var].tolist()
+        ys_raw  = raw_df[y_var].tolist()
+
         if not zvars:
             return ids_raw, xs_raw, ys_raw, xs_raw
 
-        from lunapi import gpa_get_xy_partial
-        ids_p, xs_resid, ys_resid = gpa_get_xy_partial(x_var, y_var, zvars)
-        # align raw X to the (potentially smaller) partial ID set
-        raw_map = dict(zip(ids_raw, xs_raw))
-        xs_group = [raw_map.get(i, float("nan")) for i in ids_p]
-        return ids_p, xs_resid, ys_resid, xs_group
+        # Partial: residualize X and Y on Z via OLS
+        z_present = [z for z in zvars if z in raw_df.columns]
+        complete  = raw_df[[x_var, y_var] + z_present].notna().all(axis=1)
+        work      = raw_df[complete].copy()
+        ids_p     = work["ID"].tolist() if "ID" in work.columns else list(range(len(work)))
+        xs_raw_aligned = work[x_var].to_numpy(dtype=float)
+
+        def _resid(col):
+            y_arr = work[col].to_numpy(dtype=float)
+            if not z_present:
+                return y_arr.tolist()
+            Z = np.column_stack(
+                [np.ones(len(y_arr))] + [work[z].to_numpy(dtype=float) for z in z_present])
+            beta, *_ = np.linalg.lstsq(Z, y_arr, rcond=None)
+            return (y_arr - Z @ beta).tolist()
+
+        return ids_p, _resid(x_var), _resid(y_var), xs_raw_aligned.tolist()
 
     def _on_scatter_ok(self, payload):
         ids, xs_plot, ys_plot, xs_group, x_var, y_var, partial = payload
@@ -3349,7 +5597,7 @@ class GPATab(_ExplorerTab):
 
         # Pearson r from (residualized or raw) xs_plot vs ys_plot
         xs_z = (xs_plot - xs_plot.mean()) / (xs_plot.std() + 1e-12)
-        r = float(np.corrcoef(xs_z, ys_z)[0, 1]) if len(xs_z) > 1 else float("nan")
+        r = _safe_corrcoef(xs_z, ys_z)
         r_label = "r_partial" if partial else "r"
         r_str = f"{r:.3f}" if not np.isnan(r) else "n/a"
         n_total = sum(ns)
@@ -3379,7 +5627,7 @@ class GPATab(_ExplorerTab):
         xs_z = (xs - xs.mean()) / (xs.std() + 1e-12)
         ys_z = (ys - ys.mean()) / (ys.std() + 1e-12)
 
-        r = float(np.corrcoef(xs_z, ys_z)[0, 1]) if n > 1 else float("nan")
+        r = _safe_corrcoef(xs_z, ys_z)
         r_label = "r_partial" if partial else "r"
 
         ax.scatter(xs_z, ys_z, s=8, alpha=0.55, color=_PALETTE[0], linewidths=0)
@@ -3413,15 +5661,16 @@ class GPATab(_ExplorerTab):
 
     def _on_ok(self, payload):
         t = payload.get("type")
-        if t != "joint":
+        if t not in {"joint", "assoc_scatter"}:
             self._end_work()
         result = payload.get("result")
 
         if t == "prep":
             self._build_status.setText("Dataset built.")
+            self._clear_assoc_matrix_cache()
             dat = self._build_dat_edit.text().strip()
             if dat:
-                self._dat_edit.setText(dat)
+                self._set_dat_path(dat)
                 manifest_df = _parse_gpa_manifest_text(result)
                 if not manifest_df.empty:
                     try:
@@ -3431,24 +5680,35 @@ class GPATab(_ExplorerTab):
                     self._manifest_df = manifest_df
                     self._analyze_status.setText(
                         f"{len(manifest_df)} manifest row(s) loaded.")
+                    self._assoc_status.setText(
+                        f"{len(manifest_df)} manifest row(s) loaded.")
                     self._populate_manifest_table(manifest_df)
-                    for p in (self._picker_x, self._picker_y, self._picker_z):
+                    for p in (self._picker_x, self._picker_y, self._picker_z,
+                              self._assoc_seed_picker, self._assoc_pool_picker):
                         p.populate(manifest_df)
+                    self._populate_assoc_pca_color_combo()
                     self._update_selection_desc()
+                    self._refresh_assoc_seed_long_list()
                 else:
                     # Fall back to the engine-derived manifest if prep did not
                     # return one for some reason.
                     self._run_load_manifest()
 
         elif t == "manifest":
+            self._clear_assoc_matrix_cache()
             self._manifest_df = result
             self._analyze_status.setText(
                 f"{len(result)} variables loaded." if result is not None else "Manifest empty.")
+            self._assoc_status.setText(
+                f"{len(result)} variables loaded." if result is not None else "Manifest empty.")
             if result is not None and not result.empty:
                 self._populate_manifest_table(result)
-                for p in (self._picker_x, self._picker_y, self._picker_z):
+                for p in (self._picker_x, self._picker_y, self._picker_z,
+                          self._assoc_seed_picker, self._assoc_pool_picker):
                     p.populate(result)
+                self._populate_assoc_pca_color_combo()
                 self._update_selection_desc()
+                self._refresh_assoc_seed_long_list(preferred=self._assoc_seed_long)
 
         elif t == "gpa":
             diag = {}
@@ -3498,11 +5758,103 @@ class GPATab(_ExplorerTab):
                 QtWidgets.QMessageBox.critical(
                     self._root, "GPA dump", f"Failed to save file:\n{exc}")
 
-    def _on_err(self, tb):
+        elif t == "assoc_corr":
+            table = (result or {}).get("table")
+            seed = (result or {}).get("seed", "")
+            row_count = int((result or {}).get("row_count", 0))
+            missing = (result or {}).get("missing") or []
+            repeated_info = (result or {}).get("repeated_info") or {}
+            raw_df = (result or {}).get("raw_df")
+            cache_key = (result or {}).get("cache_key")
+            if raw_df is not None and cache_key is not None:
+                self._store_assoc_matrix_cache(cache_key, raw_df)
+            self._assoc_repeated_row_info = repeated_info
+            self._assoc_corr_df = table if isinstance(table, pd.DataFrame) else pd.DataFrame()
+            self._populate_assoc_corr_table(self._assoc_corr_df)
+            shown = len(self._filtered_assoc_corr_df())
+            status = f"{seed}: {len(self._assoc_corr_df)} correlations computed from {row_count} rows; showing {shown}."
+            if missing:
+                status += f"  Dropped {len(missing)} unavailable variables."
+            if repeated_info:
+                status += (
+                    f"  Subjects={repeated_info.get('subject_count', 0)}"
+                    f"  Key={','.join(repeated_info.get('obs_key_cols') or [])}"
+                )
+            self._assoc_status.setText(status)
+            self._assoc_plot_mode = "ranked"
+            self._assoc_ranked_btn.setChecked(True)
+            self._assoc_scatter_btn.setChecked(False)
+            self._render_assoc_corr_ranked()
+
+        elif t == "assoc_scatter":
+            ids, xs, ys, xs_group, x_var, y_var, _partial = result
+            self._render_assoc_scatter(xs, ys, x_var, y_var)
+
+        elif t == "assoc_pca":
+            self._assoc_pca_result = result or {}
+            self._assoc_repeated_row_info = self._assoc_pca_result.get("repeated_info") or {}
+            raw_df = self._assoc_pca_result.get("raw_df")
+            cache_key = self._assoc_pca_result.get("cache_key")
+            if raw_df is not None and cache_key is not None:
+                self._store_assoc_matrix_cache(cache_key, raw_df)
+            if self._assoc_pca_result.get("error"):
+                self._assoc_status.setText(self._assoc_pca_result["error"])
+            loadings = self._assoc_pca_result.get("loadings")
+            self._assoc_pca_df = loadings if isinstance(loadings, pd.DataFrame) else pd.DataFrame()
+            self._populate_assoc_pca_table(self._assoc_pca_df)
+            self._populate_assoc_pca_color_combo()
+            ratios = self._assoc_pca_result.get("explained_ratio") or []
+            self._assoc_pca_x_combo.blockSignals(True)
+            self._assoc_pca_y_combo.blockSignals(True)
+            self._assoc_pca_x_combo.clear()
+            self._assoc_pca_y_combo.clear()
+            for idx, ratio in enumerate(ratios, start=1):
+                label = f"PC{idx} ({ratio * 100:.1f}%)"
+                key = f"PC{idx}"
+                self._assoc_pca_x_combo.addItem(label, key)
+                self._assoc_pca_y_combo.addItem(label, key)
+            if self._assoc_pca_x_combo.count():
+                self._assoc_pca_x_combo.setCurrentIndex(0)
+            if self._assoc_pca_y_combo.count() > 1:
+                self._assoc_pca_y_combo.setCurrentIndex(1)
+            elif self._assoc_pca_y_combo.count():
+                self._assoc_pca_y_combo.setCurrentIndex(0)
+            self._assoc_pca_x_combo.blockSignals(False)
+            self._assoc_pca_y_combo.blockSignals(False)
+            used_rows = int(self._assoc_pca_result.get("n_rows_used", 0))
+            used_cols = int(self._assoc_pca_result.get("n_cols_used", 0))
+            missing_dump = self._assoc_pca_result.get("missing_dump_cols") or []
+            low_obs = self._assoc_pca_result.get("low_obs_cols") or []
+            dropped_const = self._assoc_pca_result.get("dropped_constant") or []
+            self._assoc_pca_summary.setText(
+                f"Rows={used_rows}/{self._assoc_pca_result.get('n_rows_input', 0)}  ·  Vars={used_cols}  ·  Missing={self._assoc_pca_result.get('row_mode', '')}"
+            )
+            if not self._assoc_pca_result.get("error"):
+                bits = [f"PCA fit on {used_cols} variables using {used_rows} rows."]
+                if missing_dump:
+                    bits.append(f"{len(missing_dump)} requested vars unavailable")
+                if low_obs:
+                    bits.append(f"{len(low_obs)} below missingness threshold")
+                if dropped_const:
+                    bits.append(f"{len(dropped_const)} constant")
+                if self._assoc_repeated_row_info:
+                    bits.append(f"subjects={self._assoc_repeated_row_info.get('subject_count', 0)}")
+                self._assoc_status.setText("  ".join(bits))
+            self._render_assoc_pca_plot()
+
+    def _on_err(self, payload):
         self._end_work()
-        self._clear_results_display()
-        self._build_status.setText("Error.")
-        self._analyze_status.setText("Error.")
+        err_type = ""
+        tb = payload
+        if isinstance(payload, dict):
+            err_type = str(payload.get("type") or "")
+            tb = payload.get("traceback") or ""
+        if err_type != "assoc":
+            self._clear_results_display()
+            self._build_status.setText("Error.")
+            self._analyze_status.setText("Error.")
+        if hasattr(self, "_assoc_status"):
+            self._assoc_status.setText("Error.")
         QtWidgets.QMessageBox.critical(
             self._root, "GPA Error",
             f"An error occurred:\n\n{tb[-600:]}")

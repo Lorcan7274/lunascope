@@ -94,3 +94,22 @@ def test_add_dock_shortcuts_registers_windows_friendly_reset_shortcut(qapp):
 
     assert "Ctrl+)" in shortcuts
     assert "Ctrl+Shift+0" in shortcuts
+
+
+def test_wide_popup_combo_box_expands_popup_for_long_items(qapp):
+    from lunascope.components.explorer_waveform import _WidePopupComboBox
+
+    combo = _WidePopupComboBox()
+    combo.resize(120, combo.sizeHint().height())
+    combo.addItems(["Short", "SP_15_PZ_negative_peak_annotation_name"])
+
+    combo.show()
+    qapp.processEvents()
+    combo.showPopup()
+    qapp.processEvents()
+
+    expected = combo.popup_width_hint()
+    assert combo.view().minimumWidth() == expected
+    assert combo.view().minimumWidth() > combo.width()
+
+    combo.hidePopup()

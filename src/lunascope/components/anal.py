@@ -254,8 +254,11 @@ class AnalMixin:
             else:
                 self._render_tables(tbls)
 
+                rendered_ss = getattr(self, "ss", None) if getattr(self, "rendered", False) else None
                 if hasattr(self, "_render_hypnogram"):
                     self._render_hypnogram()
+                if rendered_ss is not None:
+                    self.ss = rendered_ss
 
                 if hasattr(self, "_update_hypnogram"):
                     self._update_hypnogram()
@@ -695,12 +698,18 @@ class AnalMixin:
 
         cmd = self.ui.txt_inp.toPlainText()
         param = self._parse_tab_pairs(self.ui.txt_param)
+        all_rows = self._sample_rows_from_source_model()
+        if not all_rows:
+            return
         records = []
         for row in range(n):
             idx = model.index(row, 0)
-            label = str(model.data(idx) or "")
-            if label:
-                records.append((label, label))
+            sample_row = self._sample_row_from_index(idx)
+            if not sample_row:
+                continue
+            id_str = str(sample_row[0] or "").strip()
+            if id_str:
+                records.append((sample_row, id_str))
         if not records:
             return
 
@@ -722,7 +731,7 @@ class AnalMixin:
         shortcut_label = self._project_eval_cancel_shortcut_label()
         self.lock_ui(f"Processing...\n\nPress {shortcut_label} to stop after this record")
 
-        fut = self._exec.submit(self._project_eval_worker, records, cmd, param)
+        fut = self._exec.submit(self._project_eval_worker, records, all_rows, cmd, param)
 
         def _done(_f=fut):
             try:
@@ -734,61 +743,69 @@ class AnalMixin:
 
         fut.add_done_callback(_done)
 
-    def _project_eval_worker(self, records, cmd, param):
+    def _project_eval_worker(self, records, all_rows, cmd, param):
         proj_tbls = []
         proj_results = {}
         cancelled = False
 
-        for i, (id_str, label) in enumerate(records, start=1):
-            if self._proj_cancel_event.is_set():
-                cancelled = True
-                self.sig_proj_eval_stream.emit("\nInterrupted.\n")
-                break
+        try:
+            for i, (sample_row, label) in enumerate(records, start=1):
+                if self._proj_cancel_event.is_set():
+                    cancelled = True
+                    self.sig_proj_eval_stream.emit("\nInterrupted.\n")
+                    break
 
-            header = (
-                "\n\n------------------------------------------------------------------\n"
-                f"Processing: {label} (#{i})\n"
-            )
-            for chunk in header.splitlines(True):
-                self.sig_proj_eval_stream.emit(chunk)
+                header = (
+                    "\n\n------------------------------------------------------------------\n"
+                    f"Processing: {label} (#{i})\n"
+                )
+                for chunk in header.splitlines(True):
+                    self.sig_proj_eval_stream.emit(chunk)
 
-            stderr_txt = ""
-            try:
-                self.proj.clear_vars()
-                self.proj.reinit()
-                for a, b in param:
-                    self.proj.var(a, b)
-
-                p = self.proj.inst(id_str)
-                stderr_txt = p.eval_lunascope(cmd) or ""
-                if stderr_txt:
-                    for chunk in stderr_txt.splitlines(True):
-                        self.sig_proj_eval_stream.emit(chunk)
-
-                tbls = p.strata()
-                if tbls is not None:
-                    proj_tbls.append(tbls[["Command", "Strata"]].copy())
-                    for row in tbls.itertuples(index=False):
-                        key = f"{row.Command}_{row.Strata}"
-                        df = self._normalize_project_result_table(
-                            p.table(row.Command, row.Strata),
-                            id_str,
-                        )
-                        if key in proj_results:
-                            proj_results[key] = pd.concat([proj_results[key], df], ignore_index=True)
-                        else:
-                            proj_results[key] = df
-
+                stderr_txt = ""
+                id_str = str(sample_row[0] or "").strip()
                 try:
-                    p.silent_proc("REPORT show-all")
-                except RuntimeError:
-                    pass
-            except Exception as e:
-                if stderr_txt:
-                    self.sig_proj_eval_stream.emit("\n")
-                raise RuntimeError(f"{label}: {type(e).__name__}: {e}") from e
+                    self.proj.clear()
+                    self.proj.eng.set_sample_list([list(sample_row)])
+                    self.proj.clear_vars()
+                    self.proj.reinit()
+                    for a, b in param:
+                        self.proj.var(a, b)
 
-            self.sig_proj_eval_progress.emit(i, len(records))
+                    p = self.proj.inst(id_str)
+                    stderr_txt = p.eval_lunascope(cmd) or ""
+                    if stderr_txt:
+                        for chunk in stderr_txt.splitlines(True):
+                            self.sig_proj_eval_stream.emit(chunk)
+
+                    tbls = p.strata()
+                    if tbls is not None:
+                        proj_tbls.append(tbls[["Command", "Strata"]].copy())
+                        for row in tbls.itertuples(index=False):
+                            key = f"{row.Command}_{row.Strata}"
+                            df = self._normalize_project_result_table(
+                                p.table(row.Command, row.Strata),
+                                id_str,
+                            )
+                            if key in proj_results:
+                                proj_results[key] = pd.concat([proj_results[key], df], ignore_index=True)
+                            else:
+                                proj_results[key] = df
+
+                    try:
+                        p.silent_proc("REPORT show-all")
+                    except RuntimeError:
+                        pass
+                except Exception as e:
+                    if stderr_txt:
+                        self.sig_proj_eval_stream.emit("\n")
+                    raise RuntimeError(f"{label}: {type(e).__name__}: {e}") from e
+
+                self.sig_proj_eval_progress.emit(i, len(records))
+        finally:
+            self.proj.clear()
+            if all_rows:
+                self.proj.eng.set_sample_list(all_rows)
 
         all_tbls = None
         if proj_tbls:

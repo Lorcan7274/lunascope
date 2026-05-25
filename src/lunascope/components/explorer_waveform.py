@@ -75,6 +75,30 @@ INSPECTOR_LOCAL_FEATURES = [
 ]
 
 
+class _WidePopupComboBox(QComboBox):
+    """Keep the collapsed combo compact while letting the popup fit long labels."""
+
+    def popup_width_hint(self) -> int:
+        width = self.width()
+        model = self.model()
+        if model is None:
+            return width
+        fm = self.fontMetrics()
+        icon_width = max(0, self.iconSize().width())
+        for row in range(model.rowCount()):
+            text = str(model.index(row, self.modelColumn()).data(Qt.DisplayRole) or "")
+            width = max(width, fm.horizontalAdvance(text) + icon_width + 40)
+        return width
+
+    def showPopup(self):
+        view = self.view()
+        if view is not None:
+            width = self.popup_width_hint()
+            view.setMinimumWidth(width)
+            view.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        super().showPopup()
+
+
 def _apply_transform(mat, transform_mode):
     if transform_mode == "rectified":
         return np.abs(mat)
@@ -530,6 +554,21 @@ def _extract_traces(p, ns, annot_class, channels, pre_secs, post_secs, align_to,
 
     events = list(extracted.get("events", []))
     if not events:
+        raw_count = None
+        try:
+            raw_events = p.fetch_annots([annot_class])
+            if raw_events is not None:
+                raw_count = int(len(raw_events))
+        except Exception:
+            raw_count = None
+        if raw_count:
+            raise RuntimeError(
+                "No usable waveform windows were extracted for annotation "
+                f"'{annot_class}', although {raw_count} raw event(s) exist. "
+                "The waveform extractor currently requires a full pre/post window "
+                "around each event (`require=\"full\"`), so events can be dropped "
+                "if the selected window, alignment, or channels leave no valid segments."
+            )
         raise RuntimeError(f"No events found for annotation '{annot_class}'.")
 
     traces_out: dict[str, list] = {ch: [] for ch in channels}
@@ -712,6 +751,13 @@ def _extract_lwf_traces(dataset, filters, strategies, pre_secs, post_secs, align
         group_levels = []
         contrast_title = ""
 
+    def _row_center_sec(row):
+        if align_to == "start":
+            return float(row.ANNOT_START_SEC)
+        if align_to == "stop":
+            return float(row.ANNOT_STOP_SEC)
+        return 0.5 * (float(row.ANNOT_START_SEC) + float(row.ANNOT_STOP_SEC))
+
     for ch in selected_channels:
         sr = sr_map.get(ch)
         if not np.isfinite(sr) or sr <= 0:
@@ -731,7 +777,7 @@ def _extract_lwf_traces(dataset, filters, strategies, pre_secs, post_secs, align
             if block is None or block.n <= 0:
                 continue
 
-            center_sec = float(row.ANCHOR_SEC)
+            center_sec = _row_center_sec(row)
 
             panel_strategies = {"CH": ch_mode, "ANNOT": annot_mode, "TAG": tag_mode}
             if contrast_axis in panel_strategies:
@@ -777,6 +823,11 @@ def _extract_lwf_traces(dataset, filters, strategies, pre_secs, post_secs, align
                 group_label = None
 
             sample_times = float(block.data_start_sec) + (np.arange(block.n, dtype=float) / float(sr))
+            if float(row.ANNOT_START_SEC) == float(row.ANNOT_STOP_SEC) and sample_times.size:
+                # Point-event annotations emitted at half-sample boundaries can sit
+                # between stored samples for low-SR PP signals. Snap to the nearest
+                # stored sample so LWF re-windowing matches the dumped waveform lattice.
+                center_sec = float(sample_times[_nearest_sample_index(sample_times, center_sec)])
             center_idx = _nearest_sample_index(sample_times, center_sec)
             req_start_idx = int(center_idx + offsets[0])
             req_stop_idx = int(center_idx + offsets[-1])
@@ -804,7 +855,7 @@ def _extract_lwf_traces(dataset, filters, strategies, pre_secs, post_secs, align
                     "annot": str(row.ANNOT),
                     "instance": str(row.INSTANCE),
                     "annot_ch": str(row.ANNOT_CH),
-                    "anchor_sec": float(row.ANCHOR_SEC),
+                    "anchor_sec": float(center_sec),
                     "annot_start_sec": float(row.ANNOT_START_SEC),
                     "annot_stop_sec": float(row.ANNOT_STOP_SEC),
                     "lwf_id": lwf_id,
@@ -1083,7 +1134,7 @@ class WaveformTab(_ExplorerTab):
         btn_refresh = QPushButton("↻"); btn_refresh.setFixedWidth(30)
         btn_refresh.setToolTip("Reload channels/annotations from current record")
 
-        combo_ann = QComboBox(); combo_ann.setMinimumWidth(120)
+        combo_ann = _WidePopupComboBox(); combo_ann.setMinimumWidth(120)
         combo_ann.setToolTip("Annotation class to use as events")
 
         # Multi-select channel combo (reuse soappops widget)
@@ -1563,7 +1614,7 @@ class WaveformTab(_ExplorerTab):
         combo_feature.setToolTip("Rank waves by this feature before selecting one with the slider")
 
         lab_inspect_annot = QLabel("Inspect annot:")
-        combo_inspect_annot = QComboBox()
+        combo_inspect_annot = _WidePopupComboBox()
         combo_inspect_annot.setMinimumWidth(140)
         combo_inspect_annot.setToolTip("Restrict wave inspection to one annotation class at a time")
 
@@ -2262,7 +2313,7 @@ class WaveformTab(_ExplorerTab):
     def _on_lwf_err(self, tb_str):
         try:
             msg = "Could not load .lwf waveform data."
-            if "uses .lwf version" in tb_str and "expects version 2" in tb_str:
+            if "uses .lwf version" in tb_str and "expects version 3" in tb_str:
                 msg = (
                     "These .lwf files were written with an unsupported format version.\n\n"
                     "Please regenerate them with the current Luna WAVEFORMS command "

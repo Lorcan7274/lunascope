@@ -237,7 +237,8 @@ def plot_spec( xi,yi,zi, ch, minf, maxf, ax , gui, clear = True):
 def hypno_density( probs , ax ):
    ax.clear()
    if len(probs) == 0: return
-   res = probs[ ["PP_N1","PP_N2","PP_N3","PP_R","PP_W" ]  ]
+   pp_cols = ["PP_N1", "PP_N2", "PP_N3", "PP_R", "PP_W"]
+   res = probs.reindex(columns=pp_cols, fill_value=0.0).copy()
    ne = len(res)
    x = np.arange(1, ne+1, 1)
    y = res.to_numpy(dtype=float)

@@ -191,6 +191,7 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         self.ui.menuProject.addAction(act_refresh)
         self.ui.menuProject.addSeparator()
         self.ui.menuProject.addAction(act_proj_eval)
+        self.ui.menuProject.addSeparator()
         self.ui.menuProject.addAction(act_download_pops)
         self.ui.menuProject.addAction(act_download_tutorial)
 
@@ -658,9 +659,17 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         # get ID from (possibly filtered) table
         if not current.isValid():
             return
+
+        selected_row = self._sample_row_from_index(current)
+        if not selected_row:
+            return
         
         # clear existing stuff
         self._clear_all()
+
+        # The table view is the authoritative sample list. Re-sync the engine
+        # from it before resolving the selected ID to avoid stale row loads.
+        self._sync_proj_sample_list_from_view()
 
         # get/set parameters
         self.proj.clear_vars()
@@ -670,7 +679,9 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
             self.proj.var( p[0] , p[1] )
             
         # attach the individual by ID (i.e. as list may be filtered)
-        id_str = current.siblingAtColumn(0).data(Qt.DisplayRole)
+        id_str = selected_row[0]
+        if not str(id_str).strip():
+            return
         
         # attach EDF
         try:

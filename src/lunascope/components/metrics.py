@@ -41,6 +41,29 @@ from .tbl_funcs import add_combo_column, add_check_column, attach_comma_filter
 from PySide6.QtWidgets import QStyledItemDelegate, QComboBox, QStyleOptionViewItem, QStyle
 from PySide6.QtCore import Qt
 
+def _restore_signal_filter_defaults(channels, fmap, fmap_frqs, user_fmap_frqs):
+    """Return persisted filter defaults for current channels and prune stale state."""
+    current_channels = {str(ch) for ch in channels}
+    valid_named_filters = set(fmap_frqs)
+
+    restored = {}
+    for ch, fcode in list((fmap or {}).items()):
+        if ch not in current_channels:
+            continue
+        if fcode == "User" or fcode in valid_named_filters:
+            restored[ch] = fcode
+
+    if isinstance(fmap, dict):
+        fmap.clear()
+        fmap.update(restored)
+
+    if isinstance(user_fmap_frqs, dict):
+        stale_user = [ch for ch in list(user_fmap_frqs) if ch not in current_channels]
+        for ch in stale_user:
+            user_fmap_frqs.pop(ch, None)
+
+    return restored
+
 class _ComboDelegate(QStyledItemDelegate):
     def __init__(self, items, parent=None):
         super().__init__(parent)
@@ -318,6 +341,13 @@ class MetricsMixin:
         if self.cmap_list:
             df = sort_df_by_list(df, 0, self.cmap_list)
 
+        persisted_filters = _restore_signal_filter_defaults(
+            df["CH"].astype(str).tolist() if "CH" in df.columns else [],
+            self.fmap,
+            self.fmap_frqs,
+            self.user_fmap_frqs,
+        )
+
         # SOURCE model from your DataFrame
         src_sig = self.df_to_std_model(df)  # needs insertColumn / add_check_column
 
@@ -372,9 +402,10 @@ class MetricsMixin:
         src_sig.setHeaderData(SRC_COL_FILTER, Qt.Horizontal, "Filter")
         for r in range(src_sig.rowCount()):
             idx = src_sig.index(r, SRC_COL_FILTER)
-            if not (idx.data(Qt.DisplayRole) or idx.data(Qt.EditRole)):
-                src_sig.setData(idx, "None", Qt.EditRole)
-                src_sig.setData(idx, "None", Qt.DisplayRole)
+            ch_label = src_sig.index(r, SRC_COL_CH).data(Qt.DisplayRole)
+            default_filter = persisted_filters.get(str(ch_label), "None")
+            src_sig.setData(idx, default_filter, Qt.EditRole)
+            src_sig.setData(idx, default_filter, Qt.DisplayRole)
 
         # bind delegate on the PROXY column and reopen editors after proxy changes
         filt_items = ["None", "0.3-35Hz", "Slow", "Delta", "Theta", "Alpha", "Sigma", "Beta", "Gamma", "User"]

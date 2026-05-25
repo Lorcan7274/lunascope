@@ -1,7 +1,7 @@
 """Tests for :mod:`lunascope.lwf`.
 
-The reader is exercised against synthetic LWF v2 binary files constructed
-in-test.  These tests verify the on-disk format Lunascope expects from
+The reader is exercised against synthetic LWF v3 binary files constructed
+in-test. These tests verify the on-disk format Lunascope expects from
 Luna's WAVEFORMS writer.
 """
 
@@ -28,7 +28,7 @@ def _pack_string(s: str) -> bytes:
     return struct.pack("<I", len(data)) + data
 
 
-def _build_lwf_v2(
+def _build_lwf_v3(
     *,
     id_str: str = "subj01",
     edf: str = "subj01.edf",
@@ -38,11 +38,11 @@ def _build_lwf_v2(
     tag: str = "tag",
     align: str = "anchor",
     def_annots=("spindle",),
-    channels=(("C3", "uV", 100), ("C4", "uV", 100)),
+    channels=(("C3", "uV", 100, 10_000_000), ("C4", "uV", 100, 10_000_000)),
     feature_names=("amp", "dur"),
     waves=None,
 ) -> bytes:
-    """Return bytes for a single-shard LWF v2 file with N waves and channels."""
+    """Return bytes for a single-shard LWF v3 file with N waves and channels."""
     if waves is None:
         waves = [
             {
@@ -71,17 +71,18 @@ def _build_lwf_v2(
     # ---- header ---------------------------------------------------------
     header = BytesIO()
     header.write(b"LWF1")
-    header.write(struct.pack("<i", 2))  # version
+    header.write(struct.pack("<i", 3))  # version
     for s in (id_str, edf, outfile, start_date, start_time, tag, align):
         header.write(_pack_string(s))
     header.write(struct.pack("<i", len(def_annots)))
     for a in def_annots:
         header.write(_pack_string(a))
     header.write(struct.pack("<i", n_channels))
-    for label, unit, sr in channels:
+    for label, unit, sr, sample_step_tp in channels:
         header.write(_pack_string(label))
         header.write(_pack_string(unit))
-        header.write(struct.pack("<i", int(sr)))
+        header.write(struct.pack("<Q", int(sample_step_tp)))
+        header.write(struct.pack("<d", float(sr)))
     header.write(struct.pack("<i", n_features))
     for fn in feature_names:
         header.write(_pack_string(fn))
@@ -107,7 +108,7 @@ def _build_lwf_v2(
         ib.write(struct.pack("<Q", 0))  # placeholder payload_offset
         # n_blocks + per-block (n, data_start, data_stop)
         ib.write(struct.pack("<i", n_channels))
-        for label, _unit, _sr in channels:
+        for label, _unit, _sr, _sample_step_tp in channels:
             arr = w["blocks"][label]
             ib.write(struct.pack("<i", int(arr.size)))
             ib.write(struct.pack("<d", float(w["wave_start_sec"])))
@@ -131,7 +132,7 @@ def _build_lwf_v2(
         pb.write(struct.pack("<d", w["wave_start_sec"]))
         pb.write(struct.pack("<d", w["wave_stop_sec"]))
         pb.write(struct.pack("<i", n_channels))
-        for label, _unit, _sr in channels:
+        for label, _unit, _sr, _sample_step_tp in channels:
             arr = w["blocks"][label]
             pb.write(struct.pack("<i", int(arr.size)))
             pb.write(struct.pack("<d", float(w["wave_start_sec"])))
@@ -168,7 +169,7 @@ def synthetic_lwf_dir(tmp_path: Path) -> Path:
     """Write two synthetic .lwf files into a directory and return the dir."""
     for i in range(2):
         path = tmp_path / f"subj{i}.lwf"
-        data = _build_lwf_v2(id_str=f"subj{i}", edf=f"subj{i}.edf")
+        data = _build_lwf_v3(id_str=f"subj{i}", edf=f"subj{i}.edf")
         path.write_bytes(data)
     return tmp_path
 
@@ -185,6 +186,7 @@ def test_load_lwf_directory_reads_all_shards(synthetic_lwf_dir):
     assert "EDF" in ds.files.columns
     assert ds.waves["ANNOT"].iloc[0] == "spindle"
     assert ds.channels["CH"].iloc[0] in ("C3", "C4")
+    assert ds.channels["SR"].iloc[0] == pytest.approx(100.0)
 
 
 def test_load_lwf_block_payload_matches_input(synthetic_lwf_dir):
@@ -200,6 +202,36 @@ def test_load_lwf_block_payload_matches_input(synthetic_lwf_dir):
     # Feature values are preserved
     assert wave.blocks["C3"].features["amp"] == pytest.approx(0.7)
     assert wave.blocks["C3"].features["dur"] == pytest.approx(1.0)
+
+
+def test_load_lwf_preserves_fractional_sr_and_step(tmp_path):
+    data = _build_lwf_v3(
+        id_str="subj_frac",
+        channels=(("PP_N1", "prob", 0.2, 5_000_000_000),),
+        waves=[
+            {
+                "annot": "hd_3_neither",
+                "instance": "i0",
+                "annot_ch": "",
+                "meta": "meta0",
+                "annot_start_sec": 10.0,
+                "annot_stop_sec": 20.0,
+                "anchor_sec": 15.0,
+                "wave_start_sec": 0.0,
+                "wave_stop_sec": 30.0,
+                "blocks": {"PP_N1": np.array([0.0, 0.2, 0.4], dtype="<f4")},
+                "features": {"amp": 0.7, "dur": 1.0},
+                "feature_qc": 0,
+            }
+        ],
+    )
+    path = tmp_path / "frac.lwf"
+    path.write_bytes(data)
+    ds = lwf_mod.load_lwf_directory(tmp_path)
+    shard = ds.shards[0]
+    assert shard.channels[0].sr == pytest.approx(0.2)
+    assert shard.channels[0].sample_step_tp == 5_000_000_000
+    assert ds.channels["SR"].iloc[0] == pytest.approx(0.2)
 
 
 def test_load_lwf_rejects_invalid_magic(tmp_path):

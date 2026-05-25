@@ -361,6 +361,33 @@ class SListMixin:
             rows.append(row)
         return rows
 
+    def _sample_row_from_index(self, index):
+        if not index.isValid():
+            return None
+
+        model = index.model()
+        if model is None:
+            return None
+
+        src_index = model.mapToSource(index) if hasattr(model, "mapToSource") else index
+        src_model = src_index.model()
+        if src_model is None or not src_index.isValid():
+            return None
+
+        row = []
+        for col in range(3):
+            idx = src_model.index(src_index.row(), col)
+            row.append(str(src_model.data(idx, Qt.DisplayRole) or ""))
+        row[2] = ",".join(self._annotation_paths_from_cell(row[2])) or "."
+        return row
+
+    def _sync_proj_sample_list_from_view(self):
+        rows = self._sample_rows_from_source_model()
+        self.proj.clear()
+        if rows:
+            self.proj.eng.set_sample_list(rows)
+        return rows
+
     def _replace_sample_rows(self, rows, selected_source_row=0):
         self.proj.clear()
         self.proj.eng.set_sample_list(rows)
