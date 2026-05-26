@@ -6,6 +6,7 @@ PySide6 in but no widgets are constructed.
 
 from __future__ import annotations
 
+import os
 import numpy as np
 import pandas as pd
 import pytest
@@ -16,6 +17,10 @@ from lunascope.helpers import (
     random_darkbg_colors,
     sort_df_by_list,
     winsorize_array,
+)
+from lunascope.components.slist import (
+    _is_absolute_sample_path,
+    _read_sample_list_rows,
 )
 
 
@@ -141,3 +146,30 @@ def test_random_darkbg_colors_count_and_determinism():
 
 def test_random_darkbg_colors_zero_is_empty():
     assert random_darkbg_colors(0, seed=1) == []
+
+
+def test_is_absolute_sample_path_handles_windows_and_posix_forms():
+    assert _is_absolute_sample_path("/tmp/file.edf")
+    assert _is_absolute_sample_path(r"C:\Users\john\data\file.edf")
+    assert _is_absolute_sample_path("C:/Users/john/data/file.edf")
+    assert _is_absolute_sample_path(r"\\server\share\file.edf")
+    assert not _is_absolute_sample_path("data/file.edf")
+    assert not _is_absolute_sample_path(".")
+
+
+def test_read_sample_list_rows_resolves_relatives_but_keeps_windows_absolutes(tmp_path):
+    slist = tmp_path / "study.lst"
+    slist.write_text(
+        "win_abs\tC:/Users/john/data/file.edf\t.\n"
+        "relative\tedf/file2.edf\tannots/file2.annot\n"
+    )
+
+    rows = _read_sample_list_rows(str(slist))
+    base = tmp_path.resolve()
+
+    assert rows[0] == ["win_abs", "C:/Users/john/data/file.edf", "."]
+    assert rows[1] == [
+        "relative",
+        os.path.normpath(str(base / "edf" / "file2.edf")),
+        os.path.normpath(str(base / "annots" / "file2.annot")),
+    ]

@@ -22,6 +22,8 @@
 import pandas as pd
 from os import path
 import os
+import ntpath
+import posixpath
 from pathlib import Path
         
 from PySide6.QtWidgets import (
@@ -52,6 +54,49 @@ from ..file_dialogs import (
     save_file_name,
     _annot_stem_for_ext,
 )
+
+
+def _is_absolute_sample_path(value: str) -> bool:
+    text = str(value or "").strip()
+    if not text or text == ".":
+        return False
+    return ntpath.isabs(text) or posixpath.isabs(text)
+
+
+def _resolve_sample_list_path(base_dir: str, value: str) -> str:
+    text = str(value or "").strip()
+    if not text or text == "." or _is_absolute_sample_path(text):
+        return text or "."
+    return os.path.normpath(os.path.join(base_dir, text))
+
+
+def _read_sample_list_rows(filename: str) -> list[list[str]]:
+    base_dir = str(Path(filename).expanduser().resolve().parent)
+    rows: list[list[str]] = []
+    with open(filename, "r", encoding="utf-8") as fh:
+        for raw_line in fh:
+            line = raw_line.rstrip("\r\n")
+            if not line.strip():
+                continue
+            cols = line.split("\t")
+            if len(cols) < 2 or len(cols) > 3:
+                continue
+
+            sample_id = str(cols[0]).strip()
+            edf_path = _resolve_sample_list_path(base_dir, cols[1])
+
+            annot_paths = "."
+            if len(cols) == 3:
+                annot_bits = []
+                for value in str(cols[2]).split(","):
+                    resolved = _resolve_sample_list_path(base_dir, value)
+                    if resolved and resolved != ".":
+                        annot_bits.append(resolved)
+                annot_paths = ",".join(annot_bits) if annot_bits else "."
+
+            rows.append([sample_id, edf_path, annot_paths])
+
+    return rows
 
 
 class NumericSortFilterProxy(QSortFilterProxyModel):
@@ -589,13 +634,6 @@ class SListMixin:
             "",
             "slist (*.lst *.txt);;All Files (*)",
         )
-
-        # set the path , i.e. to handle relative sample lists
-
-        folder_path = str(Path(slist).parent) + os.sep
-
-        self.proj.var( 'path' , folder_path )
-        
         self._read_slist_from_file( slist )
 
 
@@ -807,7 +845,8 @@ class SListMixin:
     def _read_slist_from_file( self, slist : str ):
         if slist:
             try:
-                self.proj.sample_list(slist)
+                self.proj.clear()
+                self.proj.eng.set_sample_list(_read_sample_list_rows(slist))
                 df = self.proj.sample_list()
             except Exception as e:
                 raise RuntimeError(f"Could not load sample list '{slist}': {e}") from e
