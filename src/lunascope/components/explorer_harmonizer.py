@@ -170,6 +170,7 @@ class HarmonizerTab(_ExplorerTab):
     _sig_ok       = QtCore.Signal(object)   # ScanResult
     _sig_err      = QtCore.Signal(str)       # traceback string
     _sig_progress = QtCore.Signal(int, int)  # (done, total)
+    scan_ready    = QtCore.Signal()          # emitted when scan/cache is available
 
     _DEFAULT_CELL = 16   # px
 
@@ -723,6 +724,7 @@ class HarmonizerTab(_ExplorerTab):
             f"{n_ch} channels  ·  {n_ann} annot classes  ·  {result.scan_ts}"
         )
         self._on_right_tab_changed(self._right_tabs.currentIndex())
+        self.scan_ready.emit()
 
     @Slot(str)
     def _on_scan_err(self, tb: str):
@@ -2136,6 +2138,7 @@ class HarmonizerTab(_ExplorerTab):
                 f"{n_ch} channels  ·  {n_ann} annot classes  ·  {scan.scan_ts}"
             )
             self._on_right_tab_changed(self._right_tabs.currentIndex())
+            self.scan_ready.emit()
         except Exception as exc:
             QMessageBox.critical(self._root, "Harmonizer", f"Load cache error: {exc}")
 
