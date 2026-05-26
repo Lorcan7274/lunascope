@@ -1214,7 +1214,7 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         self.ui.move(target_x, target_y)
 
     def _reset_to_default_layout(self):
-        """Ctrl+): hard reset to the original fresh Lunascope layout."""
+        """Ctrl+R: hard reset to the original fresh Lunascope layout."""
         self._apply_default_window_geometry()
         self._apply_default_dock_layout()
 

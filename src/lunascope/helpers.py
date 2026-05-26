@@ -316,10 +316,7 @@ def add_dock_shortcuts(win, view_menu, toggle_zero=None, reset_layout=None):
     # reset to default layout
     if reset_layout is not None:
         act_reset = QAction("Reset to Default Layout", win, checkable=False)
-        act_reset.setShortcuts([
-            QKeySequence(Qt.ControlModifier | Qt.ShiftModifier | Qt.Key_0),
-            QKeySequence("Ctrl+)"),
-        ])
+        act_reset.setShortcut(QKeySequence("Ctrl+R"))
         act_reset.triggered.connect(reset_layout)
         view_menu.addAction(act_reset)
 

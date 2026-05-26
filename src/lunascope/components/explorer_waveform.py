@@ -244,7 +244,15 @@ def _format_waveform_suptitle(parts, *, prefix: str = "Peri-event waveform", lin
 
 
 def _compact_waveform_title_parts(result, *, inspect_mode: bool, contrast_layout: str) -> list[str]:
-    parts = [f"'{result['annot_class']}'", f"({result['n_events']} {result.get('trace_count_label', 'events')})"]
+    trace_label = result.get("trace_count_label", "events")
+    n_events = int(result.get("n_events", 0))
+    total_events = result.get("total_events")
+    kept_events = result.get("kept_events")
+    if total_events is not None and kept_events is not None and int(total_events) != int(kept_events):
+        count_part = f"({int(kept_events)} kept / {int(total_events)} total {trace_label})"
+    else:
+        count_part = f"({n_events} {trace_label})"
+    parts = [f"'{result['annot_class']}'", count_part]
     contrast = result.get("contrast")
     if contrast:
         parts.append(contrast.get("title", "two-group contrast"))
@@ -466,6 +474,8 @@ def _build_trace_result(
     outlier_sd_thresh=np.nan,
     view_pre_secs=np.nan,
     view_post_secs=np.nan,
+    total_events=None,
+    kept_events=None,
 ):
     stats = _compute_summary_stats(traces_out, channels, summary_mode)
     result = {
@@ -474,6 +484,8 @@ def _build_trace_result(
         "transform_mode": transform_mode,
         "summary_mode": summary_mode,
         "n_events": n_events,
+        "total_events": int(total_events) if total_events is not None else int(n_events),
+        "kept_events": int(kept_events) if kept_events is not None else int(n_events),
         "sr": sr_out,
         "annot_class": annot_class,
         "channels": channels,
@@ -554,13 +566,7 @@ def _extract_traces(p, ns, annot_class, channels, pre_secs, post_secs, align_to,
 
     events = list(extracted.get("events", []))
     if not events:
-        raw_count = None
-        try:
-            raw_events = p.fetch_annots([annot_class])
-            if raw_events is not None:
-                raw_count = int(len(raw_events))
-        except Exception:
-            raw_count = None
+        raw_count = int(extracted.get("total_events", 0))
         if raw_count:
             raise RuntimeError(
                 "No usable waveform windows were extracted for annotation "
@@ -577,6 +583,7 @@ def _extract_traces(p, ns, annot_class, channels, pre_secs, post_secs, align_to,
     t_grid_out: dict[str, np.ndarray] = {}
     unit_out: dict[str, str] = {}
     n_events = int(extracted.get("total_events", len(events)))
+    kept_events = int(len(events))
 
     for ev in events:
         blocks = ev.get("blocks", {})
@@ -642,6 +649,8 @@ def _extract_traces(p, ns, annot_class, channels, pre_secs, post_secs, align_to,
         summary_mode,
         annot_class=annot_class,
         n_events=n_events,
+        total_events=n_events,
+        kept_events=kept_events,
         transform_mode=transform_mode,
         baseline_mode=baseline_mode,
         outlier_mode=outlier_mode,
@@ -980,6 +989,8 @@ def _extract_lwf_traces(dataset, filters, strategies, pre_secs, post_secs, align
         summary_mode,
         annot_class=annot_label,
         n_events=n_events,
+        total_events=n_events,
+        kept_events=n_events,
         transform_mode=transform_mode,
         baseline_mode=baseline_mode,
         outlier_mode=outlier_mode,
@@ -1013,6 +1024,8 @@ def _extract_lwf_traces(dataset, filters, strategies, pre_secs, post_secs, align
                     summary_mode,
                     annot_class=annot_label,
                     n_events=len(contrast_groups[panel][gl]),
+                    total_events=len(contrast_groups[panel][gl]),
+                    kept_events=len(contrast_groups[panel][gl]),
                     transform_mode=transform_mode,
                     units={panel: panel_units[panel]},
                     trace_count_label=trace_count_label,
