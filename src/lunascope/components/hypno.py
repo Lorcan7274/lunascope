@@ -87,8 +87,9 @@ class HypnoMixin:
         cmd_str += ' end-wake=' + str( self.ui.spin_end_wake.value() )
         cmd_str += ' end-sleep=' + str( self.ui.spin_end_sleep.value() )
         
-        # annotations?
-        if self.ui.check_hypno_annots.isChecked():
+        # Treat "Add annotations" as a one-shot action rather than sticky state.
+        add_annots = self.ui.check_hypno_annots.isChecked()
+        if add_annots:
             cmd_str += " annot"
 
         # lights
@@ -117,6 +118,9 @@ class HypnoMixin:
                 f"Problem running HYPNO:\n{cmd_str}\nCommand failed:\n{e}",
             )
             return
+        finally:
+            if add_annots:
+                self.ui.check_hypno_annots.setChecked(False)
 
         
         # pull bespoke output for hypno dock

@@ -70,6 +70,11 @@ EXCLUDED_COMBO_BOXES = {
     "combo_annotator_mode",
 }
 
+# Transient action toggles should not be restored across runs/sessions.
+EXCLUDED_CHECK_BOXES = {
+    "check_hypno_annots",
+}
+
 
 @dataclass
 class RestoreReport:
@@ -176,7 +181,11 @@ def _collect_double_spin_boxes(ui: QWidget) -> dict[str, float]:
 
 
 def _collect_check_boxes(ui: QWidget) -> dict[str, bool]:
-    return {name: bool(w.isChecked()) for name, w in _iter_named_widgets(ui, QCheckBox)}
+    return {
+        name: bool(w.isChecked())
+        for name, w in _iter_named_widgets(ui, QCheckBox)
+        if name not in EXCLUDED_CHECK_BOXES
+    }
 
 
 def _collect_radio_buttons(ui: QWidget) -> dict[str, bool]:

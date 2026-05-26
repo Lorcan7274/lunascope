@@ -845,8 +845,23 @@ class CMapsMixin:
             if a_i in explicit and a_i in self.cmap:
                 updated.append(self.cmap[a_i])
             else:
-                updated.append(self.stgcols_hex.get(a_i, p_i))
+                stage = self._stage_from_annot_name(a_i)
+                updated.append(self.stgcols_hex.get(stage, p_i) if stage is not None else p_i)
         return updated
+
+    def _stage_from_annot_name(self, annot):
+        if not isinstance(annot, str):
+            return None
+        label = annot.strip()
+        if not label:
+            return None
+        if label in self.stgcols_hex:
+            return label
+        if len(label) >= 2 and label[0] in {"p", "P", "s", "S"}:
+            tail = label[1:]
+            if tail in self.stgcols_hex:
+                return tail
+        return None
 
     def _pp_stage_from_channel(self, ch):
         if not bool(getattr(self, "cfg_pp_style", True)):

@@ -21,7 +21,7 @@
 #  --------------------------------------------------------------------
 
 
-from PySide6.QtGui import QAction, QStandardItemModel
+from PySide6.QtGui import QAction, QKeySequence, QStandardItemModel
 from PySide6.QtGui import QRegularExpressionValidator
 
 from PySide6.QtCore import QModelIndex, QObject, Signal, Qt, QSortFilterProxyModel
@@ -316,7 +316,10 @@ def add_dock_shortcuts(win, view_menu, toggle_zero=None, reset_layout=None):
     # reset to default layout
     if reset_layout is not None:
         act_reset = QAction("Reset to Default Layout", win, checkable=False)
-        act_reset.setShortcuts(["Ctrl+)", "Ctrl+Shift+0"])
+        act_reset.setShortcuts([
+            QKeySequence(Qt.ControlModifier | Qt.ShiftModifier | Qt.Key_0),
+            QKeySequence("Ctrl+)"),
+        ])
         act_reset.triggered.connect(reset_layout)
         view_menu.addAction(act_reset)
 
