@@ -133,7 +133,14 @@ class DataFrameModel(QAbstractTableModel):
     so the caller's data can be freed without affecting the model.
     """
 
-    def __init__(self, df, float_decimals_default=3, float_decimals_per_col=None, parent=None):
+    def __init__(
+        self,
+        df,
+        float_decimals_default=3,
+        float_decimals_per_col=None,
+        preserve_text_cols=None,
+        parent=None,
+    ):
         super().__init__(parent)
         # coerce_numeric_df does df.copy() internally — model owns its data
         # SListMixin is defined later in this same file; resolved at call time
@@ -141,6 +148,7 @@ class DataFrameModel(QAbstractTableModel):
             df,
             decimals_default=float_decimals_default,
             decimals_per_col=float_decimals_per_col or {},
+            preserve_text_cols=preserve_text_cols or set(),
         )
         digs = float_decimals_per_col or {}
         cols = list(self._df.columns)
@@ -427,17 +435,24 @@ class SListMixin:
         return row
 
     def _sync_proj_sample_list_from_view(self):
+        self._slist_proj_sync_skipped = False
+        if not getattr(self, "_slist_proj_dirty", False):
+            self._slist_proj_sync_skipped = True
+            return None
         rows = self._sample_rows_from_source_model()
         self.proj.clear()
         if rows:
             self.proj.eng.set_sample_list(rows)
+        self._slist_proj_dirty = False
         return rows
 
     def _replace_sample_rows(self, rows, selected_source_row=0):
+        self._slist_loaded_key = None
         self.proj.clear()
         self.proj.eng.set_sample_list(rows)
+        self._slist_proj_dirty = False
         df = self.proj.sample_list()
-        model = self.df_to_model(df)
+        model = self.sample_list_df_to_model(df)
         self._proxy.setSourceModel(model)
         self._configure_slist_view()
 
@@ -587,6 +602,9 @@ class SListMixin:
         self._meta_cols = []          # display columns (up to 10, after filter)
         self._meta_file = ""          # path of the currently loaded meta file
         self._meta_vars_filter = []   # from config meta-data-vars
+        self._slist_loaded_key = None
+        self._slist_proj_dirty = False
+        self._slist_proj_sync_skipped = False
 
         # Flag set while filter text is changing so currentRowChanged is ignored.
         # Connected BEFORE attach_comma_filter so this handler fires first.
@@ -594,16 +612,17 @@ class SListMixin:
         self.ui.flt_slist.textChanged.connect(self._on_slist_filter_text_changing)
 
         # attach comma-delimited OR filter; restrict to col 0 (ID) only
-        self._proxy = attach_comma_filter( self.ui.tbl_slist , self.ui.flt_slist )
+        self._proxy = attach_comma_filter(
+            self.ui.tbl_slist,
+            self.ui.flt_slist,
+            NumericSortFilterProxy(self.ui.tbl_slist),
+        )
         self._proxy.setFilterKeyColumn(0)
         self._slist_delegate = SampleListCompactDelegate(self.ui.tbl_slist)
         self.ui.tbl_slist.setItemDelegateForColumn(0, self._slist_delegate)
-        self.ui.tbl_slist.clicked.connect(self._expand_slist_row)
+        self.ui.tbl_slist.clicked.connect(self._on_slist_clicked)
         self.ui.tbl_slist.setToolTip("Click a sample row to show its EDF and annotation paths.")
         self._proxy.modelReset.connect(self._refresh_slist_row_heights)
-        self._proxy.layoutChanged.connect(self._refresh_slist_row_heights)
-        self._proxy.rowsInserted.connect(lambda *_args: self._refresh_slist_row_heights())
-        self._proxy.rowsRemoved.connect(lambda *_args: self._refresh_slist_row_heights())
         self._configure_slist_view()
         self.ui.lbl_slist.setMinimumWidth(0)
         self.ui.lbl_slist.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
@@ -617,7 +636,7 @@ class SListMixin:
         self.ui.butt_load_annot.clicked.connect(lambda _checked=False: self.open_annot())
         self.ui.butt_refresh.clicked.connect(self._refresh)
         
-        # wire select ID from slist --> load + show details
+        # wire select ID from slist --> show details and attach the EDF/annotations
         self.ui.tbl_slist.selectionModel().currentRowChanged.connect(self._on_slist_current_row_changed)
         
         
@@ -674,7 +693,9 @@ class SListMixin:
 
 
     def _apply_sample_list_df(self, df, label: str):
-        model = self.df_to_model(df)
+        self._slist_loaded_key = None
+        self._slist_proj_dirty = False
+        model = self.sample_list_df_to_model(df)
         self._proxy.setSourceModel(model)
         self._configure_slist_view()
         self._set_slist_label(label)
@@ -715,6 +736,28 @@ class SListMixin:
         self.ui.tbl_slist.resizeRowToContents(index.row())
         self.ui.tbl_slist.viewport().update()
 
+    def _slist_row_key(self, index):
+        row = self._sample_row_from_index(index)
+        return tuple(row) if row else None
+
+    def _attach_slist_index_if_needed(self, index):
+        key = self._slist_row_key(index)
+        if key is None:
+            return
+        if key == getattr(self, "_slist_loaded_key", None):
+            return
+        self._attach_inst(index, None)
+        try:
+            loaded_id = str(self.p.id()).strip()
+        except Exception:
+            loaded_id = ""
+        if loaded_id == str(key[0]).strip():
+            self._slist_loaded_key = key
+
+    def _on_slist_clicked(self, index):
+        self._expand_slist_row(index)
+        self._attach_slist_index_if_needed(index)
+
     def _on_slist_filter_text_changing(self, _text):
         """Called first (before attach_comma_filter's handler) when filter text changes."""
         self._slist_filter_changing = True
@@ -723,13 +766,11 @@ class SListMixin:
     def _on_slist_filter_done(self):
         """Reset flag after the proxy has finished re-filtering, then repaint."""
         self._slist_filter_changing = False
-        self._refresh_slist_row_heights()
         self.ui.tbl_slist.viewport().update()
 
     def _on_slist_current_row_changed(self, current, previous):
-        # While filter text is changing the proxy re-selects rows by position,
-        # not by identity.  Ignore those spurious selection changes entirely so
-        # the attached study and its expanded row stay unchanged.
+        # Selection changes can be caused by filtering or keyboard movement.
+        # Filtering should not implicitly load; direct cursor movement should.
         if self._slist_filter_changing:
             return
 
@@ -737,7 +778,7 @@ class SListMixin:
             self._slist_delegate.set_expanded_only(current)
             self._refresh_slist_row_heights()
             self.ui.tbl_slist.viewport().update()
-        self._attach_inst(current, previous)
+            self._attach_slist_index_if_needed(current)
 
 
     # ------------------------------------------------------------
@@ -834,6 +875,7 @@ class SListMixin:
             self.proj.build([folder, f"-ext={annot_ext}"])
         else:
             self.proj.build(folder)
+        self._slist_proj_dirty = False
         df = self.proj.sample_list()
         self._apply_sample_list_df(df, "(built)")
 
@@ -847,6 +889,7 @@ class SListMixin:
             try:
                 self.proj.clear()
                 self.proj.eng.set_sample_list(_read_sample_list_rows(slist))
+                self._slist_proj_dirty = False
                 df = self.proj.sample_list()
             except Exception as e:
                 raise RuntimeError(f"Could not load sample list '{slist}': {e}") from e
@@ -920,12 +963,14 @@ class SListMixin:
             # specify SL directly
             self.proj.clear()
             self.proj.eng.set_sample_list( [ row ] )
+            self._slist_proj_dirty = False
 
             # get the SL
             df = self.proj.sample_list()
 
             # assgin to model
-            model = self.df_to_model( df )
+            model = self.sample_list_df_to_model( df )
+            self._slist_loaded_key = None
             self._proxy.setSourceModel(model)
             self._configure_slist_view()
             # update label to show slist file
@@ -1030,12 +1075,14 @@ class SListMixin:
             # specify SL directly
             self.proj.clear()
             self.proj.eng.set_sample_list( [ row ] )
+            self._slist_proj_dirty = False
 
             # get the SL
             df = self.proj.sample_list()
 
             # assgin to model
-            model = self.df_to_model( df )
+            model = self.sample_list_df_to_model( df )
+            self._slist_loaded_key = None
             self._proxy.setSourceModel(model)
             self._configure_slist_view()
             # update label to show slist file
@@ -1078,11 +1125,13 @@ class SListMixin:
         decimals_default: int = 5,
         decimals_per_col: dict[str, int] | None = None,
         extra_missing: set[str] | None = None,
+        preserve_text_cols: set[str] | None = None,
     ) -> pd.DataFrame:
         miss = {"", ".", "NA", "N/A", "NaN", "NAN"}
         if extra_missing:
             miss |= {s.upper() for s in extra_missing}
         decs = decimals_per_col or {}
+        preserve_text_cols = {str(c) for c in (preserve_text_cols or set())}
 
         def is_listy(x): return isinstance(x, (list, tuple, set))
 
@@ -1131,6 +1180,11 @@ class SListMixin:
 
         out = df.copy()
         for col in out.columns:
+            if str(col) in preserve_text_cols:
+                out[col] = out[col].apply(
+                    lambda v: "" if v is None or (isinstance(v, float) and np.isnan(v)) else v
+                ).astype(object)
+                continue
             out[col] = series_to_numeric(out[col], col)
         return out
 
@@ -1140,9 +1194,23 @@ class SListMixin:
         *,
         float_decimals_default: int = 3,
         float_decimals_per_col: dict[str, int] | None = None,
+        preserve_text_cols: set[str] | None = None,
     ) -> DataFrameModel:
         """Virtual model — Qt only renders visible cells. Fast for large tables."""
-        return DataFrameModel(df, float_decimals_default, float_decimals_per_col)
+        return DataFrameModel(
+            df,
+            float_decimals_default,
+            float_decimals_per_col,
+            preserve_text_cols,
+        )
+
+    @staticmethod
+    def sample_list_df_to_model(df: pd.DataFrame) -> DataFrameModel:
+        """Sample-list columns are identifiers/paths, so preserve placeholders."""
+        return SListMixin.df_to_model(
+            df,
+            preserve_text_cols={"ID", "EDF", "Annotations"},
+        )
 
     @staticmethod
     def df_to_std_model(

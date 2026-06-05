@@ -25,7 +25,7 @@ from . import __version__
 import lunapi as lp
 import pandas as pd
 
-import os, sys, threading
+import os, sys, threading, time
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 
@@ -42,7 +42,10 @@ from . import updater as _updater
 
 import pyqtgraph as pg
 
-from  .helpers import clear_rows, add_dock_shortcuts, pick_two_colors, override_colors, random_darkbg_colors, Blocker
+from  .helpers import (
+    AppFontController, Blocker, add_dock_shortcuts, clear_rows,
+    override_colors, pick_two_colors, random_darkbg_colors,
+)
 from .components.tbl_funcs import add_combo_column, add_check_column
 
 from .components.slist import SListMixin
@@ -98,6 +101,45 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
     sig_predict_proj_done = Signal(object)
     sig_predict_proj_failed = Signal(str)
 
+    def _profile_attach_enabled(self):
+        return str(os.environ.get("LUNASCOPE_PROFILE_ATTACH", "")).lower() in {
+            "1", "true", "yes", "on"
+        }
+
+    def _profile_attach_write(self, line):
+        out = getattr(getattr(self, "ui", None), "txt_out", None)
+        if out is not None:
+            try:
+                out.appendPlainText(line)
+                return
+            except Exception:
+                pass
+        print(line, file=sys.stderr, flush=True)
+
+    def _profile_attach_begin(self, id_str):
+        if not self._profile_attach_enabled():
+            return
+        now = time.perf_counter()
+        self._profile_attach_t0 = now
+        self._profile_attach_last = now
+        self._profile_attach_write(f"[lunascope-profile attach] begin id={id_str}")
+
+    def _profile_attach_mark(self, label):
+        if not self._profile_attach_enabled():
+            return
+        now = time.perf_counter()
+        t0 = getattr(self, "_profile_attach_t0", now)
+        last = getattr(self, "_profile_attach_last", t0)
+        self._profile_attach_write(
+            f"[lunascope-profile attach] +{now - last:.3f}s total={now - t0:.3f}s {label}"
+        )
+        self._profile_attach_last = now
+
+    def _on_font_scale_changed(self, scale):
+        explorer = getattr(self, "_tab_tables", None)
+        if explorer is not None and hasattr(explorer, "refresh_font_scale"):
+            explorer.refresh_font_scale(scale)
+
     def __init__(self, ui, proj):
 
         super().__init__()
@@ -106,6 +148,8 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         self.ui = ui
         # Luna
         self.proj = proj
+        self._font_controller = AppFontController(self.ui)
+        self._font_controller.apply_saved()
         
         # set up threading for compute funcs
         self._exec = ThreadPoolExecutor(max_workers=1)
@@ -244,6 +288,11 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         act_predict.setText("Predict")
         self.ui.addAction(act_predict)
         self.ui.menuView.addAction(act_predict)
+        self.ui.menuView.addSeparator()
+        for act in self._font_controller.create_actions(self.ui):
+            self.ui.addAction(act)
+            self.ui.menuView.addAction(act)
+        self._font_controller.scaleChanged.connect(self._on_font_scale_changed)
         act_cycle_next = QAction("Next Lunascope Window", self)
         act_cycle_next.setShortcuts([QKeySequence("Ctrl+`"), QKeySequence("Meta+`")])
         act_cycle_next.setShortcutContext(Qt.ApplicationShortcut)
@@ -563,6 +612,8 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         if getattr(self, "hypnocanvas", None) is not None:
             self.hypnocanvas.ax.cla()
             self.hypnocanvas.figure.canvas.draw_idle()
+        if hasattr(self, "_clear_hypnostats_display"):
+            self._clear_hypnostats_display()
         if getattr(self, "actigraphycanvas", None) is not None:
             self.actigraphycanvas.ax.cla()
             self.actigraphycanvas.figure.canvas.draw_idle()
@@ -672,12 +723,23 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         if not selected_row:
             return
         
+        # attach the individual by ID (i.e. as list may be filtered)
+        id_str = selected_row[0]
+        if not str(id_str).strip():
+            return
+
         # clear existing stuff
         self._clear_all()
+        self._profile_attach_begin(id_str)
+        self._profile_attach_mark("_clear_all")
 
         # The table view is the authoritative sample list. Re-sync the engine
         # from it before resolving the selected ID to avoid stale row loads.
         self._sync_proj_sample_list_from_view()
+        if getattr(self, "_slist_proj_sync_skipped", False):
+            self._profile_attach_mark("_sync_proj_sample_list_from_view skipped")
+        else:
+            self._profile_attach_mark("_sync_proj_sample_list_from_view")
 
         # get/set parameters
         self.proj.clear_vars()
@@ -685,15 +747,12 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         param = self._parse_tab_pairs( self.ui.txt_param )
         for p in param:
             self.proj.var( p[0] , p[1] )
-            
-        # attach the individual by ID (i.e. as list may be filtered)
-        id_str = selected_row[0]
-        if not str(id_str).strip():
-            return
+        self._profile_attach_mark("project vars/reinit")
         
         # attach EDF
         try:
             self.p = self.proj.inst( id_str )
+            self._profile_attach_mark("proj.inst")
         except Exception as e:
             QMessageBox.critical(
                 self.ui,
@@ -704,6 +763,7 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
 
         # check for weird EDF record sizes
         rec_size = self.p.edf.stat()['rs']
+        self._profile_attach_mark("edf.stat")
         if not rec_size.is_integer():
 
             edf_file = self.p.edf.stat()['edf_file']
@@ -759,32 +819,42 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         
         # and update things that need updating
         self._update_metrics()
+        self._profile_attach_mark("_update_metrics")
         self._render_hypnogram()
+        self._profile_attach_mark("_render_hypnogram")
         self._update_spectrogram_list()
+        self._profile_attach_mark("_update_spectrogram_list")
         self._update_actigraphy_list()
+        self._profile_attach_mark("_update_actigraphy_list")
         self._update_mask_list()
+        self._profile_attach_mark("_update_mask_list")
         self._update_soap_list()
+        self._profile_attach_mark("_update_soap_list")
         self._update_predict_channels()
+        self._profile_attach_mark("_update_predict_channels")
         self._update_params()
+        self._profile_attach_mark("_update_params")
 
         # get/set cmaps (done automatically via updates) 
         self._apply_cmaps()
+        self._profile_attach_mark("_apply_cmaps")
 
         # initially, no signals rendered / not rendered / not current
         self._set_render_status( False , False )
+        self._profile_attach_mark("_set_render_status")
 
         # draw
         self._render_signals_simple()
+        self._profile_attach_mark("_render_signals_simple")
 
         # multiday records default to the actigraphy dock; otherwise keep HYPNO
         if getattr(self, "multiday_mode", False):
             self._sync_multiday_actigraphy_dock()
+            self._profile_attach_mark("_sync_multiday_actigraphy_dock")
         else:
             self._sync_multiday_actigraphy_dock()
-            if self.ui.isVisible():
-                self._calc_hypnostats()
-            else:
-                QTimer.singleShot(0, self._calc_hypnostats)
+            self._profile_attach_mark("_sync_multiday_actigraphy_dock")
+            self._profile_attach_mark("_calc_hypnostats skipped on attach")
 
         
     # ------------------------------------------------------------
@@ -1068,8 +1138,10 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
                 if isinstance(sample_rows, list) and sample_rows:
                     self.proj.clear()
                     self.proj.eng.set_sample_list(sample_rows)
+                    self._slist_loaded_key = None
+                    self._slist_proj_dirty = False
                     df = self.proj.sample_list()
-                    model = self.df_to_model(df)
+                    model = self.sample_list_df_to_model(df)
                     self._proxy.setSourceModel(model)
                     if hasattr(self, "_set_slist_label"):
                         self._set_slist_label("<internal>")

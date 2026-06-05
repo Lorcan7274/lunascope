@@ -50,15 +50,32 @@ class HypnoMixin:
         # wiring
         self.ui.butt_calc_hypnostats.clicked.connect( self._calc_hypnostats )
 
+    def _clear_hypnostats_display(self):
+        for label, text in (
+            (self.ui.hyp_TST, "TST : -"),
+            (self.ui.hyp_WASO, "WASO : -"),
+            (self.ui.hyp_N1, "N1 : -"),
+            (self.ui.hyp_N2, "N2 : -"),
+            (self.ui.hyp_N3, "N3 : -"),
+            (self.ui.hyp_R, "R : -"),
+        ):
+            label.setText(text)
+
     # ------------------------------------------------------------
     # Run hypnostats
 
     def _calc_hypnostats(self):
+        if hasattr(self, "_profile_attach_mark"):
+            self._profile_attach_mark("_calc_hypnostats begin")
         self._ensure_hypno_canvas()
+        if hasattr(self, "_profile_attach_mark"):
+            self._profile_attach_mark("_calc_hypnostats ensure canvas")
 
         # clear items first
         self.hypnocanvas.ax.cla()
         self.hypnocanvas.figure.canvas.draw_idle()
+        if hasattr(self, "_profile_attach_mark"):
+            self._profile_attach_mark("_calc_hypnostats clear canvas")
         
         # test if we have somebody attached        
         if not hasattr(self, "p"):
@@ -67,6 +84,8 @@ class HypnoMixin:
 
         # who has at least some staging available
         diag = self._stage_validation_diagnostics()
+        if hasattr(self, "_profile_attach_mark"):
+            self._profile_attach_mark(f"_calc_hypnostats stage validation code={diag.get('code')}")
         if not diag["ok"]:
             if self.ui.radio_assume_staging.isChecked():
                 self._show_staging_message(
@@ -76,9 +95,13 @@ class HypnoMixin:
         
         # make hypnogram
         ss = self.p.stages()
+        if hasattr(self, "_profile_attach_mark"):
+            self._profile_attach_mark(f"_calc_hypnostats p.stages n={len(ss)}")
         from .plts import hypno
         hypno(ss.STAGE, ax=self.hypnocanvas.ax)
         self.hypnocanvas.draw_idle()
+        if hasattr(self, "_profile_attach_mark"):
+            self._profile_attach_mark("_calc_hypnostats draw mpl hypno")
         
         # build HYPNO command
         cmd_str = 'EPOCH align & HYPNO'
@@ -111,6 +134,8 @@ class HypnoMixin:
         # Luna call to get full HYPNO outputs
         try:
             res = self.p.silent_proc(cmd_str)
+            if hasattr(self, "_profile_attach_mark"):
+                self._profile_attach_mark("_calc_hypnostats HYPNO command")
         except Exception as e:
             QMessageBox.critical(
                 self.ui,
@@ -127,6 +152,8 @@ class HypnoMixin:
         # (as _render_tables() wipes main output)
         df1 = self.p.table( 'HYPNO' )
         df2 = self.p.table( 'HYPNO' , 'SS' )
+        if hasattr(self, "_profile_attach_mark"):
+            self._profile_attach_mark("_calc_hypnostats HYPNO tables")
         #df3 = self.p.table( 'HYPNO' , 'C' )
         
         # possible that df2 and df3 will be empty - i.e. if only W
@@ -171,3 +198,5 @@ class HypnoMixin:
 
         tbls = self.p.strata()
         self._render_tables( tbls )
+        if hasattr(self, "_profile_attach_mark"):
+            self._profile_attach_mark("_calc_hypnostats _render_tables/end")

@@ -671,6 +671,8 @@ class SoapPopsMixin:
         }
 
     def _stage_validation_diagnostics(self, require_multiple=True):
+        if hasattr(self, "_profile_attach_mark"):
+            self._profile_attach_mark(f"_stage_validation_diagnostics begin require_multiple={require_multiple}")
         diag = {
             "ok": False,
             "code": "unknown",
@@ -686,8 +688,14 @@ class SoapPopsMixin:
             return diag
 
         raw_df = self._stage_validation_raw_df()
+        if hasattr(self, "_profile_attach_mark"):
+            self._profile_attach_mark(f"_stage_validation_diagnostics raw_df n={len(raw_df)}")
         aligned_df = self._stage_validation_df()
+        if hasattr(self, "_profile_attach_mark"):
+            self._profile_attach_mark(f"_stage_validation_diagnostics aligned_df n={len(aligned_df)}")
         aligned_unique = self._stage_validation_unique_count(aligned_df)
+        if hasattr(self, "_profile_attach_mark"):
+            self._profile_attach_mark(f"_stage_validation_diagnostics unique={aligned_unique}")
 
         diag["raw_df"] = raw_df
         diag["aligned_df"] = aligned_df

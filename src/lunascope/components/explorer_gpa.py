@@ -1815,113 +1815,24 @@ class GPATab(_ExplorerTab):
             r.addWidget(lbl); r.addWidget(widget, 1)
             return r
 
-        # Mode
-        self._mode_combo = QComboBox()
-        for key, lbl in [
-            ("assoc", "Association  (X → Y)"),
-            ("stats", "Descriptive stats  (X)"),
-            ("comp",  "Comparison  (X by FAC)"),
-        ]:
-            self._mode_combo.addItem(lbl, key)
-        opts_lay.addLayout(_row("Mode:", self._mode_combo))
-
-        # FAC filter — required for comp mode; always available
-        fac_row = QHBoxLayout()
-        fac_row.addWidget(QLabel("facs:"))
-        self._facs_edit = QLineEdit(); self._facs_edit.setFixedWidth(90)
-        self._facs_edit.setPlaceholderText("FAC1,FAC2")
-        self._facs_edit.setToolTip(
-            "Factor variable(s) to include (required for Comparison mode)")
-        fac_row.addWidget(self._facs_edit)
-        fac_row.addWidget(QLabel("xfacs:"))
-        self._xfacs_edit = QLineEdit(); self._xfacs_edit.setFixedWidth(90)
-        self._xfacs_edit.setPlaceholderText("exclude…")
-        fac_row.addWidget(self._xfacs_edit)
-        fac_row.addStretch(1)
-        self._fac_row_widget = QWidget(); self._fac_row_widget.setLayout(fac_row)
-        opts_lay.addWidget(self._fac_row_widget)
-
-        def _update_fac_highlight():
-            is_comp = self._mode_combo.currentData() == "comp"
-            self._facs_edit.setStyleSheet(
-                "border: 1px solid #f9844a;" if is_comp else "")
-        self._mode_combo.currentIndexChanged.connect(_update_fac_highlight)
-
-        # nreps
-        self._nreps_spin = QSpinBox()
-        self._nreps_spin.setRange(0, 100000); self._nreps_spin.setValue(0)
-        self._nreps_spin.setSpecialValueText("0 (asymptotic)")
-        opts_lay.addLayout(_row("Permutations:", self._nreps_spin))
-
-        # Corrections
-        corr_row = QHBoxLayout()
-        self._chk_fdr    = QCheckBox("FDR"); self._chk_fdr.setChecked(True)
-        self._chk_bonf   = QCheckBox("Bonf")
-        self._chk_holm   = QCheckBox("Holm")
-        self._chk_fdr_by = QCheckBox("FDR-BY")
-        self._chk_adj_all = QCheckBox("adj-all-X")
-        for c in (self._chk_fdr, self._chk_bonf, self._chk_holm,
-                  self._chk_fdr_by, self._chk_adj_all):
-            corr_row.addWidget(c)
-        corr_row.addStretch(1)
-        opts_lay.addLayout(_row("Corrections:", QWidget()))
-        opts_lay.addLayout(corr_row)
-
-        # P thresholds
-        thresh_row = QHBoxLayout()
-        thresh_row.addWidget(QLabel("p ≤")); self._p_spin = QDoubleSpinBox()
-        self._p_spin.setRange(0, 1); self._p_spin.setValue(1.0)
-        self._p_spin.setSingleStep(0.01); self._p_spin.setDecimals(3)
-        self._p_spin.setFixedWidth(70)
-        thresh_row.addWidget(self._p_spin)
-        thresh_row.addWidget(QLabel("padj ≤")); self._padj_spin = QDoubleSpinBox()
-        self._padj_spin.setRange(0, 1); self._padj_spin.setValue(1.0)
-        self._padj_spin.setSingleStep(0.01); self._padj_spin.setDecimals(3)
-        self._padj_spin.setFixedWidth(70)
-        thresh_row.addWidget(self._padj_spin)
-        thresh_row.addStretch(1)
-        opts_lay.addLayout(thresh_row)
-
-        # Missing data / QC
-        qc_row = QHBoxLayout()
-        qc_row.addWidget(QLabel("n-prop:"))
-        self._nprop_edit = QLineEdit(); self._nprop_edit.setFixedWidth(50)
-        self._nprop_edit.setPlaceholderText("0.05")
-        qc_row.addWidget(self._nprop_edit)
-        qc_row.addWidget(QLabel("n-req:"))
-        self._nreq_edit = QLineEdit(); self._nreq_edit.setFixedWidth(45)
-        self._nreq_edit.setPlaceholderText("off")
-        qc_row.addWidget(self._nreq_edit)
-        qc_row.addStretch(1)
-        opts_lay.addLayout(qc_row)
-
-        qc_row2 = QHBoxLayout()
-        qc_row2.addWidget(QLabel("knn:"))
-        self._knn_edit = QLineEdit(); self._knn_edit.setFixedWidth(40)
-        self._knn_edit.setPlaceholderText("off")
-        qc_row2.addWidget(self._knn_edit)
-        qc_row2.addWidget(QLabel("winsor:"))
+        # Winsorization
+        winsor_row = QHBoxLayout()
+        winsor_label = QLabel("winsor (tail fraction 0-0.5):")
         self._winsor_edit = QLineEdit(); self._winsor_edit.setFixedWidth(45)
         self._winsor_edit.setPlaceholderText("off")
-        qc_row2.addWidget(self._winsor_edit)
-        qc_row2.addStretch(1)
-        opts_lay.addLayout(qc_row2)
-
-        # Subset / IDs
-        self._subset_edit = QLineEdit(); self._subset_edit.setPlaceholderText("e.g. +MALE")
-        opts_lay.addLayout(_row("Subset:", self._subset_edit))
-        self._incids_edit = QLineEdit(); self._incids_edit.setPlaceholderText("id1,id2,…")
-        opts_lay.addLayout(_row("inc-ids:", self._incids_edit))
-        self._exids_edit  = QLineEdit(); self._exids_edit.setPlaceholderText("id1,id2,…")
-        opts_lay.addLayout(_row("ex-ids:", self._exids_edit))
+        self._winsor_edit.setToolTip("Fraction trimmed from each tail; 0.05 trims 5% at both ends.")
+        winsor_label.setToolTip("Winsor tail fraction per side. Values above 0.5 are clamped to 0.5.")
+        winsor_row.addWidget(winsor_label)
+        winsor_row.addWidget(self._winsor_edit)
+        winsor_row.addStretch(1)
+        opts_lay.addLayout(winsor_row)
 
         # Save as TSV (dump)
         dump_row = QHBoxLayout()
         self._dump_tsv_btn = QPushButton("Save as TSV…")
         self._dump_tsv_btn.setToolTip(
             "Export the selected variables as a flat TSV file using GPA dump mode.\n"
-            "Applies the same filters (subset, inc-ids, ex-ids, n-prop, n-req, knn, winsor)\n"
-            "as the current Options settings.")
+            "Applies the same QC settings (winsor only) as the current Options.")
         self._dump_tsv_btn.clicked.connect(self._save_gpa_dump_tsv)
         dump_row.addStretch(1)
         dump_row.addWidget(self._dump_tsv_btn)
@@ -2119,14 +2030,6 @@ class GPATab(_ExplorerTab):
         self._assoc_abs_spin.setValue(0.0)
         self._assoc_abs_spin.setFixedWidth(70)
         corr_opts.addWidget(self._assoc_abs_spin)
-        corr_opts.addWidget(QLabel("p ≤"))
-        self._assoc_p_spin = QDoubleSpinBox()
-        self._assoc_p_spin.setRange(0.0, 1.0)
-        self._assoc_p_spin.setDecimals(4)
-        self._assoc_p_spin.setSingleStep(0.01)
-        self._assoc_p_spin.setValue(1.0)
-        self._assoc_p_spin.setFixedWidth(80)
-        corr_opts.addWidget(self._assoc_p_spin)
         corr_opts.addWidget(QLabel("Top"))
         self._assoc_topn_spin = QSpinBox()
         self._assoc_topn_spin.setRange(10, 5000)
@@ -2147,9 +2050,6 @@ class GPATab(_ExplorerTab):
         corr_lay.addLayout(corr_run)
         self._assoc_run_btn.clicked.connect(self._run_assoc_correlations)
         self._assoc_abs_spin.valueChanged.connect(
-            lambda *_: self._apply_assoc_corr_filter(self._assoc_corr_filter.text())
-        )
-        self._assoc_p_spin.valueChanged.connect(
             lambda *_: self._apply_assoc_corr_filter(self._assoc_corr_filter.text())
         )
         self._assoc_topn_spin.valueChanged.connect(
@@ -3864,39 +3764,12 @@ class GPATab(_ExplorerTab):
             return
 
         opts = _with_dump_qc_disabled({"dat": dat_path, "dump": "", "lvars": ",".join(all_vars)})
-        np_txt = self._nprop_edit.text().strip()
-        if np_txt:
-            try:
-                float(np_txt); opts["n-prop"] = np_txt
-            except ValueError:
-                pass
-        nr_txt = self._nreq_edit.text().strip()
-        if nr_txt:
-            try:
-                int(nr_txt); opts["n-req"] = nr_txt
-            except ValueError:
-                pass
-        knn = self._knn_edit.text().strip()
-        if knn:
-            try:
-                int(knn); opts["knn"] = knn
-            except ValueError:
-                pass
         win = self._winsor_edit.text().strip()
         if win:
             try:
                 float(win); opts["winsor"] = win
             except ValueError:
                 pass
-        sub = self._subset_edit.text().strip()
-        if sub:
-            opts["subset"] = sub
-        inc = self._incids_edit.text().strip()
-        if inc:
-            opts["inc-ids"] = inc
-        ex = self._exids_edit.text().strip()
-        if ex:
-            opts["ex-ids"] = ex
 
         if not self._start_work("Dumping GPA data…"):
             return
@@ -3926,9 +3799,6 @@ class GPATab(_ExplorerTab):
         x_vars = self._picker_x.selected_long_names()
         y_vars = self._picker_y.selected_long_names()
         z_vars = self._picker_z.selected_long_names()
-        mode = self._mode_combo.currentData()
-
-        facs = self._facs_edit.text().strip()
 
         overlap_info = _normalize_gpa_role_overlap(x_vars, y_vars, z_vars)
         if not overlap_info.get("ok"):
@@ -3953,25 +3823,10 @@ class GPATab(_ExplorerTab):
         z_bases = self._selection_base_count(z_vars)
         self._last_gpa_z = z_vars  # list for partial scatter
 
-        if mode == "assoc" and (x_bases == 0 or y_bases == 0):
+        if x_bases == 0 or y_bases == 0:
             QtWidgets.QMessageBox.warning(
                 self._root, "GPA",
                 "Association mode requires at least one X predictor and one Y outcome.")
-            return
-        if mode == "comp" and x_bases == 0:
-            QtWidgets.QMessageBox.warning(
-                self._root, "GPA",
-                "Comparison mode requires at least one X variable to test.")
-            return
-        if mode == "comp" and not facs:
-            QtWidgets.QMessageBox.warning(
-                self._root, "GPA",
-                "Comparison mode requires a factor variable in the FAC field (Options).\n"
-                "Enter the name of a binary FAC column from your dataset.")
-            return
-        if mode == "stats" and x_bases == 0:
-            QtWidgets.QMessageBox.warning(
-                self._root, "GPA", "Descriptive stats mode requires at least one X variable.")
             return
 
         warning_lines = overlap_info.get("warning_lines") or []
@@ -3986,7 +3841,6 @@ class GPATab(_ExplorerTab):
 
         request = self._collect_gpa_request(x_vars, y_vars, z_vars)
         self._last_gpa_request = {
-            "mode": mode,
             "x_count": x_bases,
             "y_count": y_bases,
             "z_count": z_bases,
@@ -4008,17 +3862,10 @@ class GPATab(_ExplorerTab):
             return
         self._clear_results_display()
         bits = []
-        if mode == "assoc":
-            bits.append(f"{self._last_gpa_request['x_count']} X")
-            bits.append(f"{self._last_gpa_request['y_count']} Y")
-            if self._last_gpa_request["z_count"]:
-                bits.append(f"{self._last_gpa_request['z_count']} Z")
-        elif mode == "stats":
-            bits.append(f"{self._last_gpa_request['x_count']} X")
-        elif mode == "comp":
-            bits.append(f"{self._last_gpa_request['x_count']} X")
-            if facs:
-                bits.append(f"FAC={facs}")
+        bits.append(f"{self._last_gpa_request['x_count']} X")
+        bits.append(f"{self._last_gpa_request['y_count']} Y")
+        if self._last_gpa_request["z_count"]:
+            bits.append(f"{self._last_gpa_request['z_count']} Z")
         for key in ("x_long_count", "y_long_count", "z_long_count"):
             val = self._last_gpa_request.get(key, 0)
             if val:
@@ -4027,10 +3874,6 @@ class GPATab(_ExplorerTab):
             val = self._last_gpa_request.get(key)
             if val:
                 bits.append(f"{key[0].upper()} {val}")
-        if request["meta"].get("n_prop") is not None:
-            bits.append(f"n-prop<={request['meta']['n_prop']}")
-        if request["meta"].get("n_req") is not None:
-            bits.append(f"n-req>={request['meta']['n_req']}")
         self._analyze_status.setText(
             "Running… " + ", ".join(bits) if bits else "Running…")
 
@@ -4043,85 +3886,25 @@ class GPATab(_ExplorerTab):
         fut.add_done_callback(_done)
 
     def _collect_gpa_request(self, x_longs, y_longs, z_longs):
-        mode = self._mode_combo.currentData()
         opts = {"dat": self._dat_edit.text().strip()}
-        meta = {"mode": mode}
         if x_longs:
             opts["X"] = ",".join(x_longs)
         if z_longs:
             opts["Z"] = ",".join(z_longs)
-        if mode == "assoc" and y_longs:
+        if y_longs:
             opts["lvars"] = ",".join(y_longs)
-        elif mode == "stats":
-            opts["stats"] = ""
-        elif mode == "comp":
-            opts["comp"] = ""
-
-        nreps = self._nreps_spin.value()
-        if nreps:
-            opts["nreps"] = str(nreps)
-        if not self._chk_fdr.isChecked():
-            opts["fdr"] = "F"
-        if self._chk_bonf.isChecked():
-            opts["bonf"] = ""
-        if self._chk_holm.isChecked():
-            opts["holm"] = ""
-        if self._chk_fdr_by.isChecked():
-            opts["fdr-by"] = ""
-        if self._chk_adj_all.isChecked():
-            opts["adj-all-X"] = ""
-        p = self._p_spin.value()
-        if p < 1.0:
-            opts["p"] = str(p)
-        padj = self._padj_spin.value()
-        if padj < 1.0:
-            opts["padj"] = str(padj)
-        np_txt = self._nprop_edit.text().strip()
-        if np_txt:
-            try:
-                meta["n_prop"] = float(np_txt)
-                opts["n-prop"] = np_txt
-            except ValueError: pass
-        nr_txt = self._nreq_edit.text().strip()
-        if nr_txt:
-            try:
-                meta["n_req"] = int(nr_txt)
-                opts["n-req"] = nr_txt
-            except ValueError: pass
-        knn = self._knn_edit.text().strip()
-        if knn:
-            try: opts["knn"] = str(int(knn))
-            except ValueError: pass
         win = self._winsor_edit.text().strip()
         if win:
             try: opts["winsor"] = str(float(win))
             except ValueError: pass
-        facs = self._facs_edit.text().strip()
-        if facs:
-            opts["facs"] = facs
-        xfacs = self._xfacs_edit.text().strip()
-        if xfacs:
-            opts["xfacs"] = xfacs
-        sub = self._subset_edit.text().strip()
-        if sub:
-            opts["subset"] = sub
-        inc = self._incids_edit.text().strip()
-        if inc:
-            opts["inc-ids"] = inc
-        ex = self._exids_edit.text().strip()
-        if ex:
-            opts["ex-ids"] = ex
         return {
             "opts": opts,
             "diag": {
                 "X": list(x_longs),
                 "Y": list(y_longs),
                 "Z": list(z_longs),
-                "subset": opts.get("subset"),
-                "inc-ids": opts.get("inc-ids"),
-                "ex-ids": opts.get("ex-ids"),
             },
-            "meta": meta,
+            "meta": {},
         }
 
     @staticmethod
@@ -4169,12 +3952,6 @@ class GPATab(_ExplorerTab):
             return diag
 
         opts = {"dat": dat_path, "dump": "", "lvars": ",".join(selected)}
-        if selected_sets.get("subset"):
-            opts["subset"] = selected_sets["subset"]
-        if selected_sets.get("inc-ids"):
-            opts["inc-ids"] = selected_sets["inc-ids"]
-        if selected_sets.get("ex-ids"):
-            opts["ex-ids"] = selected_sets["ex-ids"]
         _eng = _l0.inaugurate()
         _, stdout = _eng.run_gpa(opts, False)
         dump_df = _parse_gpa_manifest_text(stdout)
@@ -4219,17 +3996,9 @@ class GPATab(_ExplorerTab):
     def _format_gpa_status(self, result, diag=None):
         """Build a more informative one-line GPA run summary."""
         req = self._last_gpa_request or {}
-        mode = req.get("mode", "")
-        if mode == "assoc":
-            lead = f"Assoc: {req.get('x_count', 0)} X, {req.get('y_count', 0)} Y"
-            if req.get("z_count"):
-                lead += f", {req.get('z_count', 0)} Z"
-        elif mode == "stats":
-            lead = f"Desc: {req.get('x_count', 0)} X"
-        elif mode == "comp":
-            lead = f"Comp: {req.get('x_count', 0)} X"
-        else:
-            lead = "GPA"
+        lead = f"Assoc: {req.get('x_count', 0)} X, {req.get('y_count', 0)} Y"
+        if req.get("z_count"):
+            lead += f", {req.get('z_count', 0)} Z"
 
         details = []
         if diag:
@@ -4249,10 +4018,6 @@ class GPATab(_ExplorerTab):
         n_summary = _summarize_observed_n(result)
         if n_summary:
             details.append(n_summary)
-        if req.get("n_prop") is not None:
-            details.append(f"n-prop<={req['n_prop']}")
-        if req.get("n_req") is not None:
-            details.append(f"n-req>={req['n_req']}")
         if req.get("selection_warning"):
             details.append(req["selection_warning"])
         n_tables = len(result or {})
@@ -4289,14 +4054,6 @@ class GPATab(_ExplorerTab):
                     const_bits.append(f"{key} const={','.join(vals[:2])}")
             if const_bits:
                 parts.append("; ".join(const_bits))
-        req = self._last_gpa_request or {}
-        qualifiers = []
-        if req.get("n_prop") is not None:
-            qualifiers.append(f"n-prop<={req['n_prop']}")
-        if req.get("n_req") is not None:
-            qualifiers.append(f"n-req>={req['n_req']}")
-        if qualifiers:
-            parts.append(", ".join(qualifiers))
         if stdout:
             lines = [ln.strip() for ln in stdout.splitlines() if ln.strip()]
             if lines:
@@ -4441,8 +4198,7 @@ class GPATab(_ExplorerTab):
     def _joint_mode_available(self):
         req = self._last_gpa_request or {}
         return (
-            req.get("mode") == "assoc"
-            and len(req.get("x_vars") or []) == 1
+            len(req.get("x_vars") or []) == 1
             and self._active_result_df is not None
             and not self._active_result_df.empty
             and {"X", "Y"}.issubset(self._active_result_df.columns)
@@ -4547,9 +4303,8 @@ class GPATab(_ExplorerTab):
     def _joint_dump_filters(self):
         opts = dict((self._last_gpa_request or {}).get("opts") or {})
         keep = {}
-        for key in ("subset", "inc-ids", "ex-ids", "n-prop", "n-req", "knn", "winsor"):
-            if key in opts and opts[key] not in (None, ""):
-                keep[key] = opts[key]
+        if "winsor" in opts and opts["winsor"] not in (None, ""):
+            keep["winsor"] = opts["winsor"]
         return _with_dump_qc_disabled(keep)
 
     def _start_joint_fit(self):
@@ -4840,13 +4595,10 @@ class GPATab(_ExplorerTab):
             proxy.setFilterRegularExpression(QRegularExpression())
             return
         abs_min = float(self._assoc_abs_spin.value())
-        p_max = float(self._assoc_p_spin.value())
         top_n = int(self._assoc_topn_spin.value())
         mask = pd.Series(True, index=df.index)
         if "ABS_R" in df.columns:
             mask &= pd.to_numeric(df["ABS_R"], errors="coerce").fillna(-1) >= abs_min
-        if "P" in df.columns and p_max < 1.0:
-            mask &= pd.to_numeric(df["P"], errors="coerce").fillna(np.inf) <= p_max
         keep_rows = set(df.loc[mask].index[:top_n].tolist())
         pattern = str(text or "").strip().lower()
         source = proxy.sourceModel()
@@ -4908,12 +4660,9 @@ class GPATab(_ExplorerTab):
         if df is None or df.empty:
             return pd.DataFrame()
         abs_min = float(self._assoc_abs_spin.value())
-        p_max = float(self._assoc_p_spin.value())
         top_n = int(self._assoc_topn_spin.value())
         out = df.copy()
         out = out[pd.to_numeric(out["ABS_R"], errors="coerce").fillna(-1) >= abs_min]
-        if p_max < 1.0:
-            out = out[pd.to_numeric(out["P"], errors="coerce").fillna(np.inf) <= p_max]
         text = self._assoc_corr_filter.text().strip().lower()
         if text:
             mask = pd.Series(False, index=out.index)

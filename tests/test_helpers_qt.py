@@ -77,6 +77,7 @@ def test_clear_rows_handles_none_model(qapp):
 
 
 def test_add_dock_shortcuts_registers_windows_friendly_reset_shortcut(qapp):
+    from PySide6.QtGui import QAction
     from PySide6.QtWidgets import QMainWindow, QMenu
 
     from lunascope.helpers import add_dock_shortcuts
@@ -84,6 +85,8 @@ def test_add_dock_shortcuts_registers_windows_friendly_reset_shortcut(qapp):
     win = QMainWindow()
     view_menu = QMenu("View", win)
     win.menuView = view_menu
+    mask_action = QAction("(-) Masks / Subset", win)
+    view_menu.addAction(mask_action)
 
     add_dock_shortcuts(win, view_menu, reset_layout=lambda: None)
 
@@ -94,6 +97,65 @@ def test_add_dock_shortcuts_registers_windows_friendly_reset_shortcut(qapp):
 
     assert "Ctrl+)" in shortcuts
     assert "Ctrl+Shift+0" in shortcuts
+    assert mask_action.shortcut().toString() == "Ctrl+-"
+
+
+def test_font_controller_clamps_persists_and_applies_app_font(qapp, tmp_path):
+    from PySide6.QtCore import QSettings
+    from PySide6.QtGui import QFont
+
+    from lunascope.helpers import (
+        AppFontController,
+        FONT_SCALE_MAX,
+        FONT_SCALE_MIN,
+        saved_font_scale,
+    )
+
+    settings = QSettings(str(tmp_path / "font.ini"), QSettings.IniFormat)
+    original = QFont(qapp.font())
+    original_prop = qapp.property("lunascope_font_scale")
+    base_size = original.pointSizeF()
+    if base_size <= 0:
+        base_size = float(original.pointSize() if original.pointSize() > 0 else 10.0)
+
+    try:
+        ctl = AppFontController(settings=settings, apply_delay_ms=1)
+        ctl.set_scale(99, immediate=True)
+        assert ctl.scale == FONT_SCALE_MAX
+        assert saved_font_scale(settings) == FONT_SCALE_MAX
+        assert qapp.property("lunascope_font_scale") == FONT_SCALE_MAX
+
+        ctl.set_scale(-99, immediate=True)
+        assert ctl.scale == FONT_SCALE_MIN
+        assert saved_font_scale(settings) == FONT_SCALE_MIN
+        assert qapp.font().pointSizeF() == pytest.approx(base_size * FONT_SCALE_MIN)
+    finally:
+        qapp.setFont(original)
+        qapp.setProperty("lunascope_font_scale", original_prop)
+
+
+def test_font_controller_actions_do_not_use_mask_subset_shortcut(qapp, tmp_path):
+    from PySide6.QtCore import QSettings
+    from PySide6.QtWidgets import QMainWindow
+
+    from lunascope.helpers import AppFontController
+
+    settings = QSettings(str(tmp_path / "font.ini"), QSettings.IniFormat)
+    win = QMainWindow()
+    ctl = AppFontController(win, settings=settings)
+    actions = ctl.create_actions(win)
+    shortcuts = {
+        seq.toString()
+        for action in actions
+        for seq in action.shortcuts()
+    }
+
+    assert [action.text() for action in actions] == [
+        "Larger Text",
+        "Smaller Text",
+        "Reset Text Size",
+    ]
+    assert "Ctrl+-" not in shortcuts
 
 
 def test_wide_popup_combo_box_expands_popup_for_long_items(qapp):

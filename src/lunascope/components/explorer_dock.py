@@ -30,9 +30,10 @@ Ctrl+E  →  floating "Explorer" dock with tabbed panels:
     1  Annotations  – cohort-level annotation explorer (PETH, overlap, …)
     2  Hypnoscope   – staging grid across all subjects aligned by time
     3  Waveforms    – peri-event signal traces for the current record
-    4  Plotter      – generic scatter / line / bar / histogram for output tables
-    5  Assoc        – GPA / group-level association analyses
-    6  Topo         – EEG topographic maps (Results + Live animated player)
+    4  Tables       – descriptive summary tables for output tables
+    5  Plotter      – generic scatter / line / bar / histogram for output tables
+    6  Assoc        – GPA / group-level association analyses
+    7  Topo         – EEG topographic maps (Results + Live animated player)
 """
 
 from PySide6.QtCore import Qt
@@ -57,6 +58,7 @@ class ExplorerMixin:
         from .explorer_waveform   import WaveformTab
         from .explorer_event_decomp import EventDecompTab
         from .explorer_two_channel_dynamics import TwoChannelDynamicsTab
+        from .explorer_tables     import TablesTab
         from .explorer_plotter    import PlotterTab
         from .explorer_gpa        import GPATab
         from .explorer_filter_design import FilterDesignTab
@@ -81,6 +83,7 @@ class ExplorerMixin:
         self._tab_wave   = WaveformTab(self)
         self._tab_event_decomp = EventDecompTab(self)
         self._tab_two_channel = TwoChannelDynamicsTab(self)
+        self._tab_tables = TablesTab(self)
         self._tab_plot   = PlotterTab(self)
         self._tab_gpa    = GPATab(self)
         self._tab_filter_design = FilterDesignTab(self)
@@ -92,9 +95,10 @@ class ExplorerMixin:
         tabs.addTab(self._tab_hscope.widget(),     "Hypnoscope")   # 2
         tabs.addTab(self._tab_wave.widget(),       "Waveforms")    # 3
         tabs.addTab(self._tab_two_channel.widget(), "Player")      # 4  (hidden)
-        tabs.addTab(self._tab_plot.widget(),       "Plotter")      # 5
-        tabs.addTab(self._tab_gpa.widget(),        "Assoc")        # 6
-        tabs.addTab(self._tab_topo.widget(),       "Topo (Experimental)")  # 7
+        tabs.addTab(self._tab_tables.widget(),     "Tables")       # 5
+        tabs.addTab(self._tab_plot.widget(),       "Plotter")      # 6
+        tabs.addTab(self._tab_gpa.widget(),        "Assoc")        # 7
+        tabs.addTab(self._tab_topo.widget(),       "Topo (Experimental)")  # 8
 
         tabs.setTabVisible(4, False)   # Player
 
@@ -111,6 +115,7 @@ class ExplorerMixin:
 
         # Auto-refresh results/annotation lists whenever a command completes
         self.sig_results_changed.connect(self._tab_plot.refresh_tables)
+        self.sig_results_changed.connect(self._tab_tables.refresh_tables)
         self.sig_results_changed.connect(self._tab_topo.refresh_tables)
         self.sig_results_changed.connect(self._tab_wave._refresh_ann_ch)
 
@@ -146,7 +151,7 @@ class ExplorerMixin:
 
     def _explorer_tab_changed(self, idx):
         """Refresh context-sensitive controls when switching tabs."""
-        if idx != 7:
+        if idx != 8:
             self._tab_topo.pause_live_playback()
         if idx == 0:     # Harmonizer tab
             self._tab_harm.refresh_controls()
@@ -156,7 +161,9 @@ class ExplorerMixin:
             self._tab_wave.refresh_controls()
         elif idx == 4:   # Two-channel tab (hidden): reload channel list
             self._tab_two_channel.refresh_controls()
-        elif idx == 5:   # Plotter tab: reload available result tables
+        elif idx == 5:   # Tables tab: reload available result tables
+            self._tab_tables.refresh_tables()
+        elif idx == 6:   # Plotter tab: reload available result tables
             self._tab_plot.refresh_tables()
-        elif idx == 7:   # Topo tab: sync results table list
+        elif idx == 8:   # Topo tab: sync results table list
             self._tab_topo.refresh_tables()

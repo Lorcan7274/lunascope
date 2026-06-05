@@ -272,9 +272,13 @@ class MetricsMixin:
 
         # ------------------------------------------------------------
         # EDF header metrics --> status bar
+        if hasattr(self, "_profile_attach_mark"):
+            self._profile_attach_mark("_update_metrics begin")
         
         try:
             self.p.silent_proc( 'EPOCH' )
+            if hasattr(self, "_profile_attach_mark"):
+                self._profile_attach_mark("_update_metrics EPOCH")
         except RuntimeError as e:
             import sys
             print(f"[lunascope] note: EPOCH command raised RuntimeError ({e}) — refreshing EDF", file=sys.stderr)
@@ -289,6 +293,8 @@ class MetricsMixin:
             return
 
         self.p.silent_proc( 'HEADERS & EPOCH align' )
+        if hasattr(self, "_profile_attach_mark"):
+            self._profile_attach_mark("_update_metrics HEADERS & EPOCH align")
         df_align = self.p.table( 'EPOCH' )
         edf_ne_align = int( df_align.iloc[0, df_align.columns.get_loc('NE')] ) \
             if 'NE' in df_align.columns else 0
@@ -304,6 +310,8 @@ class MetricsMixin:
         tot_dur_hms = df.iloc[0, df.columns.get_loc('TOT_DUR_HMS')]
         edf_type = df.iloc[0, df.columns.get_loc('EDF_TYPE')]
         edf_na = self.p.annots().size
+        if hasattr(self, "_profile_attach_mark"):
+            self._profile_attach_mark("_update_metrics HEADERS table/p.annots")
         edf_ns = df.iloc[0, df.columns.get_loc('NS')]
         edf_starttime = df.iloc[0, df.columns.get_loc('START_TIME')]
         edf_startdate = df.iloc[0, df.columns.get_loc('START_DATE')]
@@ -319,6 +327,8 @@ class MetricsMixin:
         # get units (for plot labels) and sample rates (for filters)
 
         hdr = self.p.headers()
+        if hasattr(self, "_profile_attach_mark"):
+            self._profile_attach_mark("_update_metrics p.headers")
 
         if hdr is not None:
             self.units = dict( zip( hdr.CH , hdr.PDIM ) )
@@ -350,6 +360,8 @@ class MetricsMixin:
 
         # SOURCE model from your DataFrame
         src_sig = self.df_to_std_model(df)  # needs insertColumn / add_check_column
+        if hasattr(self, "_profile_attach_mark"):
+            self._profile_attach_mark("_update_metrics signal source model")
 
         # add filter proxy
         self.signals_table_proxy = attach_comma_filter(
@@ -375,6 +387,8 @@ class MetricsMixin:
         view.setSelectionMode(QAbstractItemView.SingleSelection)
         view.horizontalHeader().setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self._configure_dense_table(view)
+        if hasattr(self, "_profile_attach_mark"):
+            self._profile_attach_mark("_update_metrics signal view configured")
 
 
         
@@ -386,6 +400,8 @@ class MetricsMixin:
             initial_checked=[],
             on_change=lambda _: (self._clear_pg1(), self._update_scaling() ),
         )
+        if hasattr(self, "_profile_attach_mark"):
+            self._profile_attach_mark("_update_metrics signal check column")
 
         # --- minimal change start: make a real model column for the combo and bind a delegate ---
 
@@ -463,6 +479,8 @@ class MetricsMixin:
         
         self.ui.txt_signals.textChanged.connect(lambda *_: _reopen_all_later())
         _reopen_all_later()
+        if hasattr(self, "_profile_attach_mark"):
+            self._profile_attach_mark("_update_metrics signal filter editors")
 
         
         # --- minimal change end ---
@@ -536,6 +554,8 @@ class MetricsMixin:
 
         # SOURCE model
         df = self.p.annots()
+        if hasattr(self, "_profile_attach_mark"):
+            self._profile_attach_mark("_update_metrics p.annots table")
         if not df.empty:
             df = df[df["Annotations"] != "SleepStage"]
         
@@ -544,6 +564,8 @@ class MetricsMixin:
             df = sort_df_by_list( df , 0 , self.cmap_list )
         
         src = self.df_to_std_model(df)  # needs add_check_column
+        if hasattr(self, "_profile_attach_mark"):
+            self._profile_attach_mark("_update_metrics annot source model")
         
         # add filter proxy
         self.annots_table_proxy = attach_comma_filter(
@@ -570,6 +592,8 @@ class MetricsMixin:
         view.setSelectionMode(QAbstractItemView.SingleSelection)
         view.horizontalHeader().setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self._configure_dense_table(view)
+        if hasattr(self, "_profile_attach_mark"):
+            self._profile_attach_mark("_update_metrics annot view configured")
 
         # Add checkbox column; index is SOURCE column before insertion
         add_check_column(
@@ -584,6 +608,8 @@ class MetricsMixin:
                 self._schedule_actigraphy_update() if hasattr(self, "_schedule_actigraphy_update") else None
             ),
         )
+        if hasattr(self, "_profile_attach_mark"):
+            self._profile_attach_mark("_update_metrics annot check column")
         view.setColumnWidth(0, 24)
         view.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
         view.resizeColumnsToContents()
@@ -600,14 +626,20 @@ class MetricsMixin:
         self.ssa_anns = self.p.edf.annots()
         self.ssa_anns = [s for s in self.ssa_anns if s != "SleepStage"]
         self.ssa_anns_lookup = {v: i for i, v in enumerate(self.ssa_anns)}
+        if hasattr(self, "_profile_attach_mark"):
+            self._profile_attach_mark("_update_metrics p.edf.annots")
         
         # but initialize a separate ss for annotations only
         # for lookups (event instance listing)
         self.ssa = lp.segsrv( self.p )
         self.ssa.populate( chs = [ ] , anns = self.ssa_anns )
+        if hasattr(self, "_profile_attach_mark"):
+            self._profile_attach_mark("_update_metrics ssa.populate all annots")
         self.ssa.set_annot_format6( False )  # pyqtgraph vs plotly
         self.ssa.set_clip_xaxes( False )
         self.ssa.window(self.last_x1, self.last_x2) 
+        if hasattr(self, "_profile_attach_mark"):
+            self._profile_attach_mark("_update_metrics ssa window/setup")
         
         # populate here, as used by plot_simple (prior to render)
         self.ss_anns = self.ui.tbl_desc_annots.checked()
@@ -617,6 +649,8 @@ class MetricsMixin:
         self.set_palette()
         if hasattr(self, "_annotator_refresh_classes"):
             self._annotator_refresh_classes()
+        if hasattr(self, "_profile_attach_mark"):
+            self._profile_attach_mark("_update_metrics end")
 
 
 

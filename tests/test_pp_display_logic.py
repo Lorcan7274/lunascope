@@ -106,6 +106,24 @@ def test_pp_fill_disabled_for_sigmod_channels_in_render_mode():
     assert obj._channel_uses_pp_fill("PP_W", {"PP_N2": {"mod": "x", "pal": "y"}})
 
 
+def test_pp_fill_curve_does_not_peak_downsample(qapp):
+    obj = _DummySignals()
+    curve = obj._pp_fill_curve("cyan")
+    assert curve.opts["clipToView"] is True
+    assert curve.opts["autoDownsample"] is False
+    assert curve.opts["downsampleMethod"] == "peak"
+    assert curve.opts["fillLevel"] == 0.0
+
+
+def test_pp_fill_data_collapses_duplicate_x_to_upper_envelope():
+    obj = _DummySignals()
+    x = np.array([2.0, 1.0, 1.0, 2.0, 3.0, 3.0])
+    y = np.array([0.4, 0.1, 0.9, 0.7, -0.2, 0.3])
+    fill_x, fill_y = obj._prepare_pp_fill_data(x, y, band_lo=0.0)
+    np.testing.assert_allclose(fill_x, [1.0, 2.0, 3.0])
+    np.testing.assert_allclose(fill_y, [0.9, 0.7, 0.3])
+
+
 def test_resolved_signal_color_uses_pp_stage_color_independent_of_slot_order():
     obj = _DummySignals()
     obj.cmap = {}

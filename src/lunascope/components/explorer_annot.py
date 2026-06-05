@@ -61,7 +61,7 @@ from .annot_explorer_funcs import (
 )
 
 
-_MAX_FILTER_LEVELS = 10
+_MAX_FILTER_LEVELS = 20
 
 
 def _numeric_sort(values):

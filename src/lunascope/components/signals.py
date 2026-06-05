@@ -605,8 +605,12 @@ class SignalsMixin:
 
         # ------------------------------------------------------------
         # initiate segsrv 
+        if hasattr(self, "_profile_attach_mark"):
+            self._profile_attach_mark("_render_hypnogram begin")
         
         self.ss = lp.segsrv( self.p )
+        if hasattr(self, "_profile_attach_mark"):
+            self._profile_attach_mark("_render_hypnogram lp.segsrv")
         # reset non-render PSD segsrv so it is repopulated for the new file
         self._psd_nr_ss  = None
         self._psd_nr_chs = None
@@ -616,6 +620,8 @@ class SignalsMixin:
 
         # last time-point (secs)
         nsecs_clk = self.ss.num_seconds_clocktime_original()
+        if hasattr(self, "_profile_attach_mark"):
+            self._profile_attach_mark("_render_hypnogram num_seconds_clocktime_original")
 
         # number of scope-epochs (i.e. fixed at 0, 30s), and seconds
         self.ne = int( nsecs_clk / scope_epoch_sec )
@@ -640,6 +646,8 @@ class SignalsMixin:
 
         res = self.p.silent_proc( 'HEADERS' )
         df = self.p.table( 'HEADERS' )
+        if hasattr(self, "_profile_attach_mark"):
+            self._profile_attach_mark("_render_hypnogram HEADERS")
 
         start_date = str(df["START_DATE"].iloc[0])
         start_time = str(df["START_TIME"].iloc[0])
@@ -689,6 +697,8 @@ class SignalsMixin:
         h = self.ui.pgh
         pi = h.getPlotItem()
         pi.clear()
+        if hasattr(self, "_profile_attach_mark"):
+            self._profile_attach_mark("_render_hypnogram plot clear")
 
         vb = pi.getViewBox()
 
@@ -716,6 +726,8 @@ class SignalsMixin:
 
         h.setXRange(0,self.ns)
         h.setYRange(0,1)
+        if hasattr(self, "_profile_attach_mark"):
+            self._profile_attach_mark("_render_hypnogram plot range/setup")
 
         # get full, original staging from annotations
         stgs = self._navigator_stage_query_classes()
@@ -732,6 +744,8 @@ class SignalsMixin:
 
         stg_evts = self.p.fetch_annots( stgs , 30 )
         stg_evts = self._filter_navigator_stage_df(stg_evts, 'Class')
+        if hasattr(self, "_profile_attach_mark"):
+            self._profile_attach_mark(f"_render_hypnogram fetch_annots stages n={len(stg_evts)}")
         
         if len( stg_evts ) != 0:
             starts = stg_evts[ 'Start' ].to_numpy()
@@ -762,9 +776,13 @@ class SignalsMixin:
                 bg.setAcceptedMouseButtons(QtCore.Qt.NoButton)
                 bg.setAcceptHoverEvents(False)
                 pi.addItem(bg)
+            if hasattr(self, "_profile_attach_mark"):
+                self._profile_attach_mark(f"_render_hypnogram stage bars groups={len(bins)}")
 
         # segment plotter
         pi.plot([0, self.ns], [0.01, 0.01], pen=pg.mkPen(0, 0, 0 ))
+        if hasattr(self, "_profile_attach_mark"):
+            self._profile_attach_mark("_render_hypnogram segment line")
         
         # wire up range selector (first wiping existing one, if needed)
 
@@ -787,6 +805,8 @@ class SignalsMixin:
         self.sel.owner = self
 
         self.sel.rangeSelected.connect(self.on_window_range)  
+        if hasattr(self, "_profile_attach_mark"):
+            self._profile_attach_mark("_render_hypnogram selector")
 
         # clock ticks at top
         self.tb0 = TextBatch( vb, QtGui.QFont("Arial", 12), color=(180,255,255), mode='device')
@@ -807,6 +827,8 @@ class SignalsMixin:
         tv = [v[:-6] if v.endswith(":00:00") else v for v in tv]  # reduce to | hh
         self.tb0.setData(tx, [ 0.99 ] * len( tx ) , tv )
         self.ui.pgh.addItem(self.tb0 , ignoreBounds=True)
+        if hasattr(self, "_profile_attach_mark"):
+            self._profile_attach_mark(f"_render_hypnogram clock ticks n={len(tx)}")
 
         # day boundary lines on navigator (multi-day mode only)
         self._day_lines_pgh = []
@@ -826,6 +848,8 @@ class SignalsMixin:
         self.ui.butt_pops.setEnabled(not self.multiday_mode)
         if hasattr(self, "_sync_multiday_actigraphy_dock"):
             self._sync_multiday_actigraphy_dock()
+        if hasattr(self, "_profile_attach_mark"):
+            self._profile_attach_mark("_render_hypnogram end")
 
         
     # --------------------------------------------------------------------------------
@@ -838,6 +862,8 @@ class SignalsMixin:
 
         # writes on the same canvas as the hypnogram above, but only updates the
         # stuff that may change
+        if hasattr(self, "_profile_attach_mark"):
+            self._profile_attach_mark("_update_hypnogram begin")
 
         h = self.ui.pgh
         pi = h.getPlotItem()
@@ -848,6 +874,8 @@ class SignalsMixin:
         stgs = self._navigator_stage_query_classes()
         stg_evts = self.p.fetch_annots( stgs , 30 )
         stg_evts = self._filter_navigator_stage_df(stg_evts, 'Class')
+        if hasattr(self, "_profile_attach_mark"):
+            self._profile_attach_mark(f"_update_hypnogram fetch_annots stages n={len(stg_evts)}")
                 
         # get staging (in units no larger than 30 seconds)
         # use STAGES here so that we only get the unmasked datapoints
@@ -860,6 +888,8 @@ class SignalsMixin:
         else:
             try:
                 res = self.p.silent_proc( 'EPOCH align verbose & STAGE' )
+                if hasattr(self, "_profile_attach_mark"):
+                    self._profile_attach_mark("_update_hypnogram EPOCH align verbose & STAGE")
                 # EPOCH align returns NE=0 when staging offsets can't align to the
                 # epoch grid (e.g. after MASK+RE produces a discontinuous EDF).
                 # Treat this the same as a failed STAGE call.
@@ -888,6 +918,8 @@ class SignalsMixin:
                 # if no valid staging, will not have any 'STAGE' output
                 tbls = self.p.strata()
                 has_staging = (tbls["Command"] == "STAGE").any()
+                if hasattr(self, "_profile_attach_mark"):
+                    self._profile_attach_mark(f"_update_hypnogram strata has_staging={has_staging}")
                 if has_staging:
                     df2 = self.p.table( 'STAGE' , 'E' )
                     df2 = df2[ ['E' , 'OSTAGE' ] ]
@@ -898,6 +930,8 @@ class SignalsMixin:
                     })
                 # merge
                 df = pd.merge(df1, df2, on="E", how="inner")
+                if hasattr(self, "_profile_attach_mark"):
+                    self._profile_attach_mark(f"_update_hypnogram merge n={len(df)}")
 
         df = self._filter_navigator_stage_df(df, 'OSTAGE')
 
@@ -954,6 +988,8 @@ class SignalsMixin:
                 bg.setAcceptHoverEvents(False)
                 pi.addItem(bg)
                 self.updated_hypno.append(bg)
+            if hasattr(self, "_profile_attach_mark"):
+                self._profile_attach_mark(f"_update_hypnogram drew overlay groups={len(bins)} items={len(self.updated_hypno)}")
 
             # simple segment plot
             for ci, items in bins.items():
@@ -1226,33 +1262,72 @@ class SignalsMixin:
     # --------------------------------------------------------------------------------
     
     def _render_signals_simple(self):
+        if hasattr(self, "_profile_attach_mark"):
+            self._profile_attach_mark("_render_signals_simple begin")
         self._effective_line_weight()
 
         # update hypnogram and segment plot
         self._update_hypnogram()
+        if hasattr(self, "_profile_attach_mark"):
+            self._profile_attach_mark("_render_signals_simple _update_hypnogram")
         
         # get all checked channels
         self.ss_chs = self.ui.tbl_desc_signals.checked()
         self.ss_anns = self.ui.tbl_desc_annots.checked()
+        if hasattr(self, "_profile_attach_mark"):
+            self._profile_attach_mark(
+                f"_render_signals_simple checked chs={len(self.ss_chs)} anns={len(self.ss_anns)}"
+            )
 
         # set palette
         self.set_palette()
+        if hasattr(self, "_profile_attach_mark"):
+            self._profile_attach_mark("_render_signals_simple set_palette")
         
         # initiate curves 
         self._initiate_curves()
+        if hasattr(self, "_profile_attach_mark"):
+            self._profile_attach_mark("_render_signals_simple _initiate_curves")
 
         # ready view — preserve current position (defaults 0,30 on first load)
         self.ssa.window(self.last_x1, self.last_x2)
         self._update_scaling()
         self._update_pg1_simple()
+        if hasattr(self, "_profile_attach_mark"):
+            self._profile_attach_mark("_render_signals_simple scaling/update_pg1_simple")
         if hasattr(self, "_psd_overlay_on_new_data"):
             self._psd_overlay_on_new_data()
+        if hasattr(self, "_profile_attach_mark"):
+            self._profile_attach_mark("_render_signals_simple end")
     
     def _is_pp_channel(self, ch) -> bool:
         return bool(getattr(self, "cfg_pp_style", True)) and isinstance(ch, str) and ch.startswith("PP_")
 
     def _channel_uses_pp_display(self, ch) -> bool:
         return self._is_pp_channel(ch)
+
+    def _pp_stage_from_channel(self, ch):
+        if not self._channel_uses_pp_display(ch):
+            return None
+        suffix = ch[3:]
+        stgcols = getattr(self, "stgcols_hex", {})
+        if suffix in stgcols:
+            return suffix
+        if "_" in suffix:
+            tail = suffix.rsplit("_", 1)[1]
+            if tail in stgcols:
+                return tail
+        return None
+
+    def _pp_special_color(self, ch):
+        if not self._channel_uses_pp_display(ch):
+            return None
+        suffix = ch[3:]
+        if suffix == "INVALID":
+            return "#FFFFFF"
+        if "_" in suffix and suffix.rsplit("_", 1)[1] == "INVALID":
+            return "#FFFFFF"
+        return None
 
     def _channel_uses_pp_fill(self, ch, sigmods=None) -> bool:
         if not self._channel_uses_pp_display(ch):
@@ -1274,6 +1349,40 @@ class SignalsMixin:
         qcolor = pg.mkColor(color)
         qcolor.setAlpha(96)
         return pg.mkBrush(qcolor)
+
+    def _pp_fill_curve(self, color):
+        item = pg.PlotDataItem(pen=None, connect="finite", antialias=False)
+        item.setClipToView(True)
+        item.setBrush(self._pp_fill_brush(color))
+        item.setFillLevel(0.0)
+        return item
+
+    def _prepare_pp_fill_data(self, x, y, band_lo):
+        x = np.asarray(x, dtype=float)
+        y = np.asarray(y, dtype=float)
+        if x.size == 0 or y.size == 0:
+            return x, y
+
+        n = min(x.size, y.size)
+        x = x[:n]
+        y = y[:n]
+        finite = np.isfinite(x) & np.isfinite(y)
+        if not np.any(finite):
+            return np.array([], dtype=float), np.array([], dtype=float)
+
+        x = x[finite]
+        y = np.maximum(y[finite], float(band_lo))
+        if x.size <= 1:
+            return x, y
+
+        order = np.argsort(x, kind="mergesort")
+        x = x[order]
+        y = y[order]
+        unique_x, starts = np.unique(x, return_index=True)
+        if unique_x.size == x.size:
+            return x, y
+        upper_y = np.maximum.reduceat(y, starts)
+        return unique_x, upper_y
 
     def _resolved_signal_color(self, ch, fallback):
         if ch in getattr(self, "cmap", {}):
@@ -1305,8 +1414,13 @@ class SignalsMixin:
         if not enabled or x is None or y is None or len(x) == 0 or len(y) == 0:
             curve.setData([], [])
             return
-        curve.setFillLevel(float(band_lo))
-        curve.setData(x, y)
+        band_lo = float(band_lo)
+        fill_x, fill_y = self._prepare_pp_fill_data(x, y, band_lo)
+        if fill_x.size == 0:
+            curve.setData([], [])
+            return
+        curve.setFillLevel(band_lo)
+        curve.setData(fill_x, fill_y)
 
 
 
@@ -1389,10 +1503,8 @@ class SignalsMixin:
         for i in range(nchan):
             pen = pg.mkPen( self.colors[i], width=lw , cosmetic=True )
             c = _fast_curve(pen)
-            fill = _fast_curve(None)
+            fill = self._pp_fill_curve(self.colors[i])
             fill.setZValue(c.zValue() - 1)
-            fill.setBrush(self._pp_fill_brush(self.colors[i]))
-            fill.setFillLevel(0.0)
             pi.addItem(fill)
             pi.addItem(c)
             self.fill_curves.append(fill)

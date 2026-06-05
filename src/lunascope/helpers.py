@@ -21,10 +21,10 @@
 #  --------------------------------------------------------------------
 
 
-from PySide6.QtGui import QAction, QKeySequence, QStandardItemModel
+from PySide6.QtGui import QAction, QFont, QKeySequence, QStandardItemModel
 from PySide6.QtGui import QRegularExpressionValidator
 
-from PySide6.QtCore import QModelIndex, QObject, Signal, Qt, QSortFilterProxyModel
+from PySide6.QtCore import QModelIndex, QObject, QSettings, Signal, Qt, QSortFilterProxyModel, QTimer
 from PySide6.QtCore import QRegularExpression, Qt
 
 from PySide6.QtWidgets import QDockWidget, QVBoxLayout, QWidget
@@ -34,7 +34,7 @@ from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QColorDialog, QLabel, QApplication
 )
 
-from PySide6.QtGui import QColor, QPainter, QFont
+from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import QPlainTextEdit
 from PySide6.QtGui import QPalette
 import sys
@@ -42,6 +42,130 @@ import random, colorsys
 import pyqtgraph as pg
 import pandas as pd
 import numpy as np
+
+
+_FONT_SETTINGS_ORG = "Lunascope"
+_FONT_SETTINGS_APP = "Lunascope"
+_FONT_SCALE_KEY = "ui/font_scale"
+FONT_SCALE_DEFAULT = 1.0
+FONT_SCALE_STEP = 0.1
+FONT_SCALE_MIN = 0.8
+FONT_SCALE_MAX = 1.4
+_BASE_APP_FONT = None
+
+
+def clamp_font_scale(scale) -> float:
+    """Clamp a UI font scale to the supported application range."""
+    try:
+        value = float(scale)
+    except (TypeError, ValueError):
+        value = FONT_SCALE_DEFAULT
+    if not np.isfinite(value):
+        value = FONT_SCALE_DEFAULT
+    return max(FONT_SCALE_MIN, min(FONT_SCALE_MAX, value))
+
+
+def _font_settings() -> QSettings:
+    return QSettings(_FONT_SETTINGS_ORG, _FONT_SETTINGS_APP)
+
+
+def saved_font_scale(settings=None) -> float:
+    """Read the persisted UI font scale."""
+    settings = settings or _font_settings()
+    return clamp_font_scale(settings.value(_FONT_SCALE_KEY, FONT_SCALE_DEFAULT))
+
+
+def current_font_scale() -> float:
+    """Return the process-wide UI font scale, defaulting to the saved value."""
+    app = QApplication.instance()
+    if app is not None:
+        prop = app.property("lunascope_font_scale")
+        if prop is not None:
+            return clamp_font_scale(prop)
+    return saved_font_scale()
+
+
+def _base_app_font(app) -> QFont:
+    global _BASE_APP_FONT
+    if _BASE_APP_FONT is None:
+        _BASE_APP_FONT = QFont(app.font())
+    return QFont(_BASE_APP_FONT)
+
+
+class AppFontController(QObject):
+    """Fast, persistent application font scaler.
+
+    This intentionally changes only QApplication's inherited font. It does not
+    walk widgets, resize tables, reload models, or trigger plot rendering.
+    """
+
+    scaleChanged = Signal(float)
+
+    def __init__(self, parent=None, settings=None, apply_delay_ms=100):
+        super().__init__(parent)
+        self._settings = settings or _font_settings()
+        self._scale = saved_font_scale(self._settings)
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(int(apply_delay_ms))
+        self._timer.timeout.connect(self.apply_now)
+
+    @property
+    def scale(self) -> float:
+        return self._scale
+
+    def apply_saved(self):
+        self.set_scale(saved_font_scale(self._settings), save=False, immediate=True)
+
+    def set_scale(self, scale, save=True, immediate=False):
+        scale = clamp_font_scale(scale)
+        changed = abs(scale - self._scale) > 1e-6
+        self._scale = scale
+        if save:
+            self._settings.setValue(_FONT_SCALE_KEY, scale)
+        if immediate:
+            self.apply_now()
+        elif changed:
+            self._timer.start()
+
+    def increase(self):
+        self.set_scale(self._scale + FONT_SCALE_STEP)
+
+    def decrease(self):
+        self.set_scale(self._scale - FONT_SCALE_STEP)
+
+    def reset(self):
+        self.set_scale(FONT_SCALE_DEFAULT)
+
+    def apply_now(self):
+        app = QApplication.instance()
+        if app is None:
+            return
+        base = _base_app_font(app)
+        size = base.pointSizeF()
+        if size <= 0:
+            size = float(base.pointSize() if base.pointSize() > 0 else 10.0)
+        base.setPointSizeF(size * self._scale)
+        app.setFont(base)
+        app.setProperty("lunascope_font_scale", self._scale)
+        self.scaleChanged.emit(self._scale)
+
+    def create_actions(self, parent):
+        act_larger = QAction("Larger Text", parent)
+        act_larger.setShortcuts([QKeySequence("Ctrl+="), QKeySequence("Ctrl+Shift+=")])
+        act_larger.setShortcutContext(Qt.ApplicationShortcut)
+        act_larger.triggered.connect(self.increase)
+
+        act_smaller = QAction("Smaller Text", parent)
+        act_smaller.setShortcut(QKeySequence("Ctrl+Shift+-"))
+        act_smaller.setShortcutContext(Qt.ApplicationShortcut)
+        act_smaller.triggered.connect(self.decrease)
+
+        act_reset = QAction("Reset Text Size", parent)
+        act_reset.setShortcutContext(Qt.ApplicationShortcut)
+        act_reset.triggered.connect(self.reset)
+
+        return act_larger, act_smaller, act_reset
 
 
 # ------------------------------------------------------------
@@ -316,7 +440,11 @@ def add_dock_shortcuts(win, view_menu, toggle_zero=None, reset_layout=None):
     # reset to default layout
     if reset_layout is not None:
         act_reset = QAction("Reset to Default Layout", win, checkable=False)
-        act_reset.setShortcut(QKeySequence("Ctrl+R"))
+        act_reset.setShortcuts([
+            QKeySequence("Ctrl+R"),
+            QKeySequence("Ctrl+)"),
+            QKeySequence("Ctrl+Shift+0"),
+        ])
         act_reset.triggered.connect(reset_layout)
         view_menu.addAction(act_reset)
 

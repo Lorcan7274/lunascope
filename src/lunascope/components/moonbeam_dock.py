@@ -1681,8 +1681,10 @@ class MoonbeamMixin:
         try:
             self.proj.clear()
             self.proj.eng.set_sample_list(rows)
+            self._slist_loaded_key = None
+            self._slist_proj_dirty = False
             df = self.proj.sample_list()
-            model = self.df_to_model(df)
+            model = self.sample_list_df_to_model(df)
             self._proxy.setSourceModel(model)
             self._configure_slist_view()
             if hasattr(self, "_set_slist_label"):

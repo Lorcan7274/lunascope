@@ -10,6 +10,7 @@ import os
 import numpy as np
 import pandas as pd
 import pytest
+from PySide6.QtCore import Qt
 
 from lunascope.helpers import (
     _canon,
@@ -19,6 +20,7 @@ from lunascope.helpers import (
     winsorize_array,
 )
 from lunascope.components.slist import (
+    SListMixin,
     _is_absolute_sample_path,
     _read_sample_list_rows,
 )
@@ -173,3 +175,18 @@ def test_read_sample_list_rows_resolves_relatives_but_keeps_windows_absolutes(tm
         os.path.normpath(str(base / "edf" / "file2.edf")),
         os.path.normpath(str(base / "annots" / "file2.annot")),
     ]
+
+
+def test_sample_list_model_preserves_dot_placeholder():
+    df = pd.DataFrame(
+        {
+            "ID": ["10822_10051"],
+            "EDF": ["."],
+            "Annotations": [{"pops-orig/10822_10051.annot"}],
+        }
+    )
+
+    model = SListMixin.sample_list_df_to_model(df)
+
+    assert model.data(model.index(0, 0), Qt.DisplayRole) == "10822_10051"
+    assert model.data(model.index(0, 1), Qt.DisplayRole) == "."
