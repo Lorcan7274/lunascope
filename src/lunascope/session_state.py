@@ -67,6 +67,10 @@ EXCLUDED_COMBO_BOXES = {
     "combo_ifnot_mask",
     "combo_if_mask",
     "combo_spectrogram",
+    "combo_spec_ch2",
+    "combo_mtm_mode",
+    "combo_irasa_component",
+    "combo_coh_metric",
     "combo_annotator_mode",
 }
 

@@ -50,9 +50,9 @@ from PySide6.QtGui import QStandardItemModel, QStandardItem
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
     QFrame, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget,
-    QListWidgetItem, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy,
-    QSpinBox, QSplitter, QStackedWidget, QTableView, QTableWidget, QTableWidgetItem,
-    QTabWidget, QVBoxLayout, QWidget,
+    QListWidgetItem, QPlainTextEdit, QPushButton, QRadioButton, QScrollArea, QSizePolicy,
+    QSpinBox, QSplitter, QStackedWidget, QTabBar, QTableView, QTableWidget,
+    QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from .explorer_base import BG, FG, GRID, SEP, _ExplorerTab
@@ -84,7 +84,7 @@ _PALETTE = [
 def _sniff_tsv(path, nrows=6):
     """Read first *nrows* of a tab-delimited file; return DataFrame or None."""
     try:
-        return pd.read_csv(path, sep="\t", nrows=nrows, dtype=str)
+        return pd.read_csv(path, sep="\t", nrows=nrows, dtype=str, encoding="utf-8-sig")
     except Exception:
         return None
 
@@ -647,14 +647,14 @@ def _full_source_table(path, member=None, proj=None):
 
     if ext in (".txt", ".tsv", ".csv"):
         sep = "\t" if ext in (".txt", ".tsv") else ","
-        return pd.read_csv(path, sep=sep)
+        return pd.read_csv(path, sep=sep, encoding="utf-8-sig")
 
     if ext == ".zip":
         if not member:
             raise ValueError("ZIP source requires a member selection.")
         with zipfile.ZipFile(path, "r") as zf:
             with zf.open(member) as fh:
-                return pd.read_csv(fh, sep="\t")
+                return pd.read_csv(io.TextIOWrapper(fh, encoding="utf-8-sig"), sep="\t")
 
     if ext in (".pkl", ".pickle"):
         obj = pd.read_pickle(path)
@@ -1015,7 +1015,7 @@ def _read_source(path, nrows=6, proj=None):
                             and n.lower().endswith((".tsv", ".txt", ".csv"))]
                 if mf_names:
                     with zf.open(mf_names[0]) as fh:
-                        mf = pd.read_csv(fh, sep="\t", dtype=str)
+                        mf = pd.read_csv(io.TextIOWrapper(fh, encoding="utf-8-sig"), sep="\t", dtype=str)
                     if {"key", "strata"}.issubset(mf.columns):
                         for _, row in mf.iterrows():
                             strata_map[str(row["key"])] = str(row["strata"])
@@ -1034,7 +1034,7 @@ def _read_source(path, nrows=6, proj=None):
                         continue
                     try:
                         with zf.open(name) as fh:
-                            df = pd.read_csv(fh, sep="\t", nrows=nrows, dtype=str)
+                            df = pd.read_csv(io.TextIOWrapper(fh, encoding="utf-8-sig"), sep="\t", nrows=nrows, dtype=str)
                         key = os.path.splitext(os.path.basename(name))[0]
                         strata_label = strata_map.get(key)
                         col_set = set(df.columns)
@@ -1155,9 +1155,12 @@ class _VarPicker(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(2)
 
-        # Header row
-        hdr = QHBoxLayout()
+        # Header row — wrapped in a widget so it can be hidden or reparented
+        self._hdr_w = QWidget()
+        self._hdr_w.setContentsMargins(0, 0, 0, 0)
+        hdr = QHBoxLayout(self._hdr_w)
         hdr.setContentsMargins(0, 0, 0, 0)
+        hdr.setSpacing(3)
         lbl = QLabel(f"<b>{label}</b>")
         lbl.setStyleSheet(f"color:{FG}; font-size:11px;")
         self._title_lbl = lbl
@@ -1167,21 +1170,20 @@ class _VarPicker(QWidget):
         self._summary_lbl.setMinimumWidth(0)
         self._summary_lbl.setWordWrap(True)
         self._grp_combo = QComboBox()
-        self._grp_combo.setFixedWidth(92)
-        self._grp_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self._grp_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
         self._grp_combo.setMinimumContentsLength(6)
         self._grp_combo.setToolTip("Filter by group")
         self._grp_combo.addItem("(all groups)", None)
-        btn_none = QPushButton("✕")
-        btn_none.setFixedWidth(22)
-        btn_none.setToolTip("Clear all")
-        btn_all = QPushButton("✓")
-        btn_all.setFixedWidth(22)
-        btn_all.setToolTip("Select all visible")
+        self._btn_none = QPushButton("✕")
+        self._btn_none.setFixedWidth(22)
+        self._btn_none.setToolTip("Clear all")
+        self._btn_all = QPushButton("✓")
+        self._btn_all.setFixedWidth(22)
+        self._btn_all.setToolTip("Select all visible")
         hdr.addWidget(lbl)
         hdr.addWidget(self._grp_combo, 1)
-        hdr.addWidget(btn_all)
-        hdr.addWidget(btn_none)
+        hdr.addWidget(self._btn_all)
+        hdr.addWidget(self._btn_none)
 
         # Search
         self._search = QLineEdit()
@@ -1205,13 +1207,13 @@ class _VarPicker(QWidget):
         self._list.viewport().installEventFilter(self)
         self._list.itemChanged.connect(self._on_item_changed)
 
-        layout.addLayout(hdr)
+        layout.addWidget(self._hdr_w)
         layout.addWidget(self._summary_lbl)
         layout.addWidget(self._search)
         layout.addWidget(self._list, 1)
 
-        btn_all.clicked.connect(self._select_all_visible)
-        btn_none.clicked.connect(self._clear_all)
+        self._btn_all.clicked.connect(self._select_all_visible)
+        self._btn_none.clicked.connect(self._clear_all)
         self._grp_combo.currentIndexChanged.connect(self._refilter)
         self._search.textChanged.connect(self._refilter)
 
@@ -1240,6 +1242,14 @@ class _VarPicker(QWidget):
             groups = [g for g in self._pair_rows["GRP"].unique() if g and g != "."]
             for g in sorted(groups):
                 self._grp_combo.addItem(g, g)
+        # Size the popup view to the widest item so nothing is ever elided
+        fm = self._grp_combo.fontMetrics()
+        max_w = max(
+            (fm.horizontalAdvance(self._grp_combo.itemText(i))
+             for i in range(self._grp_combo.count())),
+            default=0,
+        )
+        self._grp_combo.view().setMinimumWidth(max_w + 36)  # 36px for padding + scrollbar
         self._grp_combo.blockSignals(False)
         self._refilter()
 
@@ -1448,6 +1458,8 @@ class GPATab(_ExplorerTab):
     _sig_progress   = QtCore.Signal(str)
     _sig_scatter_ok = QtCore.Signal(object)   # (ids, xs, ys, xvar, yvar)
     _sig_scatter_err= QtCore.Signal(str)
+    _sig_obs_vals   = QtCore.Signal(object)   # (row_w, [unique_val_strs])
+    _sig_obs_count  = QtCore.Signal(object)   # (ids_or_None, n_match, n_total, err_str)
 
     def __init__(self, ctrl, parent=None):
         super().__init__(ctrl, parent)
@@ -1512,11 +1524,22 @@ class GPATab(_ExplorerTab):
         self._render_timer.setInterval(250)
         self._render_timer.timeout.connect(self._render_result)
 
+        # Observations filter state
+        self._obs_row_widgets: list  = []
+        self._obs_inc_ids:     list | None = None   # None = all; list = subset
+        self._obs_col_cache:   dict  = {}           # var_name -> pd.Series (ID-indexed)
+        self._obs_count_timer  = QTimer(self)
+        self._obs_count_timer.setSingleShot(True)
+        self._obs_count_timer.setInterval(600)
+        self._obs_count_timer.timeout.connect(self._obs_refresh_count)
+
         self._sig_ok.connect(self._on_ok,               Qt.QueuedConnection)
         self._sig_err.connect(self._on_err,              Qt.QueuedConnection)
         self._sig_progress.connect(self._on_progress,   Qt.QueuedConnection)
         self._sig_scatter_ok.connect(self._on_scatter_ok,  Qt.QueuedConnection)
         self._sig_scatter_err.connect(self._on_scatter_err, Qt.QueuedConnection)
+        self._sig_obs_vals.connect(self._obs_on_unique_vals,  Qt.QueuedConnection)
+        self._sig_obs_count.connect(self._obs_on_count_result, Qt.QueuedConnection)
 
         self._build_widget()
 
@@ -1530,59 +1553,53 @@ class GPATab(_ExplorerTab):
         root_layout.setContentsMargins(4, 4, 4, 4)
         root_layout.setSpacing(0)
 
-        # ---- outer horizontal splitter (left controls | right panels) ----
-        outer = QSplitter(Qt.Horizontal)
-        outer.setHandleWidth(5)
-        root_layout.addWidget(outer)
+        # Single full-width QTabWidget — each tab owns its content entirely.
+        self._tabs = QTabWidget()
+        self._tabs.setDocumentMode(True)
+        root_layout.addWidget(self._tabs)
 
-        # ---- left: control panel (scrollable) ----------------------------
-        left_scroll = QScrollArea()
-        left_scroll.setWidgetResizable(True)
-        left_scroll.setMinimumWidth(180)
-        left_scroll.setFrameShape(QFrame.NoFrame)
-        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        left_scroll.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
+        # Build tab — scrollable form
+        build_scroll = QScrollArea()
+        build_scroll.setWidgetResizable(True)
+        build_scroll.setFrameShape(QFrame.NoFrame)
+        build_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        build_scroll.setWidget(self._build_build_tab())
 
-        left_inner = QWidget()
-        left_inner.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        left_layout = QVBoxLayout(left_inner)
-        left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(0)
-        left_scroll.setWidget(left_inner)
-
-        self._inner_tabs = QTabWidget()
-        self._inner_tabs.setTabPosition(QTabWidget.North)
-        self._inner_tabs.setDocumentMode(True)
-        self._inner_tabs.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        left_layout.addWidget(self._inner_tabs)
-
-        build_w    = self._build_build_tab()
-        analyze_w  = self._build_analyze_tab()
-        explore_w  = self._build_assoc_explore_tab()
-        self._inner_tabs.addTab(build_w,   "Build")
-        self._inner_tabs.addTab(analyze_w, "Analyze")
-        self._inner_tabs.addTab(explore_w, "Correl/PCA")
-
-        # ---- right: stacked panel — Build→manifest, Analyze→results ----
-        right_stack = QStackedWidget()
+        # Manifest tab — full-width table
         manifest_frame = self._build_manifest_panel()
-        results_frame  = self._build_results_panel()
-        assoc_frame    = self._build_assoc_results_panel()
-        right_stack.addWidget(manifest_frame)   # index 0
-        right_stack.addWidget(results_frame)    # index 1
-        right_stack.addWidget(assoc_frame)      # index 2
-        right_stack.setCurrentIndex(0)
-        self._inner_tabs.currentChanged.connect(
-            lambda idx: right_stack.setCurrentIndex(min(idx, 2)))
 
-        outer.addWidget(left_scroll)
-        outer.addWidget(right_stack)
-        outer.setSizes([250, 1050])
-        outer.setStretchFactor(0, 0)
-        outer.setStretchFactor(1, 1)
-        outer.setCollapsible(0, False)
-        outer.setCollapsible(1, False)
-        self._assoc_outer_splitter = outer
+        # Select tab — left form + right var-detail panel (splitter built inside)
+        select_w = self._build_select_tab()
+
+        # Results tab — full-width results panel
+        results_frame = self._build_results_panel()
+
+        # Correl tab — internal splitter: narrow settings left, wide results right
+        correl_outer = QSplitter(Qt.Horizontal)
+        correl_outer.setHandleWidth(5)
+        correl_left_scroll = QScrollArea()
+        correl_left_scroll.setWidgetResizable(True)
+        correl_left_scroll.setMinimumWidth(180)
+        correl_left_scroll.setFrameShape(QFrame.NoFrame)
+        correl_left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        correl_left_scroll.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
+        correl_left_scroll.setWidget(self._build_assoc_explore_tab())
+        assoc_frame = self._build_assoc_results_panel()
+        correl_outer.addWidget(correl_left_scroll)
+        correl_outer.addWidget(assoc_frame)
+        correl_outer.setSizes([360, 940])
+        correl_outer.setStretchFactor(0, 0)
+        correl_outer.setStretchFactor(1, 1)
+        correl_outer.setCollapsible(0, False)
+        correl_outer.setCollapsible(1, False)
+        self._assoc_outer_splitter = correl_outer
+
+        self._tabs.addTab(build_scroll,   "Build/Load")
+        self._tabs.addTab(manifest_frame, "Manifest")
+        self._tabs.addTab(select_w,       "Select")
+        self._tabs.addTab(results_frame,  "Results")
+        self._tabs.addTab(correl_outer,   "Correl")
+
         QTimer.singleShot(0, self._apply_assoc_default_splitter_sizes)
         QTimer.singleShot(0, self._init_assoc_mode_ui)
 
@@ -1600,8 +1617,8 @@ class GPATab(_ExplorerTab):
             total = max(800, outer.size().width())
         except RuntimeError:
             return
-        left = min(250, max(220, int(total * 0.24)))
-        outer.setSizes([left, max(400, total - left)])
+        left_w = min(380, max(300, int(total * 0.28)))
+        outer.setSizes([left_w, max(400, total - left_w)])
 
     # ------------------------------------------------------------------
     # Build tab
@@ -1613,6 +1630,35 @@ class GPATab(_ExplorerTab):
         lay.setContentsMargins(6, 6, 6, 6)
         lay.setSpacing(6)
 
+        # ---- mode selector ----
+        mode_frame = QFrame()
+        mode_frame.setFrameShape(QFrame.StyledPanel)
+        mode_lay = QHBoxLayout(mode_frame)
+        mode_lay.setContentsMargins(8, 4, 8, 4)
+        mode_lay.setSpacing(20)
+        self._mode_build_radio = QRadioButton("Build  (assemble sources → new .dat)")
+        self._mode_load_radio  = QRadioButton("Load  (open existing .dat)")
+        self._mode_build_radio.setChecked(True)
+        self._mode_build_radio.setStyleSheet("font-weight:600;")
+        self._mode_load_radio.setStyleSheet("font-weight:600;")
+        mode_lay.addWidget(self._mode_build_radio)
+        mode_lay.addWidget(self._mode_load_radio)
+        mode_lay.addStretch(1)
+        lay.addWidget(mode_frame)
+
+        # ---- stacked pages ----
+        self._build_mode_stack = QStackedWidget()
+        lay.addWidget(self._build_mode_stack, 1)
+
+        self._mode_build_radio.toggled.connect(
+            lambda on: self._build_mode_stack.setCurrentIndex(0 if on else 1))
+
+        # === page 0: Build ===
+        build_page = QWidget()
+        build_lay = QVBoxLayout(build_page)
+        build_lay.setContentsMargins(0, 4, 0, 0)
+        build_lay.setSpacing(6)
+
         # Working directory
         wd_row = QHBoxLayout()
         wd_row.setSpacing(4)
@@ -1623,7 +1669,7 @@ class GPATab(_ExplorerTab):
         btn_wd.clicked.connect(self._browse_wd)
         wd_row.addWidget(self._wd_edit, 1)
         wd_row.addWidget(btn_wd)
-        lay.addLayout(wd_row)
+        build_lay.addLayout(wd_row)
 
         # Source files
         src_hdr = QHBoxLayout()
@@ -1634,12 +1680,12 @@ class GPATab(_ExplorerTab):
         btn_add = QPushButton("+ Add"); btn_add.setFixedWidth(58)
         btn_rm  = QPushButton("− Remove"); btn_rm.setFixedWidth(72)
         src_hdr.addWidget(btn_add); src_hdr.addWidget(btn_rm)
-        lay.addLayout(src_hdr)
+        build_lay.addLayout(src_hdr)
 
         self._files_list = QListWidget()
         self._files_list.setFixedHeight(110)
         self._files_list.setToolTip("TSV, ZIP, PKL, or Luna .db files")
-        lay.addWidget(self._files_list)
+        build_lay.addWidget(self._files_list)
 
         btn_add.clicked.connect(self._add_source_file)
         btn_rm.clicked.connect(self._remove_source_file)
@@ -1656,28 +1702,19 @@ class GPATab(_ExplorerTab):
         self._col_file_lbl = QLabel("Columns")
         self._col_file_lbl.setStyleSheet(f"color:{FG}; font-size:11px;")
         col_hdr.addWidget(self._col_file_lbl, 1)
-        col_hdr.addWidget(QLabel("Group:"))
-        self._col_group_edit = QLineEdit()
-        self._col_group_edit.setFixedWidth(80)
-        self._col_group_edit.setPlaceholderText("grp1")
-        self._col_group_edit.textChanged.connect(self._on_group_name_changed)
-        col_hdr.addWidget(self._col_group_edit)
         col_lay.addLayout(col_hdr)
 
-        self._col_table = QTableWidget(0, 5)
-        self._col_table.setHorizontalHeaderLabels(
-            ["Column", "Role", "Value", "Group", "Preview"])
+        self._col_table = QTableWidget(0, 3)
+        self._col_table.setHorizontalHeaderLabels(["Column", "Role", "Preview"])
         self._col_table.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.ResizeToContents)
         self._col_table.horizontalHeader().setSectionResizeMode(
             1, QHeaderView.Fixed)
         self._col_table.horizontalHeader().setSectionResizeMode(
-            4, QHeaderView.Stretch)
+            2, QHeaderView.Stretch)
         self._col_table.setColumnWidth(1, 72)
-        self._col_table.setColumnWidth(2, 60)
-        self._col_table.setColumnWidth(3, 60)
-        self._col_table.setMinimumHeight(130)
-        self._col_table.setMaximumHeight(200)
+        self._col_table.setMinimumHeight(200)
+        self._col_table.setMaximumHeight(400)
         self._col_table.verticalHeader().setVisible(False)
         self._col_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self._col_table.setEditTriggers(QAbstractItemView.DoubleClicked)
@@ -1685,13 +1722,13 @@ class GPATab(_ExplorerTab):
         col_lay.addWidget(self._col_table)
 
         self._col_frame.setVisible(False)
-        lay.addWidget(self._col_frame)
+        build_lay.addWidget(self._col_frame)
 
         # JSON / Specs  -------------------------------------------------
         json_toggle = QPushButton("▶  Specs JSON")
         json_toggle.setCheckable(True)
         json_toggle.setStyleSheet("text-align:left; padding-left:4px;")
-        lay.addWidget(json_toggle)
+        build_lay.addWidget(json_toggle)
 
         self._json_frame = QFrame()
         self._json_frame.setFrameShape(QFrame.StyledPanel)
@@ -1717,7 +1754,7 @@ class GPATab(_ExplorerTab):
         json_lay.addWidget(self._json_edit)
 
         self._json_frame.setVisible(False)
-        lay.addWidget(self._json_frame)
+        build_lay.addWidget(self._json_frame)
 
         json_toggle.toggled.connect(
             lambda on: (self._json_frame.setVisible(on),
@@ -1736,7 +1773,7 @@ class GPATab(_ExplorerTab):
         btn_dat = QPushButton("…"); btn_dat.setFixedWidth(26)
         btn_dat.clicked.connect(lambda: self._browse_dat_save(self._build_dat_edit))
         dat_row.addWidget(self._build_dat_edit, 1); dat_row.addWidget(btn_dat)
-        lay.addLayout(dat_row)
+        build_lay.addLayout(dat_row)
 
         build_btns = QHBoxLayout()
         self._build_btn = QPushButton("Build Dataset")
@@ -1754,117 +1791,765 @@ class GPATab(_ExplorerTab):
         build_btns.addWidget(self._build_btn)
         build_btns.addWidget(self._keep_tsv_chk)
         build_btns.addWidget(self._build_status, 1)
-        lay.addLayout(build_btns)
+        build_lay.addLayout(build_btns)
 
         self._build_btn.clicked.connect(self._run_prep)
+        build_lay.addStretch(1)
+        self._build_mode_stack.addWidget(build_page)  # page 0
 
-        lay.addStretch(1)
-        return w
+        # === page 1: Load ===
+        load_page = QWidget()
+        load_outer = QVBoxLayout(load_page)
+        load_outer.setContentsMargins(0, 4, 0, 0)
+        load_outer.setSpacing(0)
 
-    # ------------------------------------------------------------------
-    # Analyze tab
-    # ------------------------------------------------------------------
+        load_inner = QFrame()
+        load_inner.setFrameShape(QFrame.StyledPanel)
+        load_inner_lay = QVBoxLayout(load_inner)
+        load_inner_lay.setContentsMargins(16, 16, 16, 16)
+        load_inner_lay.setSpacing(12)
 
-    def _build_analyze_tab(self):
-        w = QWidget()
-        lay = QVBoxLayout(w)
-        lay.setContentsMargins(6, 6, 6, 6)
-        lay.setSpacing(6)
+        load_lbl = QLabel("Open a previously built <b>.dat</b> file to load its manifest "
+                          "and populate the variable pickers.")
+        load_lbl.setWordWrap(True)
+        load_lbl.setStyleSheet(f"color:{FG}; font-size:11px;")
+        load_inner_lay.addWidget(load_lbl)
 
-        # .dat file
-        dat_row = QHBoxLayout(); dat_row.setSpacing(4)
+        load_dat_row = QHBoxLayout()
+        load_dat_row.setSpacing(4)
+        load_dat_row.addWidget(QLabel(".dat file:"))
         self._dat_edit = QLineEdit()
         self._dat_edit.setPlaceholderText("path/to/out.dat")
+        self._dat_edit.textChanged.connect(lambda *_: self._update_assoc_dat_label())
         btn_dat_open = QPushButton("…"); btn_dat_open.setFixedWidth(26)
         btn_dat_open.clicked.connect(lambda: self._browse_dat_open(self._dat_edit))
         self._load_manifest_btn = QPushButton("Load .dat")
-        self._load_manifest_btn.setFixedWidth(80)
+        self._load_manifest_btn.setFixedWidth(90)
+        self._load_manifest_btn.setStyleSheet(
+            "QPushButton { background:#1e3a5f; color:#fff; padding:4px 10px; border-radius:4px; }"
+            "QPushButton:hover { background:#1d4ed8; }"
+        )
         self._load_manifest_btn.clicked.connect(self._run_load_manifest)
-        dat_row.addWidget(QLabel(".dat:")); dat_row.addWidget(self._dat_edit, 1)
-        dat_row.addWidget(btn_dat_open); dat_row.addWidget(self._load_manifest_btn)
-        lay.addLayout(dat_row)
+        load_dat_row.addWidget(self._dat_edit, 1)
+        load_dat_row.addWidget(btn_dat_open)
+        load_dat_row.addWidget(self._load_manifest_btn)
+        load_inner_lay.addLayout(load_dat_row)
 
-        # Variable pickers
-        self._picker_x = _VarPicker("X  predictors")
-        self._picker_y = _VarPicker("Y  outcomes")
-        self._picker_z = _VarPicker("Z  covariates")
-        for p in (self._picker_x, self._picker_y, self._picker_z):
-            p.setMinimumHeight(140)
-            p.setMaximumHeight(160)
-            lay.addWidget(p)
-        self._picker_x.selectionChanged.connect(self._update_selection_desc)
-        self._picker_y.selectionChanged.connect(self._update_selection_desc)
-        self._picker_z.selectionChanged.connect(self._update_selection_desc)
+        load_inner_lay.addStretch(1)
+        load_outer.addWidget(load_inner)
+        load_outer.addStretch(1)
+        self._build_mode_stack.addWidget(load_page)   # page 1
 
-        # Options (collapsible)
-        opts_toggle = QPushButton("▶  Options")
-        opts_toggle.setCheckable(True)
-        opts_toggle.setStyleSheet("text-align:left; padding-left:4px;")
-        lay.addWidget(opts_toggle)
+        return w
 
-        self._opts_frame = QFrame()
-        self._opts_frame.setFrameShape(QFrame.StyledPanel)
-        opts_lay = QVBoxLayout(self._opts_frame)
-        opts_lay.setContentsMargins(6, 4, 6, 4)
-        opts_lay.setSpacing(4)
+    # ------------------------------------------------------------------
+    # Select tab — Y/X/Z bands + bottom run bar
+    # ------------------------------------------------------------------
 
-        def _row(label, widget):
-            r = QHBoxLayout()
-            lbl = QLabel(label); lbl.setFixedWidth(100)
-            lbl.setStyleSheet(f"color:{FG}; font-size:11px;")
-            r.addWidget(lbl); r.addWidget(widget, 1)
-            return r
+    _SELECT_ROLES = [
+        ("Y", "Y outcomes",    "#a78bfa"),
+        ("X", "X predictors",  "#4cc9f0"),
+        ("Z", "Z covariates",  "#06d6a0"),
+    ]
 
-        # Winsorization
-        winsor_row = QHBoxLayout()
-        winsor_label = QLabel("winsor (tail fraction 0-0.5):")
-        self._winsor_edit = QLineEdit(); self._winsor_edit.setFixedWidth(45)
-        self._winsor_edit.setPlaceholderText("off")
-        self._winsor_edit.setToolTip("Fraction trimmed from each tail; 0.05 trims 5% at both ends.")
-        winsor_label.setToolTip("Winsor tail fraction per side. Values above 0.5 are clamped to 0.5.")
-        winsor_row.addWidget(winsor_label)
-        winsor_row.addWidget(self._winsor_edit)
-        winsor_row.addStretch(1)
-        opts_lay.addLayout(winsor_row)
+    def _build_select_tab(self):
+        root = QWidget()
+        root_lay = QVBoxLayout(root)
+        root_lay.setContentsMargins(4, 4, 4, 4)
+        root_lay.setSpacing(4)
 
-        # Save as TSV (dump)
-        dump_row = QHBoxLayout()
-        self._dump_tsv_btn = QPushButton("Save as TSV…")
-        self._dump_tsv_btn.setToolTip(
-            "Export the selected variables as a flat TSV file using GPA dump mode.\n"
-            "Applies the same QC settings (winsor only) as the current Options.")
-        self._dump_tsv_btn.clicked.connect(self._save_gpa_dump_tsv)
-        dump_row.addStretch(1)
-        dump_row.addWidget(self._dump_tsv_btn)
-        opts_lay.addLayout(dump_row)
+        # Inner tab widget — Variables / Observations
+        self._select_inner_tabs = QTabWidget()
+        self._select_inner_tabs.setDocumentMode(True)
+        root_lay.addWidget(self._select_inner_tabs, 1)
 
-        self._opts_frame.setVisible(False)
-        lay.addWidget(self._opts_frame)
-        opts_toggle.toggled.connect(
-            lambda on: (self._opts_frame.setVisible(on),
-                        opts_toggle.setText(("▼" if on else "▶") + "  Options")))
+        # ---- Tab 0: Variables (Columns) ----
+        vars_tab = QWidget()
+        vars_tab_lay = QVBoxLayout(vars_tab)
+        vars_tab_lay.setContentsMargins(0, 4, 0, 0)
+        vars_tab_lay.setSpacing(0)
 
-        # Run
-        run_row = QHBoxLayout()
+        vsplit = QSplitter(Qt.Vertical)
+        vsplit.setHandleWidth(4)
+        self._select_vsplit = vsplit
+        self._select_var_tables:    dict = {}
+        self._select_var_data:      dict = {}
+        self._select_var_grp_longs: dict = {}   # role -> {grp_key: [long_var_names]}
+        self._band_slots:           list = []   # strong refs so PySide6 can't GC the closures
+
+        for role, label, color in self._SELECT_ROLES:
+            band = QWidget()
+            band_lay = QVBoxLayout(band)
+            band_lay.setContentsMargins(0, 0, 0, 0)
+            band_lay.setSpacing(0)
+
+            # 2 px colored accent strip — clear visual demarcation between bands
+            accent = QFrame()
+            accent.setFixedHeight(2)
+            accent.setStyleSheet(f"background-color:{color}; border:none;")
+            band_lay.addWidget(accent)
+
+            # Full-width label bar: role label | detail/count | grp_combo | ✓ | ✕
+            lbl_bar = QWidget()
+            lbl_bar.setStyleSheet("background: rgba(255,255,255,0.03);")
+            lbl_bar_lay = QHBoxLayout(lbl_bar)
+            lbl_bar_lay.setContentsMargins(6, 2, 6, 2)
+            lbl_bar_lay.setSpacing(6)
+            role_lbl = QLabel(f"<b>{label}</b>")
+            role_lbl.setStyleSheet(f"color:{color}; font-size:11px;")
+            detail_lbl = QLabel("(select a variable to see long-form details)")
+            detail_lbl.setStyleSheet("color:#666; font-size:10px;")
+            lbl_bar_lay.addWidget(role_lbl)
+            lbl_bar_lay.addWidget(detail_lbl, 1)
+
+            # Picker is created here so we can reparent its controls into this bar
+            picker = _VarPicker("")
+            picker._title_lbl.setVisible(False)
+            picker._hdr_w.setVisible(False)
+            picker._summary_lbl.setVisible(False)
+            picker.setMinimumWidth(180)
+
+            lbl_bar_lay.addWidget(picker._grp_combo)
+            lbl_bar_lay.addWidget(picker._btn_all)
+            lbl_bar_lay.addWidget(picker._btn_none)
+            band_lay.addWidget(lbl_bar)
+
+            # Horizontal splitter: picker | (grp selector | var/NI table)
+            hsplit = QSplitter(Qt.Horizontal)
+            hsplit.setHandleWidth(5)
+
+            # Left sub-table: GRP selector (GRP / Vars / NI) — selectable, filters right
+            t_grps = QTableWidget(0, 3)
+            t_grps.setHorizontalHeaderLabels(["GRP", "Vars", "NI"])
+            t_grps.verticalHeader().setVisible(False)
+            t_grps.setSelectionMode(QAbstractItemView.SingleSelection)
+            t_grps.setSelectionBehavior(QAbstractItemView.SelectRows)
+            t_grps.setEditTriggers(QAbstractItemView.NoEditTriggers)
+            t_grps.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+            t_grps.horizontalHeader().setStretchLastSection(False)
+            t_grps.setColumnWidth(0, 160)
+            t_grps.setColumnWidth(1, 42)
+            t_grps.setColumnWidth(2, 52)
+            t_grps.setAlternatingRowColors(True)
+            t_grps.setStyleSheet("font-size:11px;")
+            t_grps.setToolTip("Click a group to filter the VAR list; click again to clear")
+
+            # Right sub-table: VAR / NI — read-only, filtered by grp selection
+            t_vars = QTableWidget(0, 2)
+            t_vars.setHorizontalHeaderLabels(["VAR", "NI"])
+            t_vars.verticalHeader().setVisible(False)
+            t_vars.setSelectionMode(QAbstractItemView.NoSelection)
+            t_vars.setEditTriggers(QAbstractItemView.NoEditTriggers)
+            t_vars.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+            t_vars.horizontalHeader().setStretchLastSection(False)
+            t_vars.setColumnWidth(0, 280)
+            t_vars.setColumnWidth(1, 52)
+            t_vars.setAlternatingRowColors(True)
+            t_vars.setStyleSheet("font-size:11px;")
+
+            right_w = QSplitter(Qt.Horizontal)
+            right_w.setHandleWidth(5)
+            right_w.addWidget(t_grps)
+            right_w.addWidget(t_vars)
+            right_w.setSizes([260, 560])
+            right_w.setStretchFactor(0, 0)
+            right_w.setStretchFactor(1, 1)
+            right_w.setCollapsible(0, False)
+            right_w.setCollapsible(1, False)
+
+            hsplit.addWidget(picker)
+            hsplit.addWidget(right_w)
+            hsplit.setSizes([380, 820])
+            hsplit.setStretchFactor(0, 0)
+            hsplit.setStretchFactor(1, 1)
+            hsplit.setCollapsible(0, False)
+            hsplit.setCollapsible(1, False)
+
+            band_lay.addWidget(hsplit, 1)
+            vsplit.addWidget(band)
+            vsplit.setCollapsible(vsplit.count() - 1, False)
+
+            # Assign pickers
+            if   role == "Y": self._picker_y = picker
+            elif role == "X": self._picker_x = picker
+            else:             self._picker_z = picker
+
+            picker.selectionChanged.connect(self._update_selection_desc)
+
+            # Named closures stored in _band_slots so PySide6 cannot GC them.
+            def _make_var_slot(role_key):
+                def _slot():
+                    self._update_select_var_tables(
+                        role_key,
+                        getattr(self, f"_picker_{role_key.lower()}"))
+                return _slot
+
+            def _make_grp_slot(role_key, tg, tv):
+                def _slot(cur, prev):
+                    self._on_grp_filter_changed(role_key, tg, tv)
+                return _slot
+
+            _var_slot = _make_var_slot(role)
+            self._band_slots.append(_var_slot)
+            picker.selectionChanged.connect(_var_slot)
+
+            _grp_slot = _make_grp_slot(role, t_grps, t_vars)
+            self._band_slots.append(_grp_slot)
+            t_grps.currentItemChanged.connect(_grp_slot)
+
+            self._select_var_tables[role] = (t_vars, t_grps, detail_lbl)
+
+        vars_tab_lay.addWidget(vsplit, 1)
+        self._select_inner_tabs.addTab(vars_tab, "Variables (Columns)")
+        QTimer.singleShot(0, self._apply_select_vsplit_sizes)
+
+        # ---- Tab 1: Observations (rows) ----
+        obs_tab = QWidget()
+        self._build_obs_filter_tab(obs_tab)
+        self._select_inner_tabs.addTab(obs_tab, "Observations (rows)")
+
+        # ---- bottom bar (outside tabs) ----
+        bar = QHBoxLayout()
+        bar.setSpacing(8)
+
         self._run_btn = QPushButton("Run GPA")
         self._run_btn.setStyleSheet(
             "QPushButton { background:#1e3a5f; color:#fff; padding:4px 12px; border-radius:4px; }"
             "QPushButton:hover { background:#1d4ed8; }"
         )
-        self._analyze_status = QLabel("")
-        self._analyze_status.setStyleSheet(f"color:#888; font-size:11px;")
-        self._analyze_status.setWordWrap(True)
-        self._analyze_status.setMaximumHeight(32)
-        self._analyze_status.setMinimumWidth(0)
-        self._analyze_status.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        run_row.addWidget(self._run_btn)
-        run_row.addWidget(self._analyze_status, 1)
-        lay.addLayout(run_row)
-
         self._run_btn.clicked.connect(self._run_gpa)
 
-        lay.addStretch(1)
-        return w
+        winsor_lbl = QLabel("winsor:")
+        winsor_lbl.setToolTip("Tail fraction trimmed each side (0–0.2). Leave blank to disable.")
+        self._winsor_edit = QLineEdit()
+        self._winsor_edit.setFixedWidth(50)
+        self._winsor_edit.setPlaceholderText("off")
+        self._winsor_edit.setToolTip("Tail fraction trimmed each side (0–0.2). Leave blank to disable.")
+
+        self._dump_tsv_btn = QPushButton("Save as TSV…")
+        self._dump_tsv_btn.setToolTip("Export selected variables as a flat TSV (GPA dump mode).")
+        self._dump_tsv_btn.clicked.connect(self._save_gpa_dump_tsv)
+
+        self._select_count_lbl = QLabel("")
+        self._select_count_lbl.setStyleSheet("color:#aaa; font-size:10px;")
+        self._select_count_lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        self._analyze_status = QLabel("")
+        self._analyze_status.setStyleSheet("color:#888; font-size:11px;")
+        self._analyze_status.setWordWrap(True)
+        self._analyze_status.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        bar.addWidget(self._run_btn)
+        bar.addWidget(winsor_lbl)
+        bar.addWidget(self._winsor_edit)
+        bar.addSpacing(8)
+        bar.addWidget(self._dump_tsv_btn)
+        bar.addWidget(self._select_count_lbl, 1)
+        bar.addWidget(self._analyze_status, 1)
+        root_lay.addLayout(bar)
+
+        return root
+
+    def _apply_select_vsplit_sizes(self):
+        vsplit = getattr(self, "_select_vsplit", None)
+        if vsplit is None:
+            return
+        try:
+            total = max(600, vsplit.size().height())
+        except RuntimeError:
+            return
+        y_h = int(total * 0.50)
+        x_h = int(total * 0.25)
+        vsplit.setSizes([y_h, x_h, total - y_h - x_h])
+
+    def _on_grp_filter_changed(self, role, t_grps, t_vars):
+        grp_to_longs = getattr(self, "_select_var_grp_longs", {}).get(role) or {}
+        ni_lookup    = self._select_var_data.get(role) or {}
+        row = t_grps.currentRow()
+        grp = t_grps.item(row, 0).text() if row >= 0 and t_grps.item(row, 0) else None
+        if grp and grp in grp_to_longs:
+            longs = grp_to_longs[grp]
+        else:
+            # no valid row selected — show all longs across all groups
+            longs = sorted({v for vs in grp_to_longs.values() for v in vs})
+        self._fill_var_table_longs(t_vars, longs, ni_lookup)
+
+    def _fill_var_table_longs(self, t_vars, longs: list, ni_lookup: dict):
+        """Populate the VAR/NI table from a list of long-var names + NI lookup dict."""
+        t_vars.setRowCount(0)
+        for var in longs:
+            r = t_vars.rowCount()
+            t_vars.insertRow(r)
+            for ci, val in enumerate((str(var), ni_lookup.get(str(var), ""))):
+                item = QTableWidgetItem(val)
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                t_vars.setItem(r, ci, item)
+
+    def _update_select_var_tables(self, role: str, picker):
+        """Refresh the GRP selector and VAR/NI tables for *role* from the picker's selection.
+
+        Uses the picker's own _pair_rows (GRP/BASE/LONGS) as the authoritative source
+        so that the grouping is always consistent with what the picker shows, regardless
+        of how the manifest's own GRP column is structured.
+        """
+        if not hasattr(self, "_select_var_tables") or role not in self._select_var_tables:
+            return
+        t_vars, t_grps, detail_lbl = self._select_var_tables[role]
+
+        pairs = picker.selected_pairs()   # [(grp, base), ...]
+        if not pairs:
+            t_vars.setRowCount(0)
+            t_grps.setRowCount(0)
+            self._select_var_data[role] = None
+            self._select_var_grp_longs[role] = {}
+            detail_lbl.setText("(select a variable to see long-form details)")
+            return
+
+        # --- GRP selector table ---
+        # Built from picker._pair_rows so GRP labels match what the picker shows.
+        pair_set = set(pairs)
+        pr = picker._pair_rows
+        pr_sel = pr[pr.apply(
+            lambda row: (row["GRP"], row["BASE"]) in pair_set, axis=1
+        )].reset_index(drop=True)
+
+        grp_to_longs: dict = {}
+        t_grps.blockSignals(True)
+        t_grps.setRowCount(0)
+        for _, row in pr_sel.iterrows():
+            grp_key = str(row["GRP"])
+            longs_for_grp = list(row["LONGS"])
+            grp_to_longs.setdefault(grp_key, []).extend(longs_for_grp)
+            ni_min = row.get("NI_MIN")
+            ni_max = row.get("NI_MAX")
+            if ni_min is None or (isinstance(ni_min, float) and np.isnan(ni_min)):
+                n_str = ""
+            elif ni_min == ni_max:
+                n_str = str(int(ni_min))
+            else:
+                n_str = f"{int(ni_min)}–{int(ni_max)}"
+            r = t_grps.rowCount()
+            t_grps.insertRow(r)
+            for ci, val in enumerate((grp_key, str(int(row["N_LONG"])), n_str)):
+                item = QTableWidgetItem(val)
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                t_grps.setItem(r, ci, item)
+        t_grps.clearSelection()
+        t_grps.blockSignals(False)
+        self._select_var_grp_longs[role] = grp_to_longs
+
+        # --- VAR/NI table ---
+        # Collect all long var names then look them up in the manifest for NI values.
+        all_longs = picker.selected_long_names()
+        manifest = getattr(self, "_manifest_df", None)
+        ni_lookup: dict = {}
+        if manifest is not None and not manifest.empty and "VAR" in manifest.columns and "NI" in manifest.columns:
+            sub = manifest[manifest["VAR"].isin(all_longs)]
+            for _, row in sub.iterrows():
+                ni_lookup[str(row["VAR"])] = str(row["NI"])
+        self._select_var_data[role] = ni_lookup  # used by _on_grp_filter_changed
+
+        n_bases = len({b for _, b in pairs})
+        detail_lbl.setText(
+            f"{n_bases} base{'s' if n_bases != 1 else ''} selected  ·  "
+            f"{len(all_longs)} long var{'s' if len(all_longs) != 1 else ''}")
+
+        self._fill_var_table_longs(t_vars, all_longs, ni_lookup)
+
+    # ------------------------------------------------------------------
+    # Observations (rows) filter tab
+    # ------------------------------------------------------------------
+
+    def _build_obs_filter_tab(self, container: QWidget):
+        lay = QVBoxLayout(container)
+        lay.setContentsMargins(6, 6, 6, 6)
+        lay.setSpacing(6)
+
+        # Toolbar
+        tb = QHBoxLayout()
+        tb.setSpacing(6)
+        add_btn = QPushButton("+ Add filter")
+        add_btn.setToolTip("Add a new individual-level filter condition")
+        add_btn.clicked.connect(self._obs_add_row)
+        clear_btn = QPushButton("Clear all")
+        clear_btn.setToolTip("Remove all filter conditions")
+        clear_btn.clicked.connect(self._obs_clear_all)
+        tb.addWidget(add_btn)
+        tb.addWidget(clear_btn)
+        tb.addStretch()
+        lay.addLayout(tb)
+
+        # Scroll area containing the filter rows
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll_content = QWidget()
+        self._obs_rows_lay = QVBoxLayout(scroll_content)
+        self._obs_rows_lay.setContentsMargins(0, 0, 0, 0)
+        self._obs_rows_lay.setSpacing(3)
+        self._obs_rows_lay.addStretch()
+        scroll.setWidget(scroll_content)
+        lay.addWidget(scroll, 1)
+
+        # Count / status label
+        self._obs_count_lbl = QLabel("No filters — all individuals included.")
+        self._obs_count_lbl.setStyleSheet("color:#aaa; font-size:11px;")
+        lay.addWidget(self._obs_count_lbl)
+
+    def _obs_var_items(self):
+        """Sorted list of VAR names available for filtering."""
+        manifest = getattr(self, "_manifest_df", None)
+        if manifest is None or manifest.empty or "VAR" not in manifest.columns:
+            return []
+        return sorted(v for v in manifest["VAR"].dropna().astype(str).unique() if v != "ID")
+
+    def _obs_add_row(self, var: str = "", op: str = "==", val: str = ""):
+        row_w = QWidget()
+        row_lay = QHBoxLayout(row_w)
+        row_lay.setContentsMargins(0, 0, 0, 0)
+        row_lay.setSpacing(4)
+
+        var_combo = QComboBox()
+        var_combo.setEditable(True)
+        var_combo.setInsertPolicy(QComboBox.NoInsert)
+        var_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        var_combo.setFixedWidth(180)
+        var_combo.setMaxVisibleItems(20)
+        _var_items = self._obs_var_items()
+        var_combo.addItems(_var_items)
+        if _var_items:
+            _fm = var_combo.fontMetrics()
+            _max_w = max(_fm.horizontalAdvance(t) for t in _var_items)
+            var_combo.view().setMinimumWidth(_max_w + 36)
+        if var:
+            var_combo.setCurrentText(var)
+
+        op_combo = QComboBox()
+        op_combo.addItems(["==", "!=", ">=", "<=", ">", "<"])
+        op_combo.setCurrentText(op)
+        op_combo.setFixedWidth(52)
+
+        val_combo = QComboBox()
+        val_combo.setEditable(True)
+        val_combo.setInsertPolicy(QComboBox.NoInsert)
+        val_combo.setFixedWidth(110)
+        if val:
+            val_combo.setCurrentText(val)
+
+        # Range label: "min – max" or "N vals" — shown after value combo
+        range_lbl = QLabel("")
+        range_lbl.setStyleSheet("color:#666; font-size:10px;")
+        range_lbl.setFixedWidth(90)
+        range_lbl.setToolTip("Raw (unnormalized) range from .dat")
+
+        # Per-criterion count: how many individuals pass THIS condition alone
+        crit_lbl = QLabel("")
+        crit_lbl.setStyleSheet("color:#8b9dc3; font-size:10px;")
+        crit_lbl.setFixedWidth(76)
+        crit_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        crit_lbl.setToolTip("Individuals passing this filter condition alone")
+
+        rm_btn = QPushButton("×")
+        rm_btn.setFixedWidth(22)
+        rm_btn.setFixedHeight(22)
+        rm_btn.setStyleSheet(
+            "QPushButton{color:#f87171;border:none;font-weight:bold;}"
+            "QPushButton:hover{color:#ef4444;}")
+        rm_btn.setToolTip("Remove this filter")
+
+        row_lay.addWidget(var_combo)
+        row_lay.addWidget(op_combo)
+        row_lay.addWidget(val_combo)
+        row_lay.addWidget(range_lbl)
+        row_lay.addWidget(crit_lbl)
+        row_lay.addWidget(rm_btn)
+
+        row_w.var_combo  = var_combo
+        row_w.op_combo   = op_combo
+        row_w.val_combo  = val_combo
+        row_w.range_lbl  = range_lbl
+        row_w.crit_lbl   = crit_lbl
+
+        # Insert before the trailing stretch
+        idx = len(self._obs_row_widgets)
+        self._obs_rows_lay.insertWidget(idx, row_w)
+        self._obs_row_widgets.append(row_w)
+
+        # Connections — closures keep strong refs (prevent PySide6 GC)
+        def _make_slots(rw):
+            def _on_var(_text):
+                self._obs_on_var_changed(rw)
+            def _on_change(_text=None):
+                self._obs_update_row_crit(rw)
+                self._obs_schedule_refresh()
+            def _on_remove():
+                self._obs_remove_row(rw)
+            return _on_var, _on_change, _on_remove
+
+        _sv, _sc, _sr = _make_slots(row_w)
+        if not hasattr(self, "_obs_row_slots"):
+            self._obs_row_slots = []
+        self._obs_row_slots.extend([_sv, _sc, _sr])
+
+        var_combo.currentTextChanged.connect(_sv)
+        op_combo.currentTextChanged.connect(_sc)
+        val_combo.currentTextChanged.connect(_sc)
+        rm_btn.clicked.connect(_sr)
+
+        if var:
+            self._obs_on_var_changed(row_w)
+        self._obs_schedule_refresh()
+
+    def _obs_remove_row(self, row_w):
+        if row_w in self._obs_row_widgets:
+            self._obs_row_widgets.remove(row_w)
+        self._obs_rows_lay.removeWidget(row_w)
+        row_w.deleteLater()
+        self._obs_schedule_refresh()
+
+    def _obs_clear_all(self):
+        for rw in list(self._obs_row_widgets):
+            self._obs_rows_lay.removeWidget(rw)
+            rw.deleteLater()
+        self._obs_row_widgets.clear()
+        self._obs_inc_ids = None
+        self._obs_count_timer.stop()
+        if hasattr(self, "_obs_count_lbl"):
+            self._obs_count_lbl.setText("No filters — all individuals included.")
+        self._update_selection_desc()
+
+    def _obs_on_var_changed(self, row_w):
+        var = row_w.var_combo.currentText().strip()
+        row_w.val_combo.blockSignals(True)
+        row_w.val_combo.clear()
+        row_w.val_combo.blockSignals(False)
+        self._obs_schedule_refresh()
+        if not var:
+            return
+        # Check cache first
+        if var in self._obs_col_cache:
+            self._obs_populate_val_combo(row_w, self._obs_col_cache[var])
+            return
+        dat_path = getattr(self, "_dat_edit", None)
+        dat_path = dat_path.text().strip() if dat_path else ""
+        if not dat_path or not os.path.exists(dat_path):
+            return
+        fut = self.ctrl._exec.submit(self._obs_fetch_col_worker, dat_path, var)
+        def _done(_f=fut, _rw=row_w, _var=var):
+            try:
+                col_series = _f.result()
+                self._sig_obs_vals.emit((_rw, _var, col_series))
+            except Exception:
+                pass
+        fut.add_done_callback(_done)
+
+    def _obs_on_unique_vals(self, payload):
+        row_w, var, col_series = payload
+        self._obs_col_cache[var] = col_series
+        if row_w in self._obs_row_widgets:
+            self._obs_populate_val_combo(row_w, col_series)
+            self._obs_update_row_crit(row_w)
+        self._obs_schedule_refresh()
+
+    def _obs_update_row_crit(self, row_w):
+        """Compute how many individuals pass this single criterion; update crit_lbl."""
+        var = row_w.var_combo.currentText().strip()
+        op  = row_w.op_combo.currentText().strip()
+        val = row_w.val_combo.currentText().strip()
+        if not var or not val or var not in self._obs_col_cache:
+            row_w.crit_lbl.setText("")
+            return
+        col = self._obs_col_cache[var]
+        n_total = len(col.dropna())
+        try:
+            val_num = float(val)
+            col_num = pd.to_numeric(col, errors="coerce").dropna()
+            n_total = len(col_num)
+            if   op == "==": n = int((col_num == val_num).sum())
+            elif op == "!=": n = int((col_num != val_num).sum())
+            elif op == ">=": n = int((col_num >= val_num).sum())
+            elif op == "<=": n = int((col_num <= val_num).sum())
+            elif op == ">":  n = int((col_num >  val_num).sum())
+            elif op == "<":  n = int((col_num <  val_num).sum())
+            else: n = n_total
+        except (ValueError, TypeError):
+            s_col = col.dropna().astype(str)
+            n_total = len(s_col)
+            if   op == "==": n = int((s_col == str(val)).sum())
+            elif op == "!=": n = int((s_col != str(val)).sum())
+            else: n = n_total
+        row_w.crit_lbl.setText(f"{n:,}/{n_total:,}")
+
+    @staticmethod
+    def _obs_populate_val_combo(row_w, col_series):
+        non_null = col_series.dropna()
+        unique_vals = sorted(non_null.astype(str).unique().tolist())
+
+        # Value dropdown — pre-fill when ≤ 10 unique values
+        current = row_w.val_combo.currentText()
+        row_w.val_combo.blockSignals(True)
+        row_w.val_combo.clear()
+        if len(unique_vals) <= 10:
+            row_w.val_combo.addItems(unique_vals)
+        row_w.val_combo.setCurrentText(current)
+        row_w.val_combo.blockSignals(False)
+
+        # Range label — numeric range or unique-count
+        try:
+            num = pd.to_numeric(non_null, errors="coerce").dropna()
+            if len(num) > 0:
+                lo, hi = num.min(), num.max()
+                def _fmt(v):
+                    return str(int(v)) if float(v) == int(v) else f"{v:.4g}"
+                row_w.range_lbl.setText(f"{_fmt(lo)} – {_fmt(hi)}")
+                row_w.range_lbl.setToolTip(
+                    f"Raw values: min={_fmt(lo)}, max={_fmt(hi)}, N={len(num):,}")
+            else:
+                row_w.range_lbl.setText(f"{len(unique_vals)} vals")
+        except Exception:
+            row_w.range_lbl.setText(f"{len(unique_vals)} vals")
+
+    @staticmethod
+    def _obs_fetch_col_worker(dat_path, var_name):
+        """Return a Series of raw (unnormalized) values for *var_name* keyed by ID."""
+        from lunapi import gpa_dump
+        df = gpa_dump(dat_path, lvars=var_name, qc="F")
+        if "ID" not in df.columns or var_name not in df.columns:
+            return pd.Series(dtype=object)
+        return df.set_index("ID")[var_name]
+
+    def _obs_schedule_refresh(self):
+        self._obs_count_timer.start()
+
+    def _obs_refresh_count(self):
+        filters = self._obs_collect_filters()
+        if not filters:
+            self._obs_inc_ids = None
+            if hasattr(self, "_obs_count_lbl"):
+                self._obs_count_lbl.setText("No filters — all individuals included.")
+            self._update_selection_desc()
+            return
+        dat_path = getattr(self, "_dat_edit", None)
+        dat_path = dat_path.text().strip() if dat_path else ""
+        if not dat_path or not os.path.exists(dat_path):
+            if hasattr(self, "_obs_count_lbl"):
+                self._obs_count_lbl.setText("Load a .dat file to evaluate filters.")
+            return
+        if hasattr(self, "_obs_count_lbl"):
+            self._obs_count_lbl.setText("Evaluating…")
+        # Pass a snapshot of the cache so the worker doesn't touch Qt objects
+        cache_snap = {k: v.copy() for k, v in self._obs_col_cache.items()}
+        fut = self.ctrl._exec.submit(
+            self._obs_eval_worker, dat_path, filters, cache_snap)
+        def _done(_f=fut):
+            try:
+                self._sig_obs_count.emit(_f.result())
+            except Exception as exc:
+                self._sig_obs_count.emit((None, 0, 0, str(exc)))
+        fut.add_done_callback(_done)
+
+    def _obs_on_count_result(self, payload):
+        ids, n_match, n_total, err = payload
+        if err:
+            self._obs_inc_ids = None
+            if hasattr(self, "_obs_count_lbl"):
+                self._obs_count_lbl.setText(f"Error: {err[:120]}")
+            return
+        # Cache any newly fetched columns
+        if isinstance(ids, dict) and "cache" in ids:
+            for k, v in ids["cache"].items():
+                if k not in self._obs_col_cache:
+                    self._obs_col_cache[k] = v
+            ids = ids["ids"]
+        self._obs_inc_ids = ids  # None = all; list = subset
+        if ids is None:
+            txt = "No filters — all individuals included."
+        else:
+            pct = int(100 * n_match / n_total) if n_total else 0
+            txt = (f"N = {n_match:,} / {n_total:,} individuals match  ({pct}%)")
+        if hasattr(self, "_obs_count_lbl"):
+            self._obs_count_lbl.setText(txt)
+        self._update_selection_desc()
+
+    @staticmethod
+    def _obs_eval_worker(dat_path, filters, cache):
+        """Evaluate AND-combined filters; return (result_dict, n_match, n_total, err)."""
+        from lunapi import gpa_dump
+        needed = [f["var"] for f in filters if f["var"] not in cache]
+        new_cache = {}
+        try:
+            if needed:
+                df_new = gpa_dump(dat_path, lvars=",".join(dict.fromkeys(needed)), qc="F")
+                if "ID" in df_new.columns:
+                    for v in needed:
+                        if v in df_new.columns:
+                            new_cache[v] = df_new.set_index("ID")[v]
+        except Exception as exc:
+            return (None, 0, 0, str(exc))
+
+        merged_cache = {**cache, **new_cache}
+
+        # Build a combined DataFrame from the cache, aligned on ID
+        all_ids = None
+        for f in filters:
+            var = f["var"]
+            if var not in merged_cache:
+                continue
+            s = merged_cache[var]
+            if all_ids is None:
+                all_ids = s.index.tolist()
+            else:
+                all_ids = [i for i in all_ids if i in s.index]
+
+        if all_ids is None:
+            return (None, 0, 0, None)
+
+        n_total = len(all_ids)
+        mask = pd.Series(True, index=all_ids)
+
+        for f in filters:
+            var, op, val = f["var"], f["op"], f["val"]
+            if not val or var not in merged_cache:
+                continue
+            col = merged_cache[var].reindex(all_ids)
+            try:
+                val_num = float(val)
+                col_num = pd.to_numeric(col, errors="coerce")
+                if   op == "==": mask &= (col_num == val_num)
+                elif op == "!=": mask &= (col_num != val_num)
+                elif op == ">=": mask &= (col_num >= val_num)
+                elif op == "<=": mask &= (col_num <= val_num)
+                elif op == ">":  mask &= (col_num >  val_num)
+                elif op == "<":  mask &= (col_num <  val_num)
+            except (ValueError, TypeError):
+                s_col = col.astype(str)
+                if   op == "==": mask &= (s_col == str(val))
+                elif op == "!=": mask &= (s_col != str(val))
+
+        matching = [i for i, m in mask.items() if m]
+        result = {"ids": matching, "cache": new_cache}
+        return (result, len(matching), n_total, None)
+
+    def _obs_collect_filters(self):
+        out = []
+        for rw in self._obs_row_widgets:
+            var = rw.var_combo.currentText().strip()
+            op  = rw.op_combo.currentText().strip()
+            val = rw.val_combo.currentText().strip()
+            if var and val:
+                out.append({"var": var, "op": op, "val": val})
+        return out
+
+    def _obs_clear_cache(self):
+        self._obs_col_cache.clear()
+
+    def _obs_summary_str(self):
+        """Short string for the outer count bar, or '' when no filter active."""
+        if not self._obs_row_widgets or self._obs_inc_ids is None:
+            return ""
+        n = len(self._obs_inc_ids)
+        return f"obs: {n:,}"
 
     def _build_assoc_explore_tab(self):
         w = QWidget()
@@ -1885,22 +2570,11 @@ class GPATab(_ExplorerTab):
         std_lay = QVBoxLayout(self._assoc_standard_frame)
         std_lay.setContentsMargins(0, 0, 0, 0)
         std_lay.setSpacing(6)
-        dat_row = QHBoxLayout()
-        dat_row.setSpacing(4)
-        self._assoc_dat_edit = QLineEdit()
-        self._assoc_dat_edit.setPlaceholderText("path/to/out.dat")
-        self._assoc_dat_edit.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
-        btn_dat_open = QPushButton("…")
-        btn_dat_open.setFixedWidth(26)
-        btn_dat_open.clicked.connect(lambda: self._browse_dat_open(self._assoc_dat_edit))
-        self._assoc_load_btn = QPushButton("Load .dat")
-        self._assoc_load_btn.setFixedWidth(80)
-        self._assoc_load_btn.clicked.connect(self._run_load_manifest_assoc)
-        dat_row.addWidget(QLabel(".dat:"))
-        dat_row.addWidget(self._assoc_dat_edit, 1)
-        dat_row.addWidget(btn_dat_open)
-        dat_row.addWidget(self._assoc_load_btn)
-        std_lay.addLayout(dat_row)
+        self._assoc_dat_label = QLabel("")
+        self._assoc_dat_label.setWordWrap(True)
+        self._assoc_dat_label.setStyleSheet(f"color:#888; font-size:11px;")
+        std_lay.addWidget(self._assoc_dat_label)
+        self._update_assoc_dat_label()
 
         self._assoc_seed_picker = _VarPicker("Seed variable")
         self._assoc_seed_picker.set_single_selection(True)
@@ -1925,11 +2599,11 @@ class GPATab(_ExplorerTab):
         self._assoc_seed_long_list.currentRowChanged.connect(self._on_assoc_seed_long_row_changed)
         std_lay.addWidget(self._assoc_seed_long_list)
 
-        self._assoc_pool_picker = _VarPicker("Target/PCA variables")
+        self._assoc_pool_picker = _VarPicker("Target variables")
         self._assoc_pool_picker.setMinimumHeight(150)
         self._assoc_pool_picker.setMaximumHeight(190)
         self._assoc_pool_picker.set_summary(
-            "Empty selection = all variables in the manifest. Used for correlation targets and PCA."
+            "Empty selection = all variables in the manifest."
         )
         std_lay.addWidget(self._assoc_pool_picker)
         lay.addWidget(self._assoc_standard_frame)
@@ -2058,68 +2732,6 @@ class GPATab(_ExplorerTab):
 
         lay.addWidget(corr_frame)
 
-        sep_pca = QFrame()
-        sep_pca.setFrameShape(QFrame.HLine)
-        sep_pca.setFrameShadow(QFrame.Plain)
-        sep_pca.setStyleSheet(f"color:{SEP};")
-        lay.addWidget(sep_pca)
-
-        pca_frame = QFrame()
-        pca_frame.setFrameShape(QFrame.StyledPanel)
-        pca_lay = QVBoxLayout(pca_frame)
-        pca_lay.setContentsMargins(6, 4, 6, 4)
-        pca_lay.setSpacing(4)
-
-        pca_opts = QHBoxLayout()
-        pca_opts.addWidget(QLabel("Min obs"))
-        self._assoc_pca_prop_spin = QDoubleSpinBox()
-        self._assoc_pca_prop_spin.setRange(0.05, 1.0)
-        self._assoc_pca_prop_spin.setDecimals(2)
-        self._assoc_pca_prop_spin.setSingleStep(0.05)
-        self._assoc_pca_prop_spin.setValue(1.0)
-        self._assoc_pca_prop_spin.setFixedWidth(64)
-        pca_opts.addWidget(self._assoc_pca_prop_spin)
-        pca_opts.addWidget(QLabel("Points"))
-        self._assoc_pca_points_combo = QComboBox()
-        self._assoc_pca_points_combo.addItem("Variables", "variable")
-        self._assoc_pca_points_combo.addItem("Observations", "observation")
-        self._assoc_pca_points_combo.setToolTip(
-            "Repeated mode only: choose whether PCA points represent variables or repeated-observation rows."
-        )
-        pca_opts.addWidget(self._assoc_pca_points_combo)
-        pca_opts.addStretch(1)
-        pca_lay.addLayout(pca_opts)
-
-        pca_opts2 = QHBoxLayout()
-        pca_opts2.addWidget(QLabel("Missing"))
-        self._assoc_pca_row_mode = QComboBox()
-        self._assoc_pca_row_mode.addItem("Drop incomplete rows", "complete")
-        self._assoc_pca_row_mode.addItem("Median-impute kept cols", "median")
-        self._assoc_pca_row_mode.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
-        pca_opts2.addWidget(self._assoc_pca_row_mode, 1)
-        pca_lay.addLayout(pca_opts2)
-
-        pca_opts3 = QHBoxLayout()
-        pca_opts3.addWidget(QLabel(""))
-        self._assoc_pca_standardize = QCheckBox("Standardize")
-        self._assoc_pca_standardize.setChecked(True)
-        pca_opts3.addWidget(self._assoc_pca_standardize)
-        pca_opts3.addStretch(1)
-        pca_lay.addLayout(pca_opts3)
-
-        pca_run = QHBoxLayout()
-        self._assoc_pca_btn = QPushButton("Fit PCA")
-        self._assoc_pca_btn.setStyleSheet(
-            "QPushButton { background:#166534; color:#fff; padding:4px 12px; border-radius:4px; }"
-            "QPushButton:hover { background:#15803d; }"
-        )
-        pca_run.addWidget(self._assoc_pca_btn)
-        pca_run.addStretch(1)
-        pca_lay.addLayout(pca_run)
-        self._assoc_pca_btn.clicked.connect(self._run_assoc_pca)
-
-        lay.addWidget(pca_frame)
-
         self._assoc_status = QLabel("")
         self._assoc_status.setWordWrap(True)
         self._assoc_status.setStyleSheet(f"color:#888; font-size:11px;")
@@ -2145,10 +2757,6 @@ class GPATab(_ExplorerTab):
         lay = QVBoxLayout(frame)
         lay.setContentsMargins(2, 2, 2, 2)
         lay.setSpacing(3)
-
-        self._assoc_view_tabs = QTabWidget()
-        self._assoc_view_tabs.setDocumentMode(True)
-        lay.addWidget(self._assoc_view_tabs, 1)
 
         corr_tab = QWidget()
         corr_lay = QVBoxLayout(corr_tab)
@@ -2196,79 +2804,14 @@ class GPATab(_ExplorerTab):
         corr_split.addWidget(self._assoc_corr_canvas)
         corr_split.setSizes([230, 320])
         corr_lay.addWidget(corr_split, 1)
-
-        pca_tab = QWidget()
-        pca_tab.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        pca_lay = QVBoxLayout(pca_tab)
-        pca_lay.setContentsMargins(0, 0, 0, 0)
-        pca_lay.setSpacing(3)
-
-        pca_hdr = QHBoxLayout()
-        self._assoc_pca_summary = QLabel("No PCA fit yet.")
-        self._assoc_pca_summary.setStyleSheet(f"color:#888; font-size:11px;")
-        self._assoc_pca_filter = QLineEdit()
-        self._assoc_pca_filter.setPlaceholderText("filter PCA loadings…")
-        self._assoc_pca_filter.setClearButtonEnabled(True)
-        self._assoc_pca_filter.setFixedWidth(140)
-        self._assoc_pca_x_combo = QComboBox()
-        self._assoc_pca_y_combo = QComboBox()
-        self._assoc_pca_color_combo = QComboBox()
-        for combo in (self._assoc_pca_x_combo, self._assoc_pca_y_combo):
-            combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
-            combo.setMinimumContentsLength(8)
-            combo.setFixedWidth(112)
-        self._assoc_pca_color_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
-        self._assoc_pca_color_combo.setMinimumContentsLength(10)
-        self._assoc_pca_color_combo.setFixedWidth(140)
-        self._assoc_pca_x_combo.currentIndexChanged.connect(self._render_assoc_pca_plot)
-        self._assoc_pca_y_combo.currentIndexChanged.connect(self._render_assoc_pca_plot)
-        self._assoc_pca_color_combo.currentIndexChanged.connect(self._render_assoc_pca_plot)
-        btn_export_pca = QPushButton("Export…")
-        btn_export_pca.setFixedWidth(70)
-        pca_hdr.addWidget(self._assoc_pca_summary, 1)
-        pca_hdr.addWidget(QLabel("X"))
-        pca_hdr.addWidget(self._assoc_pca_x_combo)
-        pca_hdr.addWidget(QLabel("Y"))
-        pca_hdr.addWidget(self._assoc_pca_y_combo)
-        pca_hdr.addWidget(QLabel("Color"))
-        pca_hdr.addWidget(self._assoc_pca_color_combo)
-        pca_hdr.addWidget(self._assoc_pca_filter)
-        pca_hdr.addWidget(btn_export_pca)
-        pca_lay.addLayout(pca_hdr)
-
-        pca_split = QSplitter(Qt.Vertical)
-        pca_split.setHandleWidth(4)
-        self._assoc_pca_canvas = MplCanvas()
-        self._assoc_pca_canvas.figure.patch.set_facecolor(BG)
-        pca_split.addWidget(self._assoc_pca_canvas)
-        self._assoc_pca_view = QTableView()
-        self._assoc_pca_view.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self._assoc_pca_view.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self._assoc_pca_view.setSortingEnabled(True)
-        self._assoc_pca_view.horizontalHeader().setStretchLastSection(True)
-        self._assoc_pca_view.verticalHeader().setVisible(False)
-        self._assoc_pca_view.setAlternatingRowColors(True)
-        self._assoc_pca_view.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
-        self._assoc_pca_view.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self._assoc_pca_view.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
-        pca_split.addWidget(self._assoc_pca_view)
-        pca_split.setSizes([320, 220])
-        pca_lay.addWidget(pca_split, 1)
-
-        self._assoc_view_tabs.addTab(corr_tab, "Correlations")
-        self._assoc_view_tabs.addTab(pca_tab, "PCA")
+        lay.addWidget(corr_tab, 1)
 
         btn_export_corr.clicked.connect(lambda: save_table_as_tsv(self._assoc_corr_view, self))
-        btn_export_pca.clicked.connect(lambda: save_table_as_tsv(self._assoc_pca_view, self))
         self._assoc_corr_filter.textChanged.connect(self._apply_assoc_corr_filter)
-        self._assoc_pca_filter.textChanged.connect(self._apply_assoc_pca_filter)
         self._assoc_corr_view.clicked.connect(self._on_assoc_corr_row_clicked)
-        self._assoc_pca_view.clicked.connect(self._on_assoc_pca_row_clicked)
         self._assoc_ranked_btn.clicked.connect(self._show_assoc_ranked_plot)
         self._assoc_scatter_btn.clicked.connect(self._show_assoc_scatter_plot)
         self._assoc_corr_canvas.mpl_connect("motion_notify_event", self._on_assoc_ranked_hover)
-        self._assoc_pca_canvas.mpl_connect("motion_notify_event", self._on_assoc_pca_hover)
-        self._assoc_pca_canvas.mpl_connect("button_press_event", self._on_assoc_pca_click)
 
         return frame
 
@@ -2602,12 +3145,8 @@ class GPATab(_ExplorerTab):
             return
         self._col_table_path = key
         df = asgn.get("_df_preview")
-        group = asgn.get("_group", "grp")
         short = item.text()
         self._col_file_lbl.setText(f"Columns: {short}")
-        self._col_group_edit.blockSignals(True)
-        self._col_group_edit.setText(group)
-        self._col_group_edit.blockSignals(False)
         self._populate_col_table(df, asgn["_roles"])
         self._col_frame.setVisible(True)
 
@@ -2633,21 +3172,16 @@ class GPATab(_ExplorerTab):
             combo.currentIndexChanged.connect(
                 lambda _, r=row, c=col: self._on_role_changed(r, c))
             self._col_table.setCellWidget(row, 1, combo)
-            # Value (for fixed role)
-            val_item = QTableWidgetItem("")
-            self._col_table.setItem(row, 2, val_item)
-            # Group (inherits from file group)
-            grp_item = QTableWidgetItem("")  # empty = inherit
-            self._col_table.setItem(row, 3, grp_item)
             # Preview
             preview = ", ".join(df[col].dropna().astype(str).head(3).tolist())
             prev_item = QTableWidgetItem(preview)
             prev_item.setFlags(prev_item.flags() & ~Qt.ItemIsEditable)
             prev_item.setForeground(QtGui.QColor("#666688"))
-            self._col_table.setItem(row, 4, prev_item)
+            self._col_table.setItem(row, 2, prev_item)
             # Color the name by role
             self._color_row(row, role)
         self._col_table.blockSignals(False)
+        self._col_table.resizeColumnToContents(0)
 
     def _color_row(self, row, role):
         col_hex = _ROLE_COLORS.get(role, "#555555")
@@ -2667,14 +3201,6 @@ class GPATab(_ExplorerTab):
 
     def _on_col_table_changed(self, item):
         self._save_col_assignments()
-        self._sync_ui_to_json()
-
-    def _on_group_name_changed(self, text):
-        if self._col_table_path is None:
-            return
-        asgn = self._col_assignments.get(self._col_table_path, {})
-        asgn["_group"] = text
-        self._col_assignments[self._col_table_path] = asgn
         self._sync_ui_to_json()
 
     def _save_col_assignments(self):
@@ -2754,14 +3280,6 @@ class GPATab(_ExplorerTab):
         return specs
 
     def _col_value(self, file_list_row, key, col):
-        """Get the "Value" cell for a given file row and column name."""
-        # Re-check col table if it matches current path
-        if self._col_table_path == key:
-            for row in range(self._col_table.rowCount()):
-                name_item = self._col_table.item(row, 0)
-                if name_item and name_item.text() == col:
-                    val_item = self._col_table.item(row, 2)
-                    return val_item.text().strip() if val_item else ""
         return ""
 
     def _sync_ui_to_json(self):
@@ -2892,8 +3410,17 @@ class GPATab(_ExplorerTab):
         path = (path or "").strip()
         if hasattr(self, "_dat_edit"):
             self._dat_edit.setText(path)
-        if hasattr(self, "_assoc_dat_edit"):
-            self._assoc_dat_edit.setText(path)
+        self._update_assoc_dat_label()
+
+    def _update_assoc_dat_label(self):
+        label = getattr(self, "_assoc_dat_label", None)
+        if label is None:
+            return
+        dat_path = self._dat_edit.text().strip() if hasattr(self, "_dat_edit") else ""
+        if dat_path:
+            label.setText(f"Using current .dat: {dat_path}")
+        else:
+            label.setText("Using current .dat: none loaded")
 
     def _run_prep(self):
         dat_path = self._build_dat_edit.text().strip()
@@ -2999,7 +3526,7 @@ class GPATab(_ExplorerTab):
                     else:
                         df = obj if sub_key == os.path.basename(pkl_path) else None
                     if df is not None:
-                        df.to_csv(dest, sep="\t", index=False, na_rep=".")
+                        df.to_csv(dest, sep="\t", index=False, na_rep=".", encoding="utf-8")
                         extracted.append(dest)
                 except Exception:
                     pass
@@ -3030,7 +3557,13 @@ class GPATab(_ExplorerTab):
                                 continue
                             df = pd.DataFrame(raw[1]).T
                             df.columns = raw[0]
-                            df.to_csv(key_to_dest[k], sep="\t", index=False, na_rep=".")
+                            df.to_csv(
+                                key_to_dest[k],
+                                sep="\t",
+                                index=False,
+                                na_rep=".",
+                                encoding="utf-8",
+                            )
                             extracted.append(key_to_dest[k])
                     except Exception:
                         pass
@@ -3055,9 +3588,6 @@ class GPATab(_ExplorerTab):
 
     def _run_load_manifest(self):
         self._run_load_manifest_for(self._dat_edit.text().strip())
-
-    def _run_load_manifest_assoc(self):
-        self._run_load_manifest_for(self._assoc_dat_edit.text().strip())
 
     def _run_load_manifest_for(self, dat_path):
         if not dat_path:
@@ -3093,14 +3623,21 @@ class GPATab(_ExplorerTab):
         return gpa_manifest(dat_path)
 
     def _populate_manifest_table(self, df):
-        model = QStandardItemModel(len(df), len(df.columns), self)
-        model.setHorizontalHeaderLabels(list(df.columns))
+        cols = list(df.columns)
+        numeric_cols = {i for i, c in enumerate(cols) if c in ("NV", "NI")}
+        model = QStandardItemModel(len(df), len(cols), self)
+        model.setHorizontalHeaderLabels(cols)
         for r, row in df.iterrows():
             for c, val in enumerate(row):
                 item = QStandardItem(str(val))
                 item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                if c in numeric_cols:
+                    try:
+                        item.setData(float(val), Qt.UserRole)
+                    except (TypeError, ValueError):
+                        pass
                 model.setItem(int(r), c, item)
-        proxy = QSortFilterProxyModel(self)
+        proxy = _GpaResultsSortProxy(self)
         proxy.setSourceModel(model)
         proxy.setFilterCaseSensitivity(Qt.CaseInsensitive)
         proxy.setFilterKeyColumn(-1)
@@ -3132,7 +3669,9 @@ class GPATab(_ExplorerTab):
         repeated = self._assoc_is_repeated_mode()
         self._assoc_standard_frame.setVisible(not repeated)
         self._assoc_repeated_frame.setVisible(repeated)
-        self._assoc_pca_points_combo.setEnabled(repeated)
+        pca_points_combo = getattr(self, "_assoc_pca_points_combo", None)
+        if pca_points_combo is not None:
+            pca_points_combo.setEnabled(repeated)
         if repeated:
             self._assoc_seed_picker.set_title("Seed metric")
             self._assoc_seed_long_label.setText("Selected seed metric")
@@ -3143,6 +3682,14 @@ class GPATab(_ExplorerTab):
             self._assoc_seed_long_label.setText("Actual seed variable")
             self._assoc_seed_long_label.setVisible(True)
             self._assoc_seed_long_list.setVisible(True)
+        manifest_df = (
+            self._assoc_repeated_manifest_df
+            if repeated and self._assoc_repeated_manifest_df is not None
+            else (pd.DataFrame() if repeated else self._manifest_df)
+        )
+        self._assoc_seed_picker.populate(manifest_df)
+        self._assoc_pool_picker.populate(manifest_df)
+        self._refresh_assoc_seed_long_list(preferred=self._assoc_seed_long)
         self._clear_assoc_matrix_cache()
         self._assoc_corr_df = pd.DataFrame()
         self._assoc_pca_df = pd.DataFrame()
@@ -3397,7 +3944,7 @@ class GPATab(_ExplorerTab):
             if not self._assoc_repeated_selected_key():
                 return
         else:
-            dat_path = self._assoc_dat_edit.text().strip() or self._dat_edit.text().strip()
+            dat_path = self._dat_edit.text().strip()
             if not dat_path or not os.path.exists(dat_path):
                 return
         if not self._assoc_seed_long:
@@ -3502,10 +4049,9 @@ class GPATab(_ExplorerTab):
         if not self._start_work("Ranking correlations…"):
             return
         self._assoc_status.setText(f"Ranking correlations for {seed_var}…")
-        self._assoc_view_tabs.setCurrentIndex(0)
         meta = self._manifest_meta_for_vars(_unique_preserve([seed_var] + candidates))
         requested_cols = _unique_preserve([seed_var] + candidates)
-        dat_path = self._assoc_dat_edit.text().strip() or self._dat_edit.text().strip()
+        dat_path = self._dat_edit.text().strip()
         if not self._assoc_is_repeated_mode():
             if not dat_path or not os.path.exists(dat_path):
                 self._end_work()
@@ -3605,72 +4151,9 @@ class GPATab(_ExplorerTab):
         return out
 
     def _run_assoc_pca(self):
-        candidates = self._assoc_candidate_long_names()
-        if len(candidates) < 2:
-            QtWidgets.QMessageBox.warning(self._root, "Assoc", "Need at least two variables for PCA.")
-            return
-        if not self._start_work("Fitting PCA…"):
-            return
-        self._assoc_status.setText(f"Fitting PCA on {len(candidates)} variable(s)…")
-        self._assoc_view_tabs.setCurrentIndex(1)
-        meta = self._manifest_meta_for_vars(candidates)
-        dat_path = self._assoc_dat_edit.text().strip() or self._dat_edit.text().strip()
-        if not self._assoc_is_repeated_mode():
-            if not dat_path or not os.path.exists(dat_path):
-                self._end_work()
-                QtWidgets.QMessageBox.warning(self._root, "Assoc", "Load a valid .dat file first.")
-                return
-            self._set_dat_path(dat_path)
-        cache = self._assoc_matrix_cache_payload(dat_path, candidates)
-        if cache["from_cache"]:
-            fut = self.ctrl._exec.submit(
-                self._assoc_pca_from_df_worker,
-                cache["df"],
-                candidates,
-                meta,
-                float(self._assoc_pca_prop_spin.value()),
-                str(self._assoc_pca_row_mode.currentData()),
-                bool(self._assoc_pca_standardize.isChecked()),
-                str(self._assoc_pca_points_combo.currentData() or "variable") if self._assoc_is_repeated_mode() else "variable",
-            )
-        else:
-            if self._assoc_is_repeated_mode():
-                source_path, member = self._assoc_repeated_source_parts()
-                if not source_path:
-                    self._end_work()
-                    QtWidgets.QMessageBox.warning(self._root, "Assoc", "Select one source table first.")
-                    return
-                fut = self.ctrl._exec.submit(
-                    self._assoc_repeated_pca_worker,
-                    source_path,
-                    member,
-                    str(self._assoc_rep_subject_combo.currentData() or ""),
-                    self._selected_list_values(self._assoc_rep_key_list),
-                    self._selected_list_values(self._assoc_rep_metric_list),
-                    self._selected_list_values(self._assoc_rep_meta_list),
-                    self._assoc_repeated_filter_map(),
-                    candidates,
-                    meta,
-                    float(self._assoc_pca_prop_spin.value()),
-                    str(self._assoc_pca_row_mode.currentData()),
-                    bool(self._assoc_pca_standardize.isChecked()),
-                    cache["cache_key"],
-                    str(self._assoc_pca_points_combo.currentData() or "variable"),
-                )
-            else:
-                fut = self.ctrl._exec.submit(
-                    self._assoc_pca_worker,
-                    dat_path, candidates, cache["filters"], meta,
-                    float(self._assoc_pca_prop_spin.value()),
-                    str(self._assoc_pca_row_mode.currentData()),
-                    bool(self._assoc_pca_standardize.isChecked()), cache["cache_key"], "variable",
-                )
-        def _done(_f=fut):
-            try:
-                self._sig_ok.emit({"type": "assoc_pca", "result": _f.result()})
-            except Exception:
-                self._sig_err.emit({"type": "assoc", "traceback": traceback.format_exc()})
-        fut.add_done_callback(_done)
+        QtWidgets.QMessageBox.information(
+            self._root, "Assoc", "PCA is currently hidden in this explorer."
+        )
 
     @staticmethod
     def _assoc_pca_from_df_worker(raw_df, candidates, meta_df, min_prop, row_mode, standardize, point_mode="variable"):
@@ -3767,9 +4250,13 @@ class GPATab(_ExplorerTab):
         win = self._winsor_edit.text().strip()
         if win:
             try:
-                float(win); opts["winsor"] = win
-            except ValueError:
-                pass
+                win_f = float(win)
+                if not (0.0 <= win_f <= 0.2):
+                    raise ValueError(f"winsor must be between 0 and 0.2 (got {win_f})")
+                opts["winsor"] = str(win_f)
+            except ValueError as exc:
+                QtWidgets.QMessageBox.warning(self._root, "GPA – winsor", str(exc))
+                return
 
         if not self._start_work("Dumping GPA data…"):
             return
@@ -3790,6 +4277,7 @@ class GPATab(_ExplorerTab):
         return stdout
 
     def _run_gpa(self):
+        self._obs_clear_cache()   # fresh data each run
         dat_path = self._dat_edit.text().strip()
         if not dat_path or not os.path.exists(dat_path):
             QtWidgets.QMessageBox.warning(
@@ -3840,6 +4328,8 @@ class GPATab(_ExplorerTab):
             )
 
         request = self._collect_gpa_request(x_vars, y_vars, z_vars)
+        if request is None:
+            return
         self._last_gpa_request = {
             "x_count": x_bases,
             "y_count": y_bases,
@@ -3895,8 +4385,18 @@ class GPATab(_ExplorerTab):
             opts["lvars"] = ",".join(y_longs)
         win = self._winsor_edit.text().strip()
         if win:
-            try: opts["winsor"] = str(float(win))
-            except ValueError: pass
+            try:
+                win_f = float(win)
+                if not (0.0 <= win_f <= 0.2):
+                    raise ValueError(f"winsor must be between 0 and 0.2 (got {win_f})")
+                opts["winsor"] = str(win_f)
+            except ValueError as exc:
+                QtWidgets.QMessageBox.warning(self._root, "GPA – winsor", str(exc))
+                return None
+        # Observations filter — pass inc-ids when a subset is active
+        inc_ids = getattr(self, "_obs_inc_ids", None)
+        if inc_ids is not None:
+            opts["inc-ids"] = ",".join(str(i) for i in inc_ids)
         return {
             "opts": opts,
             "diag": {
@@ -4097,9 +4597,12 @@ class GPATab(_ExplorerTab):
         """Summarize selected variables inline beside each picker header."""
         for picker in (self._picker_x, self._picker_y, self._picker_z):
             picker.set_summary("")
+        role_parts = []
+        all_longs = []
         for label, picker in (("X", self._picker_x), ("Y", self._picker_y), ("Z", self._picker_z)):
             bases = picker.selected()
             longs = picker.selected_long_names()
+            all_longs.extend(longs)
             if not bases:
                 continue
             n_txt = self._selection_n_summary(longs)
@@ -4111,6 +4614,17 @@ class GPATab(_ExplorerTab):
             if n_txt:
                 part += f" ({n_txt})"
             picker.set_summary(part)
+            role_parts.append(f"{label}: {len(bases)} var{'s' if len(bases) != 1 else ''}")
+        if hasattr(self, "_select_count_lbl"):
+            parts = list(role_parts)
+            if role_parts:
+                n_txt = self._selection_n_summary(all_longs)
+                if n_txt:
+                    parts.append(f"{n_txt} individuals")
+            obs_s = self._obs_summary_str() if hasattr(self, "_obs_row_widgets") else ""
+            if obs_s:
+                parts.append(obs_s)
+            self._select_count_lbl.setText("  ·  ".join(parts))
 
     def _clear_results_display(self):
         """Clear any stale GPA results and plots before/after a run."""
@@ -4730,7 +5244,7 @@ class GPATab(_ExplorerTab):
         self._on_assoc_corr_row_changed(index)
 
     def _request_assoc_scatter(self, seed_var, target_var):
-        dat_path = self._assoc_dat_edit.text().strip() or self._dat_edit.text().strip()
+        dat_path = self._dat_edit.text().strip()
         candidates = self._assoc_candidate_long_names()
         cache = self._assoc_matrix_cache_payload(dat_path, candidates)
         if cache["from_cache"] and all(col in cache["df"].columns for col in [seed_var, target_var]):
@@ -5056,7 +5570,6 @@ class GPATab(_ExplorerTab):
         idx = int(info["ind"][0])
         if idx >= len(self._assoc_pca_labels):
             return
-        self._assoc_view_tabs.setCurrentIndex(0)
         self._set_assoc_seed_variable(self._assoc_pca_labels[idx], auto_run=True)
 
     # ======================================================================
@@ -5287,12 +5800,10 @@ class GPATab(_ExplorerTab):
         xs_g = np.array(xs_group, dtype=float)
         unique_vals = np.unique(xs_g[~np.isnan(xs_g)])
         if len(unique_vals) == 2:
-            self._analyze_status.setText(f"Box plot ({label}{x_var} × {y_var})")
             self._render_boxplot(xs_g, np.array(ys_plot, dtype=float),
                                  np.array(xs_plot, dtype=float),
                                  unique_vals, x_var, y_var, partial=partial)
         else:
-            self._analyze_status.setText(f"Scatter ({label}{x_var} × {y_var})")
             self._render_scatter(np.array(xs_plot, dtype=float),
                                  np.array(ys_plot, dtype=float),
                                  x_var, y_var, partial=partial)
@@ -5438,6 +5949,7 @@ class GPATab(_ExplorerTab):
                     self._populate_assoc_pca_color_combo()
                     self._update_selection_desc()
                     self._refresh_assoc_seed_long_list()
+                    self._tabs.setCurrentIndex(1)  # switch to Manifest
                 else:
                     # Fall back to the engine-derived manifest if prep did not
                     # return one for some reason.
@@ -5451,6 +5963,7 @@ class GPATab(_ExplorerTab):
             self._assoc_status.setText(
                 f"{len(result)} variables loaded." if result is not None else "Manifest empty.")
             if result is not None and not result.empty:
+                self._tabs.setCurrentIndex(1)  # switch to Manifest
                 self._populate_manifest_table(result)
                 for p in (self._picker_x, self._picker_y, self._picker_z,
                           self._assoc_seed_picker, self._assoc_pool_picker):
@@ -5474,7 +5987,7 @@ class GPATab(_ExplorerTab):
                 return
             self._analyze_status.setText(self._format_gpa_status(tables, diag))
             self._populate_results_tables(tables)
-            self._inner_tabs.setCurrentIndex(1)  # stay on Analyze
+            self._tabs.setCurrentIndex(3)  # switch to Results
 
         elif t == "joint":
             self._joint_result = result

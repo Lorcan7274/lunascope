@@ -2041,7 +2041,7 @@ class HarmonizerTab(_ExplorerTab):
         if not path:
             return
         try:
-            df = pd.read_csv(path, sep='\t', dtype=str).fillna('')
+            df = pd.read_csv(path, sep='\t', dtype=str, encoding="utf-8-sig").fillna('')
             self._domains = {}
             for _, row in df.iterrows():
                 ch = str(row.get('CH', '')).strip()

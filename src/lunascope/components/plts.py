@@ -26,7 +26,18 @@ from lunascope.helpers import winsorize_array
 from matplotlib.patches import Rectangle
 from matplotlib.collections import PatchCollection
 from matplotlib import colormaps
+from matplotlib.cm import ScalarMappable
+from matplotlib.colors import Normalize, TwoSlopeNorm
 from matplotlib import pyplot as plt
+
+
+def _reset_figure_axes(ax):
+    """Keep *ax* as the only plotting axes before redrawing."""
+    fig = ax.figure
+    for extra_ax in list(fig.axes):
+        if extra_ax is not ax:
+            extra_ax.remove()
+    return fig
 
 @staticmethod
 def hypno(ss, e=None, ax=None, *, title=None, xsize=20, ysize=2, clear=True):
@@ -122,8 +133,9 @@ def spec(ss, e=None, ax=None, *, title=None, xsize=20, ysize=2, clear=True):
 # plot a Hjorthgram
 
 @staticmethod
-def plot_hjorth( ch , ax , p , gui , epoch_dur=30 ):
+def plot_hjorth( ch , ax , p , gui , epoch_dur=30, show_legend=False ):
 
+    fig = _reset_figure_axes(ax)
     ax.clear()
 
     # get stats
@@ -181,22 +193,36 @@ def plot_hjorth( ch , ax , p , gui , epoch_dur=30 ):
     ax.add_collection(pc_bot)
 
 
-    fig = ax.figure
-    # no auto layout padding
     fig.set_constrained_layout(False)      # or: fig.set_layout_engine(None)
-    fig.subplots_adjust(left=0, right=1, bottom=0, top=1, wspace=0, hspace=0)
-    # make the axes fill the figure
-    ax.set_position([0, 0, 1, 1])
-    # no data margins or axes decorations
     ax.margins(x=0, y=0)
-    ax.set_axis_off()
 
-    ax.set_xlim(0, max(x))
+    ax.set_xlim(0, max(x) + elen)
     ax.set_ylim(-1, 1)
     ax.margins(0)
-    ax.axis("off")
     ax.figure.patch.set_facecolor("white")
     ax.set_aspect("auto")
+
+    if show_legend:
+        fig.subplots_adjust(left=0.08, right=0.86, bottom=0.16, top=0.95, wspace=0, hspace=0)
+        ax.set_position([0.08, 0.16, 0.74, 0.79])
+        ax.set_axis_on()
+        ax.set_xlabel("Time (s)")
+        ax.set_ylabel("Hjorth activity")
+        ax.set_yticks([-1, 0, 1])
+        cbar = fig.colorbar(
+            ScalarMappable(norm=Normalize(vmin=0.0, vmax=1.0), cmap=colormaps["turbo"]),
+            ax=ax,
+            fraction=0.035,
+            pad=0.025,
+        )
+        cbar.set_label("Normalized mobility / complexity")
+    else:
+        # no auto layout padding; make the axes fill the figure
+        fig.subplots_adjust(left=0, right=1, bottom=0, top=1, wspace=0, hspace=0)
+        ax.set_position([0, 0, 1, 1])
+        # no axes decorations
+        ax.set_axis_off()
+        ax.axis("off")
     
     return ax
 
@@ -205,23 +231,30 @@ def plot_hjorth( ch , ax , p , gui , epoch_dur=30 ):
 # plot a spectrogram
         
 @staticmethod
-def plot_spec( xi,yi,zi, ch, minf, maxf, ax , gui, clear = True):
+def plot_spec( xi,yi,zi, ch, minf, maxf, ax , gui, clear = True, show_legend=False):
 
     created = False
     if ax is None:
         fig, ax = plt.subplots(figsize=(xsize, ysize))
         created = True
     elif clear:
+        _reset_figure_axes(ax)
         ax.clear()
         
     if len(xi) == 0: return ax
 
     fig = ax.figure
     fig.set_constrained_layout(False)
-    fig.subplots_adjust(left=0, right=1, bottom=0, top=1, wspace=0, hspace=0)
-    ax.set_position([0, 0, 1, 1])
+    if show_legend:
+        fig.subplots_adjust(left=0.08, right=0.86, bottom=0.16, top=0.95, wspace=0, hspace=0)
+        ax.set_position([0.08, 0.16, 0.74, 0.79])
+        fig.patch.set_facecolor("white")
+        ax.set_facecolor("white")
+    else:
+        fig.subplots_adjust(left=0, right=1, bottom=0, top=1, wspace=0, hspace=0)
+        ax.set_position([0, 0, 1, 1])
 
-    ax.set_xlabel('Epoch')
+    ax.set_xlabel('Time (s)' if show_legend else 'Epoch')
     ax.set_ylabel('Frequency (Hz)')
     ax.set_axis_on()
     ax.set_ylim(float(yi[0]), float(yi[-1]))
@@ -230,7 +263,70 @@ def plot_spec( xi,yi,zi, ch, minf, maxf, ax , gui, clear = True):
         ax.set_xlim(0, float(np.nanmax(xi)))
     ax.set_aspect("auto")
     ax.margins(x=0, y=0)
+    if show_legend:
+        cbar = fig.colorbar(p1, ax=ax, fraction=0.035, pad=0.025)
+        cbar.set_label("PSD (dB)")
     return ax  
+
+
+@staticmethod
+def plot_tf_heatmap(xi, yi, zi, title, ax, *, y_label="Frequency (Hz)",
+                    cbar_label="Value", y_ticklabels=None, show_legend=False,
+                    clear=True, cmap="turbo", center_zero=False):
+    if ax is None:
+        _, ax = plt.subplots()
+    elif clear:
+        _reset_figure_axes(ax)
+        ax.clear()
+
+    fig = ax.figure
+    fig.set_constrained_layout(False)
+    if show_legend:
+        fig.subplots_adjust(left=0.08, right=0.86, bottom=0.16, top=0.95, wspace=0, hspace=0)
+        ax.set_position([0.08, 0.16, 0.74, 0.79])
+        fig.patch.set_facecolor("white")
+        ax.set_facecolor("white")
+    else:
+        fig.subplots_adjust(left=0, right=1, bottom=0, top=1, wspace=0, hspace=0)
+        ax.set_position([0, 0, 1, 1])
+
+    if len(xi) == 0 or len(yi) == 0:
+        if show_legend:
+            ax.set_title(title)
+            ax.set_xlabel("Time (s)")
+            ax.set_ylabel(y_label)
+        else:
+            ax.set_axis_off()
+        return ax
+
+    norm = None
+    if center_zero:
+        data = np.ma.asarray(zi, dtype=float).compressed()
+        data = data[np.isfinite(data)]
+        vmax = float(np.nanmax(np.abs(data))) if data.size else 1.0
+        if vmax <= 0:
+            vmax = 1.0
+        norm = TwoSlopeNorm(vmin=-vmax, vcenter=0.0, vmax=vmax)
+    p1 = ax.pcolormesh(xi, yi, zi, cmap=cmap, norm=norm)
+    ax.set_aspect("auto")
+    ax.margins(x=0, y=0)
+    if len(xi) > 1:
+        ax.set_xlim(float(np.nanmin(xi)), float(np.nanmax(xi)))
+    if len(yi) > 1:
+        ax.set_ylim(float(np.nanmin(yi)), float(np.nanmax(yi)))
+    ax.set_axis_on()
+    if show_legend:
+        ax.set_title(title)
+        ax.set_xlabel("Time (s)")
+        ax.set_ylabel(y_label)
+        if y_ticklabels is not None:
+            ticks = 0.5 * (np.asarray(yi[:-1], dtype=float) + np.asarray(yi[1:], dtype=float))
+            ax.set_yticks(ticks, labels=list(y_ticklabels))
+        cbar = fig.colorbar(p1, ax=ax, fraction=0.035, pad=0.025)
+        cbar.set_label(cbar_label)
+    else:
+        ax.set_axis_off()
+    return ax
 
 
 @staticmethod

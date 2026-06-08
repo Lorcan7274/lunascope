@@ -69,6 +69,25 @@ def test_save_and_load_zip_round_trip(tmp_path):
     assert tree == _pairs()
 
 
+def test_save_and_load_zip_round_trip_utf8_text(tmp_path):
+    ctrl = _FakeCtrl()
+    ctrl.results = {
+        "标注_中文": pd.DataFrame(
+            {"ID": ["样本一"], "ANNOT": ["睡眠阶段"], "PATH": ["数据/受试者一.edf"]}
+        )
+    }
+    path = tmp_path / "结果.zip"
+    ctrl._save_results_zip(str(path), [("标注", "中文")])
+
+    with zipfile.ZipFile(path) as zf:
+        assert any("标注_中文.tsv" in name for name in zf.namelist())
+
+    results, tree = ctrl._load_results_zip(str(path))
+
+    assert tree == [("标注", "中文")]
+    pd.testing.assert_frame_equal(results["标注_中文"], ctrl.results["标注_中文"])
+
+
 def test_load_pkl_rejects_non_dict(tmp_path):
     import pickle
 

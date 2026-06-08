@@ -95,6 +95,7 @@ def test_add_dock_shortcuts_registers_windows_friendly_reset_shortcut(qapp):
     )
     shortcuts = {seq.toString() for seq in reset_action.shortcuts()}
 
+    assert "Ctrl+R" not in shortcuts
     assert "Ctrl+)" in shortcuts
     assert "Ctrl+Shift+0" in shortcuts
     assert mask_action.shortcut().toString() == "Ctrl+-"
@@ -134,6 +135,87 @@ def test_font_controller_clamps_persists_and_applies_app_font(qapp, tmp_path):
         qapp.setProperty("lunascope_font_scale", original_prop)
 
 
+def test_font_controller_scales_existing_widget_fonts_and_styles(qapp, tmp_path):
+    from PySide6.QtCore import QSettings
+    from PySide6.QtGui import QFont
+    from PySide6.QtWidgets import QLabel, QPlainTextEdit, QWidget
+
+    from lunascope.helpers import AppFontController
+
+    settings = QSettings(str(tmp_path / "font.ini"), QSettings.IniFormat)
+    original = QFont(qapp.font())
+    original_prop = qapp.property("lunascope_font_scale")
+    parent = QWidget()
+    label = QLabel("Label", parent)
+    edit = QPlainTextEdit(parent)
+    edit_font = QFont("Courier New")
+    edit_font.setPointSizeF(10.0)
+    edit.setFont(edit_font)
+    label.setStyleSheet("QLabel { color: white; font-size: 12px; }")
+
+    try:
+        ctl = AppFontController(settings=settings, apply_delay_ms=1)
+        ctl.set_scale(1.2, immediate=True)
+        assert edit.font().pointSizeF() == pytest.approx(12.0)
+        assert "font-size: 14.4px" in label.styleSheet()
+
+        ctl.decrease()
+        ctl.apply_now()
+        assert edit.font().pointSizeF() == pytest.approx(11.0)
+        assert "font-size: 13.2px" in label.styleSheet()
+    finally:
+        qapp.setFont(original)
+        qapp.setProperty("lunascope_font_scale", original_prop)
+        parent.deleteLater()
+
+
+def test_font_controller_does_not_double_scale_late_widgets(qapp, tmp_path):
+    from PySide6.QtCore import QSettings
+    from PySide6.QtWidgets import QLineEdit
+
+    from lunascope.helpers import AppFontController
+
+    settings = QSettings(str(tmp_path / "font.ini"), QSettings.IniFormat)
+    original = qapp.font()
+    original_prop = qapp.property("lunascope_font_scale")
+
+    try:
+        ctl = AppFontController(settings=settings, apply_delay_ms=1)
+        ctl.set_scale(1.2, immediate=True)
+        edit = QLineEdit()
+        inherited_size = edit.font().pointSizeF()
+        ctl.set_scale(1.3, immediate=True)
+
+        assert edit.font().pointSizeF() < inherited_size * 1.2
+    finally:
+        qapp.setFont(original)
+        qapp.setProperty("lunascope_font_scale", original_prop)
+        edit.deleteLater()
+
+
+def test_font_controller_scales_dock_title_stylesheet(qapp, tmp_path):
+    from PySide6.QtCore import QSettings
+
+    from lunascope.helpers import AppFontController
+
+    settings = QSettings(str(tmp_path / "font.ini"), QSettings.IniFormat)
+    original_style = qapp.styleSheet()
+    original_prop = qapp.property("lunascope_font_scale")
+    original_base_style = qapp.property("lunascope_base_stylesheet")
+
+    try:
+        qapp.setStyleSheet("QWidget { color: white; }")
+        ctl = AppFontController(settings=settings, apply_delay_ms=1)
+        ctl.set_scale(1.3, immediate=True)
+
+        assert "QDockWidget::title" in qapp.styleSheet()
+        assert "font-size: 15.6px" in qapp.styleSheet()
+    finally:
+        qapp.setStyleSheet(original_style)
+        qapp.setProperty("lunascope_font_scale", original_prop)
+        qapp.setProperty("lunascope_base_stylesheet", original_base_style)
+
+
 def test_font_controller_actions_do_not_use_mask_subset_shortcut(qapp, tmp_path):
     from PySide6.QtCore import QSettings
     from PySide6.QtWidgets import QMainWindow
@@ -155,6 +237,7 @@ def test_font_controller_actions_do_not_use_mask_subset_shortcut(qapp, tmp_path)
         "Smaller Text",
         "Reset Text Size",
     ]
+    assert "Ctrl+R" in shortcuts
     assert "Ctrl+-" not in shortcuts
 
 

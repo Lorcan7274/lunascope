@@ -257,7 +257,7 @@ class ResultsIOMixin:
         sep = "\t" if lower.endswith(".tsv") else ","
         file_type = "TSV" if lower.endswith(".tsv") else "CSV"
         try:
-            df = pd.read_csv(filename, sep=sep)
+            df = pd.read_csv(filename, sep=sep, encoding="utf-8-sig")
         except Exception as e:
             QMessageBox.critical(self.ui, "Load error", f"Could not load file:\n{e}")
             return
@@ -334,7 +334,10 @@ class ResultsIOMixin:
             if "_manifest.tsv" not in names:
                 raise ValueError("Not a valid results zip: missing '_manifest.tsv'.")
 
-            manifest = pd.read_csv(io.BytesIO(zf.read("_manifest.tsv")), sep="\t")
+            manifest = pd.read_csv(
+                io.TextIOWrapper(io.BytesIO(zf.read("_manifest.tsv")), encoding="utf-8-sig"),
+                sep="\t",
+            )
             required = {"key", "command", "strata"}
             missing = required - set(manifest.columns)
             if missing:
@@ -358,7 +361,10 @@ class ResultsIOMixin:
                     raise ValueError(
                         f"Not a valid results zip: missing data file '{fname_base}'."
                     )
-                results[key] = pd.read_csv(io.BytesIO(zf.read(tsv_index[fname_base])), sep="\t")
+                results[key] = pd.read_csv(
+                    io.TextIOWrapper(io.BytesIO(zf.read(tsv_index[fname_base])), encoding="utf-8-sig"),
+                    sep="\t",
+                )
                 pairs.append((str(row["command"]), str(row["strata"])))
 
         return results, pairs

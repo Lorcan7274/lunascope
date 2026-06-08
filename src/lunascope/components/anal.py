@@ -71,6 +71,9 @@ class AnalMixin:
     def _init_anal(self):
 
         self.ui.butt_anal_exec.clicked.connect( self._exec_single_luna )
+        sc_exec = QShortcut(QKeySequence("Ctrl+Return"), self.ui)
+        sc_exec.setContext(Qt.ApplicationShortcut)
+        sc_exec.activated.connect(self._exec_single_luna)
 
         self.ui.butt_anal_load.clicked.connect( self._load_luna )
 

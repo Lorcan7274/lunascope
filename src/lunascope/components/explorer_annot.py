@@ -873,9 +873,9 @@ class AnnotTab(_ExplorerTab):
             return
         try:
             sep = "\t" if fn.lower().endswith(".tsv") or fn.lower().endswith(".txt") else ","
-            df = pd.read_csv(fn, sep=sep, dtype=str)
+            df = pd.read_csv(fn, sep=sep, dtype=str, encoding="utf-8-sig")
             if len(df.columns) == 1:
-                df = pd.read_csv(fn, sep=",", dtype=str)
+                df = pd.read_csv(fn, sep=",", dtype=str, encoding="utf-8-sig")
             df.replace(["NA", "na", "N/A", "n/a", ".", ""], np.nan, inplace=True)
             id_col = next((c for c in df.columns if c.strip().upper() == "ID"), None)
             if id_col is None:

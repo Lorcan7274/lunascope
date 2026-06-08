@@ -534,7 +534,7 @@ class PredictMixin:
             return None
         try:
             sep = "\t" if path.lower().endswith((".tsv", ".txt")) else ","
-            df = pd.read_csv(path, sep=sep, dtype=str)
+            df = pd.read_csv(path, sep=sep, dtype=str, encoding="utf-8-sig")
             if df.empty:
                 return None
             for col_name in ("IID", "ID", "iid", "id"):

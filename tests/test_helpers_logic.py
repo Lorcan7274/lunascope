@@ -177,6 +177,24 @@ def test_read_sample_list_rows_resolves_relatives_but_keeps_windows_absolutes(tm
     ]
 
 
+def test_read_sample_list_rows_utf8_chinese_paths(tmp_path):
+    slist = tmp_path / "研究.lst"
+    edf = "数据/受试者一.edf"
+    annot = "标注/睡眠.annot"
+    slist.write_text(f"样本一\t{edf}\t{annot}\n", encoding="utf-8")
+
+    rows = _read_sample_list_rows(str(slist))
+    base = slist.expanduser().resolve().parent
+
+    assert rows == [
+        [
+            "样本一",
+            os.path.normpath(str(base / edf)),
+            os.path.normpath(str(base / annot)),
+        ]
+    ]
+
+
 def test_sample_list_model_preserves_dot_placeholder():
     df = pd.DataFrame(
         {

@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QGridLayout, QFrame, QSizePolicy,
 )
 from PySide6.QtCore import QSignalBlocker, QEvent, QObject
+from ..helpers import current_font_scale
 
 
 class _BannerResizeFilter(QObject):
@@ -65,9 +66,12 @@ class SignalsMixin:
                 pass
             self.annot_sel = None
 
+        ns = float(getattr(self, "ns", 0.0) or 0.0)
+        if ns <= 0:
+            ns = 30.0
         self.annot_sel = XRangeSelector(
             self.ui.pg1,
-            bounds=(0, self.ns),
+            bounds=(0, ns),
             integer=False,
             click_span=30.0,
             min_span=0.01,
@@ -80,6 +84,42 @@ class SignalsMixin:
     def _navigator_stage_query_classes(self):
         # Include both detailed staging and generic sleep/wake aliases.
         return ['N1', 'N2', 'N3', 'R', 'W', 'SP', 'WP', '?', 'L']
+
+    def _signal_text_font(self, family, point_size, weight=None):
+        if weight is None:
+            weight = QtGui.QFont.Normal
+        font = QtGui.QFont(family, int(point_size), weight)
+        font.setPointSizeF(float(point_size) * current_font_scale())
+        return font
+
+    def _apply_signal_font_scale(self, scale=None):
+        for item, family, size in (
+            (getattr(self, "tb0", None), "Arial", 12),
+            (getattr(self, "tb", None), "Arial", 12),
+            (getattr(self, "labs", None), "Arial", 10),
+        ):
+            if item is not None and hasattr(item, "setFont"):
+                item.setFont(self._signal_text_font(family, size))
+
+        axis_font = self._signal_text_font("Arial", 10)
+        for plot_name in ("pg1", "pgh"):
+            plot = getattr(self.ui, plot_name, None)
+            if plot is None or not hasattr(plot, "getAxis"):
+                continue
+            for axis_name in ("left", "right", "top", "bottom"):
+                try:
+                    axis = plot.getAxis(axis_name)
+                except Exception:
+                    continue
+                try:
+                    if hasattr(axis, "setTickFont"):
+                        axis.setTickFont(axis_font)
+                    else:
+                        axis.setStyle(tickFont=axis_font)
+                    if getattr(axis, "label", None) is not None:
+                        axis.label.setFont(axis_font)
+                except Exception:
+                    pass
 
     def _navigator_stage_mode(self, stage_values):
         vals = set(stage_values)
@@ -104,6 +144,13 @@ class SignalsMixin:
         return df[df[class_col].isin(keep)].copy()
 
     def _init_signals(self):
+
+        self.ns = 0
+        self.ne = 0
+        self.rendered = False
+        self.current = False
+        self.ss_chs = []
+        self.ss_anns = []
 
         # hypnogram / navigator
         h = self.ui.pgh
@@ -185,6 +232,14 @@ class SignalsMixin:
         self._pg1_probe = MainTraceProbe(self.ui.pg1, self)
         self._pg1_nav_proxy = MainTraceNavProxy(self.ui.pg1, self)
         self._style_control_banner()
+
+    def _signal_plot_ready(self):
+        ns = float(getattr(self, "ns", 0.0) or 0.0)
+        if ns <= 0:
+            return False
+        if getattr(self, "rendered", False):
+            return getattr(self, "ss", None) is not None
+        return getattr(self, "ssa", None) is not None
 
     def _init_line_weight_control(self):
         if getattr(self, "_line_weight_widget", None) is not None:
@@ -809,7 +864,7 @@ class SignalsMixin:
             self._profile_attach_mark("_render_hypnogram selector")
 
         # clock ticks at top
-        self.tb0 = TextBatch( vb, QtGui.QFont("Arial", 12), color=(180,255,255), mode='device')
+        self.tb0 = TextBatch( vb, self._signal_text_font("Arial", 12), color=(180,255,255), mode='device')
         self.tb0.setZValue(10)
         tks = self.ssa.get_hour_ticks()
         if self.multiday_mode:
@@ -1068,6 +1123,8 @@ class SignalsMixin:
         if not hasattr(self, "p"):
             QMessageBox.critical( self.ui , "Error", "No instance attached" )
             return
+
+        self._pending_render_target_window = self._resolve_render_target_window()
         
         # update hypnogram and segment plot
         self._update_hypnogram()
@@ -1084,6 +1141,9 @@ class SignalsMixin:
         if len( self.ss_chs ) + len( self.ss_anns ) == 0:
             self._set_render_status( False , False )
             return
+
+        self._rendered_chs = list(self.ss_chs)
+        self._rendered_anns = list(self.ss_anns)
 
         # we're now going to have something to plot
         #   rendered and current
@@ -1176,14 +1236,70 @@ class SignalsMixin:
 #        tstops = [ tscale[idx] for idx in range(1,len(tscale),2)]
 #        times = np.concatenate((tstarts, tstops), axis=1)
 
-        # ready to view
-        self.ss.window( self.last_x1, self.last_x2)
+        # ready to view - save target position before _update_pg1 can overwrite
+        # last_x1/x2 with zeros if segsrv physical ranges aren't ready yet
+        pending_target = getattr(self, "_pending_render_target_window", None)
+        if pending_target is not None:
+            x1_target, x2_target = pending_target
+            self._pending_render_target_window = None
+        else:
+            x1_target, x2_target = self._resolve_render_target_window()
+        self.ss.window(x1_target, x2_target)
 
         self._update_scaling()
         if hasattr(self, "_psd_overlay_on_new_data"):
             self._psd_overlay_on_new_data()
 
-        
+        # Deferred re-apply: segsrv physical ranges may not be populated on the
+        # first draw after a fresh segsrv(), causing 0.0:0.0 labels. Re-firing
+        # on_window_range after the event loop settles mirrors a hypnogram click.
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(0, lambda: self._post_render_refresh(x1_target, x2_target))
+
+    def _post_render_refresh(self, x1: float, x2: float):
+        if not getattr(self, "rendered", False) or getattr(self, "ss", None) is None:
+            return
+        self.on_window_range(x1, x2)
+
+    def _resolve_render_target_window(self):
+        ns = float(getattr(self, "ns", 0.0) or 0.0)
+
+        def valid_window(lo, hi):
+            try:
+                lo = float(lo)
+                hi = float(hi)
+            except (TypeError, ValueError):
+                return None
+            if not np.isfinite(lo) or not np.isfinite(hi):
+                return None
+            if lo < 0:
+                lo = 0.0
+            if ns > 0 and hi > ns:
+                hi = ns
+            if hi > lo:
+                return lo, hi
+            return None
+
+        sel = getattr(self, "sel", None)
+        region = getattr(sel, "region", None)
+        if region is not None:
+            try:
+                resolved = valid_window(*region.getRegion()) if region.isVisible() else None
+            except Exception:
+                resolved = None
+            if resolved is not None:
+                return resolved
+
+        resolved = valid_window(
+            getattr(self, "last_x1", None),
+            getattr(self, "last_x2", None),
+        )
+        if resolved is not None:
+            return resolved
+
+        first_epoch = min(30.0, ns) if ns > 0 else 30.0
+        return 0.0, first_epoch
+
     def on_window_range(self, lo: float, hi: float):
         if not hasattr(self, "p"):
             return
@@ -1579,7 +1695,7 @@ class SignalsMixin:
         # initiate ticks
         #
 
-        self.tb = TextBatch(pi.vb, QtGui.QFont("Arial", 12), color=(180,255,255), mode='device')
+        self.tb = TextBatch(pi.vb, self._signal_text_font("Arial", 12), color=(180,255,255), mode='device')
         self.tb.setZValue(10)
         self.tb.setData([ ], [ ], [ ])
         self.ui.pg1.addItem(self.tb)# , ignoreBounds=True)
@@ -1589,7 +1705,7 @@ class SignalsMixin:
         #
 
         self.labs = TextBatch(pi.vb,
-               QtGui.QFont("Arial", 10, QtGui.QFont.Normal),
+               self._signal_text_font("Arial", 10),
                color=(255,255,255),
                mode='device',
                bg=(0,0,0,70),    # semi-transparent black (was 170)
@@ -1632,6 +1748,9 @@ class SignalsMixin:
             self.show_labels = True
         else:
             self.show_labels = False
+
+        if not self._signal_plot_ready():
+            return
             
         # redraw
         self._update_pg1()
@@ -1647,6 +1766,9 @@ class SignalsMixin:
         self.pg1_header_height = 0.05
 
         self.pg1_footer_height = 0.025
+
+        if not self._signal_plot_ready():
+            return
 
         if len(self.ss_anns) == 0:
             self.pg1_annot_height = 0
@@ -1737,6 +1859,8 @@ class SignalsMixin:
     # --------------------------------------------------------------------------------
 
     def _clear_pg1(self):
+        if not self._signal_plot_ready():
+            return
 
         pi = self.ui.pg1.getPlotItem()
         pi.clear() 
@@ -1777,6 +1901,8 @@ class SignalsMixin:
 
     
     def _update_pg1(self):
+        if not self._signal_plot_ready():
+            return
         self._effective_line_weight()
         if getattr(self, "_pg1_probe", None) is not None:
             self._pg1_probe.clear_pinned()
@@ -1786,11 +1912,12 @@ class SignalsMixin:
             return
 
         # channels
-        chs = self.ui.tbl_desc_signals.checked()
-        chs = [x for x in self.ss_chs if x in chs ] 
+        checked_chs = self.ui.tbl_desc_signals.checked()
+        chs = [x for x in self.ss_chs if x in checked_chs]
+        rendered_chs = set(map(str, getattr(self, "_rendered_chs", []) or self.ss_chs))
 
         # sigmod channels
-        sigmods = {k: v for k, v in self.sigmods.items() if k in self.ss_chs}
+        sigmods = {k: v for k, v in self.sigmods.items() if k in rendered_chs}
 
         # annots
         anns = self.ui.tbl_desc_annots.checked()
@@ -1846,6 +1973,17 @@ class SignalsMixin:
             self._set_fill_curve_brush(curve_slot, curve_color)
             self._set_y0_curve_pen(idx, curve_color)
             self._set_pp_fill_curve(curve_slot, None, None, 0.0, enabled=False)
+
+            if str(ch) not in rendered_chs:
+                self.curves[curve_slot].setData([], [])
+                self.y0_curves[idx].setData([], [])
+                if curve_slot < len(self.fill_curves):
+                    self.fill_curves[curve_slot].setData([], [])
+                if self.show_labels:
+                    tv[idx] = f" {ch} not yet rendered"
+                yv[idx] = self.ss.get_ylabel(idx)
+                idx = idx + 1
+                continue
                                     
             # y-lines
             if ch in self.cmap_ylines_idx:
@@ -4314,6 +4452,11 @@ class TextBatch(pg.GraphicsObject):
 
     def setMode(self, mode):
         self.mode = mode
+        self.update()
+
+    def setFont(self, font):
+        self.font = QtGui.QFont(font)
+        self._stat.clear()
         self.update()
 
     def _rebuild_bbox(self):

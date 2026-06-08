@@ -1444,7 +1444,7 @@
   </widget>
   <widget class="QDockWidget" name="dock_spectrogram">
    <property name="windowTitle">
-    <string>(6) Spectrograms</string>
+    <string>(6) Time/Frequency</string>
    </property>
    <attribute name="dockWidgetArea">
     <number>4</number>
@@ -1592,6 +1592,13 @@
          <widget class="QPushButton" name="butt_hjorth">
           <property name="text">
            <string>Hjorth</string>
+          </property>
+         </widget>
+        </item>
+        <item row="0" column="4">
+         <widget class="QCheckBox" name="check_spec_legend">
+          <property name="text">
+           <string>Legend</string>
           </property>
          </widget>
         </item>

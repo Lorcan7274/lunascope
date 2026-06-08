@@ -521,10 +521,10 @@ class PlotterTab(_ExplorerTab):
             return
         try:
             sep = "\t" if fn.lower().endswith(".tsv") or fn.lower().endswith(".txt") else ","
-            df = pd.read_csv(fn, sep=sep, dtype=str)
+            df = pd.read_csv(fn, sep=sep, dtype=str, encoding="utf-8-sig")
             # Try comma if TSV parse yielded one column (might actually be CSV)
             if len(df.columns) == 1:
-                df = pd.read_csv(fn, sep=",", dtype=str)
+                df = pd.read_csv(fn, sep=",", dtype=str, encoding="utf-8-sig")
             # Normalise NA representations
             df.replace(["NA", "na", "N/A", "n/a", ".", ""], np.nan, inplace=True)
             # Require ID column (case-insensitive)

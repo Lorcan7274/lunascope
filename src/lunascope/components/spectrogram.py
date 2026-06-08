@@ -20,19 +20,29 @@
 #
 #  --------------------------------------------------------------------
 
-import lunapi as lp
 import io
 import numpy as np
 from lunascope.helpers import winsorize_array
 
-from PySide6.QtWidgets import QVBoxLayout, QMessageBox, QSizePolicy
+from PySide6.QtWidgets import (
+    QComboBox,
+    QDoubleSpinBox,
+    QLabel,
+    QMessageBox,
+    QSizePolicy,
+    QSpinBox,
+    QTabWidget,
+    QVBoxLayout,
+)
 from PySide6 import QtCore, QtWidgets, QtGui
 from ..file_dialogs import save_file_name
 
-from concurrent.futures import ThreadPoolExecutor
-from PySide6.QtCore import QMetaObject, Q_ARG, Qt, Slot
+from PySide6.QtCore import QMetaObject, Qt, Slot
 
 class SpecMixin:
+    _SPEC_EPOCH_DUR = 30
+    _MTM_ZOOM_MAX_SPAN = 30.0
+    _MTM_ZOOM_CELL_CAP = 500_000
 
     def _ensure_spectrogram_canvas(self, *_args):
         if getattr(self, "spectrogramcanvas", None) is not None:
@@ -53,56 +63,237 @@ class SpecMixin:
         self.spectrogramcanvas.customContextMenuRequested.connect(self._spec_context_menu)
         return self.spectrogramcanvas
 
-    # Epoch durations (seconds) offered in the combo, in display order.
-    _EPOCH_STEPS = [
-        (5,    "5 s"),
-        (10,   "10 s"),
-        (15,   "15 s"),
-        (20,   "20 s"),
-        (30,   "30 s"),
-        (60,   "1 min"),
-        (120,  "2 min"),
-        (300,  "5 min"),
-        (600,  "10 min"),
-        (900,  "15 min"),
-        (1800, "30 min"),
-        (3600, "60 min"),
-    ]
-
     def _init_spec(self):
 
         self.spectrogramcanvas = None
+        self._spec_plot_kind = None
+        self._spec_plot_cache = None
+        self._spec_cache = {}
+        self._spec_job_token = 0
+        self._spec_zoom_timer = QtCore.QTimer(self.ui)
+        self._spec_zoom_timer.setSingleShot(True)
+        self._spec_zoom_timer.setInterval(400)
+        self._spec_zoom_timer.timeout.connect(self._spec_on_zoom_timer)
         if self.ui.host_spectrogram.layout() is None:
             self.ui.host_spectrogram.setLayout(QVBoxLayout())
         self.ui.host_spectrogram.layout().setContentsMargins(0,0,0,0)
 
-        # populate epoch combo
-        for secs, label in self._EPOCH_STEPS:
-            self.ui.combo_epoch.addItem(label, secs)
-        self._set_epoch_default(multiday=False)
-
-        # wiring
-        self.ui.butt_spectrogram.clicked.connect( self._calc_spectrogram )
-        self.ui.butt_hjorth.clicked.connect( self._calc_hjorth )
-        self.ui.combo_spectrogram.currentIndexChanged.connect( self._on_spec_channel_changed )
-        self.ui.combo_epoch.currentIndexChanged.connect( self._on_spec_channel_changed )
+        self._spec_rebuild_controls()
+        self.ui.butt_spectrogram.clicked.connect(self._run_timefreq_active)
+        self.ui.combo_spectrogram.currentIndexChanged.connect(self._on_spec_channel_changed)
+        if hasattr(self.ui, "check_spec_legend"):
+            self.ui.check_spec_legend.stateChanged.connect(self._on_spec_legend_changed)
+        if hasattr(self, "sig_window_range_changed"):
+            self.sig_window_range_changed.connect(self._on_spec_window_range_changed)
 
     def _set_epoch_default(self, multiday: bool):
-        target = 1800 if multiday else 30
-        for i in range(self.ui.combo_epoch.count()):
-            if self.ui.combo_epoch.itemData(i) == target:
-                self.ui.combo_epoch.setCurrentIndex(i)
-                return
+        return
 
     def _get_epoch_dur(self) -> int:
-        v = self.ui.combo_epoch.currentData()
-        return int(v) if v else 30
+        return self._SPEC_EPOCH_DUR
+
+    def _spec_rebuild_controls(self):
+        layout = self.ui.frame_3.layout()
+        while layout.count():
+            item = layout.takeAt(0)
+            if item.widget() is not None:
+                item.widget().setParent(None)
+        layout.setContentsMargins(2, 2, 2, 2)
+        layout.setHorizontalSpacing(4)
+        layout.setVerticalSpacing(4)
+        for col in range(12):
+            layout.setColumnStretch(col, 0)
+            layout.setColumnMinimumWidth(col, 0)
+        layout.setColumnStretch(7, 1)
+
+        if hasattr(self.ui, "frame_epoch"):
+            self.ui.frame_epoch.hide()
+        if hasattr(self.ui, "butt_hjorth"):
+            self.ui.butt_hjorth.hide()
+
+        tabs = QTabWidget(self.ui.frame_3)
+        tabs.setObjectName("tab_timefreq")
+        tabs.setMinimumWidth(610)
+        tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        tabs.addTab(QtWidgets.QWidget(), "Welch")
+        tabs.addTab(QtWidgets.QWidget(), "Hjorth")
+        tabs.addTab(QtWidgets.QWidget(), "Multitaper")
+        tabs.addTab(QtWidgets.QWidget(), "IRASA")
+        tabs.currentChanged.connect(self._on_timefreq_tab_changed)
+        self.ui.tab_timefreq = tabs
+
+        self.ui.butt_spectrogram.setText("Run")
+        self.ui.butt_spectrogram.setFixedWidth(110)
+
+        self.ui.combo_mtm_mode = QComboBox(self.ui.frame_3)
+        self.ui.combo_mtm_mode.setObjectName("combo_mtm_mode")
+        self.ui.combo_mtm_mode.addItem("Whole Night", "whole")
+        self.ui.combo_mtm_mode.addItem("Zoom <=30s", "zoom")
+        self.ui.combo_mtm_mode.setFixedWidth(120)
+
+        self.ui.spin_mtm_nw = QDoubleSpinBox(self.ui.frame_3)
+        self.ui.spin_mtm_nw.setObjectName("spin_mtm_nw")
+        self.ui.spin_mtm_nw.setRange(1.0, 20.0)
+        self.ui.spin_mtm_nw.setSingleStep(0.5)
+        self.ui.spin_mtm_nw.setFixedWidth(80)
+
+        self.ui.spin_mtm_t = QSpinBox(self.ui.frame_3)
+        self.ui.spin_mtm_t.setObjectName("spin_mtm_t")
+        self.ui.spin_mtm_t.setRange(0, 99)
+        self.ui.spin_mtm_t.setValue(0)
+        self.ui.spin_mtm_t.setSpecialValueText("auto")
+        self.ui.spin_mtm_t.setFixedWidth(80)
+
+        self.ui.spin_mtm_segment = QDoubleSpinBox(self.ui.frame_3)
+        self.ui.spin_mtm_segment.setObjectName("spin_mtm_segment")
+        self.ui.spin_mtm_segment.setRange(0.25, 30.0)
+        self.ui.spin_mtm_segment.setSingleStep(0.25)
+        self.ui.spin_mtm_segment.setFixedWidth(80)
+
+        self.ui.spin_mtm_inc = QDoubleSpinBox(self.ui.frame_3)
+        self.ui.spin_mtm_inc.setObjectName("spin_mtm_inc")
+        self.ui.spin_mtm_inc.setRange(0.02, 30.0)
+        self.ui.spin_mtm_inc.setSingleStep(0.02)
+        self.ui.spin_mtm_inc.setFixedWidth(80)
+
+        self.ui.combo_irasa_component = QComboBox(self.ui.frame_3)
+        self.ui.combo_irasa_component.setObjectName("combo_irasa_component")
+        self.ui.combo_irasa_component.addItem("Aperiodic", "APER")
+        self.ui.combo_irasa_component.addItem("Periodic", "PER")
+        self.ui.combo_irasa_component.setFixedWidth(110)
+
+        self.ui.label_timefreq_status = QLabel("", self.ui.frame_3)
+        self.ui.label_timefreq_status.setObjectName("label_timefreq_status")
+        self.ui.label_timefreq_status.setMinimumWidth(0)
+
+        self.ui.combo_spectrogram.setFixedWidth(130)
+        self.ui.spin_lwrfrq.setFixedWidth(80)
+        self.ui.spin_uprfrq.setFixedWidth(80)
+        self.ui.spin_win.setFixedWidth(80)
+        self.ui.check_spec_legend.setFixedWidth(90)
+
+        def label(text):
+            lab = QLabel(text, self.ui.frame_3)
+            lab.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            lab.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+            return lab
+
+        layout.addWidget(tabs, 0, 0, 1, 8)
+        self.ui.label_spec_channel = label("Channel")
+        layout.addWidget(self.ui.label_spec_channel, 0, 8)
+        layout.addWidget(self.ui.combo_spectrogram, 0, 9)
+        layout.addWidget(self.ui.butt_spectrogram, 0, 10)
+        layout.addWidget(self.ui.check_spec_legend, 0, 11)
+
+        layout.addWidget(label("Lower Hz"), 1, 0)
+        layout.addWidget(self.ui.spin_lwrfrq, 1, 1)
+        layout.addWidget(label("Upper Hz"), 1, 2)
+        layout.addWidget(self.ui.spin_uprfrq, 1, 3)
+        layout.addWidget(label("Winsor"), 1, 4)
+        layout.addWidget(self.ui.spin_win, 1, 5)
+        layout.addWidget(self.ui.label_timefreq_status, 1, 6, 1, 6)
+
+        self.ui.label_mtm_mode = label("MTM Mode")
+        self.ui.label_mtm_nw = label("NW")
+        self.ui.label_mtm_t = label("Tapers")
+        self.ui.label_mtm_segment = label("Segment")
+        self.ui.label_mtm_inc = label("Inc")
+        self.ui.label_irasa_component = label("IRASA")
+        layout.addWidget(self.ui.label_mtm_mode, 2, 0)
+        layout.addWidget(self.ui.combo_mtm_mode, 2, 1)
+        layout.addWidget(self.ui.label_mtm_nw, 2, 2)
+        layout.addWidget(self.ui.spin_mtm_nw, 2, 3)
+        layout.addWidget(self.ui.label_mtm_t, 2, 4)
+        layout.addWidget(self.ui.spin_mtm_t, 2, 5)
+        layout.addWidget(self.ui.label_mtm_segment, 2, 6)
+        layout.addWidget(self.ui.spin_mtm_segment, 2, 7)
+        layout.addWidget(self.ui.label_mtm_inc, 2, 8)
+        layout.addWidget(self.ui.spin_mtm_inc, 2, 9)
+        layout.addWidget(self.ui.label_irasa_component, 2, 0)
+        layout.addWidget(self.ui.combo_irasa_component, 2, 1)
+
+        for w in (
+            self.ui.combo_mtm_mode, self.ui.spin_mtm_nw, self.ui.spin_mtm_t,
+            self.ui.spin_mtm_segment, self.ui.spin_mtm_inc,
+        ):
+            try:
+                w.currentIndexChanged.connect(self._invalidate_spec_cache)
+            except AttributeError:
+                w.valueChanged.connect(self._invalidate_spec_cache)
+        for w in (self.ui.spin_lwrfrq, self.ui.spin_uprfrq, self.ui.spin_win):
+            w.valueChanged.connect(self._invalidate_spec_cache)
+        self.ui.combo_irasa_component.currentIndexChanged.connect(self._on_irasa_component_changed)
+        self.ui.combo_mtm_mode.currentIndexChanged.connect(self._on_mtm_mode_changed)
+        self._last_mtm_mode = None
+        self._apply_mtm_mode_defaults(force=True)
+        self._on_timefreq_tab_changed()
+
+
+    def _timefreq_mode(self):
+        idx = self.ui.tab_timefreq.currentIndex()
+        return ["welch", "hjorth", "mtm", "irasa"][max(0, min(idx, 3))]
+
+    def _spec_record_ready(self):
+        return (
+            hasattr(self, "p")
+            and float(getattr(self, "ns", 0.0) or 0.0) > 0
+            and getattr(self, "last_x1", None) is not None
+            and getattr(self, "last_x2", None) is not None
+        )
+
+    def _spec_channel_state_ready(self):
+        return hasattr(self, "p") and float(getattr(self, "ns", 0.0) or 0.0) > 0
+
+    def _on_mtm_mode_changed(self, *_):
+        self._apply_mtm_mode_defaults()
+        self._on_timefreq_tab_changed()
+
+    def _apply_mtm_mode_defaults(self, force=False):
+        mtm_mode = self.ui.combo_mtm_mode.currentData()
+        if not force and mtm_mode == getattr(self, "_last_mtm_mode", None):
+            return
+        self._last_mtm_mode = mtm_mode
+        if mtm_mode == "whole":
+            values = (
+                (self.ui.spin_mtm_segment, 30.0),
+                (self.ui.spin_mtm_inc, 30.0),
+                (self.ui.spin_mtm_nw, 15.0),
+            )
+        else:
+            values = (
+                (self.ui.spin_mtm_segment, 2.0),
+                (self.ui.spin_mtm_inc, 1.0),
+                (self.ui.spin_mtm_nw, 3.0),
+            )
+        for spin, value in values:
+            spin.blockSignals(True)
+            spin.setValue(value)
+            spin.blockSignals(False)
+        self._invalidate_spec_cache()
+
+    def _on_timefreq_tab_changed(self, *_):
+        mode = self._timefreq_mode()
+        is_mtm = mode == "mtm"
+        is_irasa = mode == "irasa"
+        for w in (
+            self.ui.combo_mtm_mode, self.ui.spin_mtm_nw, self.ui.spin_mtm_t,
+            self.ui.spin_mtm_segment, self.ui.spin_mtm_inc,
+            self.ui.label_mtm_mode, self.ui.label_mtm_nw, self.ui.label_mtm_t,
+            self.ui.label_mtm_segment, self.ui.label_mtm_inc,
+        ):
+            w.setVisible(is_mtm)
+        self.ui.label_irasa_component.setVisible(is_irasa)
+        self.ui.combo_irasa_component.setVisible(is_irasa)
+        self._set_timefreq_status("")
+        self.ui.butt_spectrogram.setText("Run Hjorth" if mode == "hjorth" else "Run")
+        if is_mtm and self.ui.combo_mtm_mode.currentData() == "zoom" and self._spec_record_ready():
+            self._spec_zoom_timer.start()
 
     def _on_spec_channel_changed(self, *_):
         """Auto-set frequency spin boxes to sensible limits for the selected channel's SR."""
-        if not hasattr(self, 'p'):
+        if not self._spec_channel_state_ready():
             return
-        ch = self.ui.combo_spectrogram.currentText()
+        ch = self._current_channel()
         if not ch:
             return
         df = self.p.headers()
@@ -138,7 +329,10 @@ class SpecMixin:
             self.ui.spin_lwrfrq.setValue(min_f)
             self.ui.spin_uprfrq.setSingleStep(max(0.001, round(nyquist / 20, 6)))
             self.ui.spin_uprfrq.setValue(nyquist)
+        self._invalidate_spec_cache()
 
+    def _invalidate_spec_cache(self, *_):
+        self._spec_cache = {}
 
     # ------------------------------------------------------------    
     # right-click menus to save/copy images
@@ -147,12 +341,28 @@ class SpecMixin:
         self._ensure_spectrogram_canvas()
         menu = QtWidgets.QMenu(self.spectrogramcanvas)
         act_copy = menu.addAction("Copy to Clipboard")
-        act_save = menu.addAction("Save Figure…")
+        act_save = menu.addAction("Save As...")
         action = menu.exec(self.spectrogramcanvas.mapToGlobal(pos))
         if action == act_copy:
             self._spec_copy_to_clipboard()
         elif action == act_save:
             self._spec_save_figure()
+
+    def _show_spec_legend(self):
+        return bool(
+            hasattr(self.ui, "check_spec_legend")
+            and self.ui.check_spec_legend.isChecked()
+        )
+
+    def _on_spec_legend_changed(self, *_):
+        if getattr(self, "spectrogramcanvas", None) is None:
+            return
+        kind = getattr(self, "_spec_plot_kind", None)
+        if kind in ("spectrogram", "welch", "mtm", "irasa") and getattr(self, "_spec_plot_cache", None):
+            cache = self._spec_plot_cache
+            self._draw_heatmap_cache(self._irasa_component_result(cache) if kind == "irasa" else cache)
+        elif kind == "hjorth":
+            self._draw_hjorth_plot()
             
     def _spec_copy_to_clipboard(self):
         self._ensure_spectrogram_canvas()
@@ -180,21 +390,397 @@ class SpecMixin:
     def _update_spectrogram_list(self):
 
         # clear first
+        self.ui.combo_spectrogram.blockSignals(True)
         self.ui.combo_spectrogram.clear()
 
-        df = self.p.headers()
-        
-        if df is not None:
-            if getattr(self, 'multiday_mode', False):
-                chs = df['CH'].tolist()
+        try:
+            df = self.p.headers()
+
+            if df is not None:
+                if getattr(self, 'multiday_mode', False):
+                    chs = df['CH'].tolist()
+                else:
+                    chs = df.loc[df['SR'] >= 32, 'CH'].tolist()
             else:
-                chs = df.loc[df['SR'] >= 32, 'CH'].tolist()
-        else:
-            chs = [ ]
-        
-        self.ui.combo_spectrogram.addItems( chs )
+                chs = [ ]
+
+            for ch in chs:
+                label = self._format_channel_label(ch)
+                self.ui.combo_spectrogram.addItem(label, ch)
+        finally:
+            self.ui.combo_spectrogram.blockSignals(False)
         self._on_spec_channel_changed()
         
+    def _format_channel_label(self, ch):
+        sr = self._channel_sr(ch)
+        if sr is None:
+            return str(ch)
+        return f"{ch} ({sr:g} Hz)"
+
+    def _current_channel(self, combo=None):
+        combo = combo or self.ui.combo_spectrogram
+        data = combo.currentData()
+        return str(data) if data else combo.currentText().split(" (", 1)[0]
+
+    def _channel_sr(self, ch):
+        if not hasattr(self, "p") or not ch:
+            return None
+        try:
+            df = self.p.headers()
+        except Exception:
+            return None
+        if df is None or df.empty or "CH" not in df.columns or "SR" not in df.columns:
+            return None
+        row = df.loc[df["CH"] == ch]
+        if row.empty:
+            return None
+        try:
+            return float(row["SR"].iloc[0])
+        except Exception:
+            return None
+
+    def _run_timefreq_active(self):
+        mode = self._timefreq_mode()
+        if mode == "hjorth":
+            self._calc_hjorth()
+            return
+        self._calc_timefreq(mode)
+
+    def _begin_spec_job(self):
+        self._busy = True
+        self._buttons(False)
+        self.sb_progress.setVisible(True)
+        self.sb_progress.setRange(0, 0)
+        self.sb_progress.setFormat("Running...")
+        self.lock_ui()
+
+    def _end_spec_job(self):
+        self.unlock_ui()
+        self._busy = False
+        self._buttons(True)
+        self.sb_progress.setRange(0, 100)
+        self.sb_progress.setValue(0)
+        self.sb_progress.setVisible(False)
+
+    def _calc_timefreq(self, mode):
+        self._ensure_spectrogram_canvas()
+        if not hasattr(self, "p"):
+            QMessageBox.critical(self.ui, "Error", "No instance attached")
+            return
+        if self.ui.combo_spectrogram.model().rowCount() == 0:
+            QMessageBox.critical(self.ui, "Error", "No suitable signal")
+            return
+        ch = self._current_channel()
+        if ch not in self.p.edf.channels():
+            return
+        params = self._spec_params(mode, ch)
+        if params is None:
+            return
+        key = self._spec_cache_key(mode, params)
+        if key in self._spec_cache:
+            self._complete_timefreq(mode, self._spec_cache[key], cache_key=key)
+            return
+
+        self._begin_spec_job()
+        self._spec_job_token += 1
+        token = self._spec_job_token
+        fut = self._exec.submit(self._derive_timefreq, self.p, mode, params)
+
+        def _done(_f=fut):
+            try:
+                self._last_result = (token, mode, key, _f.result())
+                QMetaObject.invokeMethod(self, "_timefreq_done_ok", Qt.QueuedConnection)
+            except Exception as e:
+                self._last_exc = e
+                self._last_tb = f"{type(e).__name__}: {e}"
+                QMetaObject.invokeMethod(self, "_spectrogram_done_err", Qt.QueuedConnection)
+
+        fut.add_done_callback(_done)
+
+    def _spec_params(self, mode, ch):
+        minf = float(self.ui.spin_lwrfrq.value())
+        maxf = float(self.ui.spin_uprfrq.value())
+        if maxf <= minf:
+            QMessageBox.critical(self.ui, "Error", "Upper frequency must exceed lower frequency")
+            return None
+        params = {
+            "ch": ch,
+            "minf": minf,
+            "maxf": maxf,
+            "winsor": float(self.ui.spin_win.value()),
+            "ns": float(getattr(self, "ns", 0.0) or 0.0),
+            "ne": int(getattr(self, "ne", 0) or 0),
+            "sr": float(self._channel_sr(ch) or 0.0),
+        }
+        if mode == "mtm":
+            seg = float(self.ui.spin_mtm_segment.value())
+            inc = float(self.ui.spin_mtm_inc.value())
+            zoom = self.ui.combo_mtm_mode.currentData() == "zoom"
+            lo = float(getattr(self, "last_x1", 0.0) or 0.0)
+            hi = float(getattr(self, "last_x2", lo) or lo)
+            if zoom and hi - lo > self._MTM_ZOOM_MAX_SPAN + 1e-6:
+                self._set_timefreq_status("Zoom MTM requires <=30s window")
+                return None
+            params.update({
+                "mtm_mode": "zoom" if zoom else "whole",
+                "nw": float(self.ui.spin_mtm_nw.value()),
+                "t": int(self.ui.spin_mtm_t.value()),
+                "segment": seg,
+                "inc": inc,
+                "lo": lo,
+                "hi": hi,
+            })
+            if zoom:
+                cells = self._estimate_mtm_cells(max(0.0, hi - lo), minf, maxf, seg, inc)
+                if cells > self._MTM_ZOOM_CELL_CAP:
+                    self._set_timefreq_status(
+                        f"Zoom MTM estimate {cells:,} cells; increase segment/inc or narrow Hz"
+                    )
+                    return None
+        return params
+
+    def _estimate_mtm_cells(self, span, minf, maxf, segment, inc):
+        if span <= 0 or segment <= 0 or inc <= 0 or maxf <= minf:
+            return 0
+        segs = max(1, int(np.floor(max(0.0, span - segment) / inc) + 1))
+        bins = max(1, int(np.ceil((maxf - minf) * segment)) + 1)
+        return int(segs * bins)
+
+    def _spec_cache_key(self, mode, params):
+        pieces = [mode, params.get("ch"), params.get("minf"), params.get("maxf"), params.get("winsor")]
+        if mode == "mtm":
+            pieces.extend([
+                params.get("mtm_mode"), params.get("nw"), params.get("t"),
+                params.get("segment"), params.get("inc"),
+            ])
+            if params.get("mtm_mode") == "zoom":
+                pieces.extend([round(float(params.get("lo", 0.0)), 3), round(float(params.get("hi", 0.0)), 3)])
+        return tuple(pieces)
+
+    def _derive_timefreq(self, p, mode, params):
+        if mode == "welch":
+            xi, yi, zi = self._derive_spectrogram(
+                p, params["ch"], params["minf"], params["maxf"], params["winsor"],
+                params["ne"], params["ns"], self._SPEC_EPOCH_DUR, params["sr"],
+            )
+            return {"xi": xi, "yi": yi, "zi": zi, "title": f"Welch {params['ch']}",
+                    "cbar": "PSD (dB)", "ylabel": "Frequency (Hz)"}
+        if mode == "mtm":
+            return self._derive_mtm(p, params)
+        if mode == "irasa":
+            return self._derive_irasa(p, params)
+        raise ValueError(f"Unknown mode: {mode}")
+
+    @Slot()
+    def _timefreq_done_ok(self):
+        try:
+            token, mode, key, result = self._last_result
+            if token != self._spec_job_token:
+                return
+            self._spec_cache[key] = result
+            self._complete_timefreq(mode, result, cache_key=key)
+        finally:
+            self._end_spec_job()
+
+    def _complete_timefreq(self, mode, result, cache_key=None):
+        self._spec_plot_kind = mode
+        self._spec_plot_cache = result
+        draw_result = self._irasa_component_result(result) if mode == "irasa" else result
+        self._draw_heatmap_cache(draw_result)
+        if draw_result.get("status"):
+            self._set_timefreq_status(draw_result["status"])
+
+    def _on_irasa_component_changed(self, *_):
+        if getattr(self, "_spec_plot_kind", None) != "irasa":
+            return
+        result = getattr(self, "_spec_plot_cache", None)
+        if not result:
+            return
+        self._draw_heatmap_cache(self._irasa_component_result(result))
+
+    def _irasa_component_result(self, result):
+        component = "APER"
+        if hasattr(self.ui, "combo_irasa_component"):
+            component = str(self.ui.combo_irasa_component.currentData() or "APER")
+        components = result.get("components", {})
+        return components.get(component) or components.get("APER") or result
+
+    def _draw_heatmap_cache(self, result):
+        self._ensure_spectrogram_canvas()
+        from .plts import plot_tf_heatmap
+        plot_tf_heatmap(
+            result.get("xi", np.array([])),
+            result.get("yi", np.array([])),
+            result.get("zi", np.array([])),
+            result.get("title", ""),
+            self.spectrogramcanvas.ax,
+            y_label=result.get("ylabel", "Frequency (Hz)"),
+            cbar_label=result.get("cbar", "Value"),
+            y_ticklabels=result.get("yticklabels"),
+            show_legend=self._show_spec_legend(),
+            cmap=result.get("cmap", "turbo"),
+            center_zero=bool(result.get("center_zero", False)),
+        )
+        if result.get("xlim") is not None:
+            self.spectrogramcanvas.ax.set_xlim(*result["xlim"])
+        else:
+            ns = getattr(self, "ns", None)
+            if ns is not None and ns > 0:
+                self.spectrogramcanvas.ax.set_xlim(0, float(ns))
+        self.spectrogramcanvas.draw_idle()
+
+    def _set_timefreq_status(self, text):
+        if hasattr(self.ui, "label_timefreq_status"):
+            self.ui.label_timefreq_status.setText(str(text or ""))
+
+    def _edges_from_centers(self, centers, default_step=1.0):
+        centers = np.asarray(centers, dtype=float)
+        centers = np.sort(np.unique(centers))
+        if centers.size == 0:
+            return np.array([])
+        if centers.size == 1:
+            step = float(default_step)
+            return np.array([centers[0] - step / 2.0, centers[0] + step / 2.0])
+        mids = 0.5 * (centers[:-1] + centers[1:])
+        first = centers[0] - (mids[0] - centers[0])
+        last = centers[-1] + (centers[-1] - mids[-1])
+        return np.concatenate([[first], mids, [last]])
+
+    def _grid_from_points(self, x, y, z, *, x_edges=None, y_edges=None, default_x_step=30.0, winsor=0.0):
+        x = np.asarray(x, dtype=float)
+        y = np.asarray(y, dtype=float)
+        z = winsorize_array(np.asarray(z, dtype=float), float(winsor or 0.0))
+        ok = np.isfinite(x) & np.isfinite(y) & np.isfinite(z)
+        x, y, z = x[ok], y[ok], z[ok]
+        if x.size == 0 or y.size == 0:
+            return np.array([]), np.array([]), np.array([])
+        xs = np.sort(np.unique(x))
+        ys = np.sort(np.unique(y))
+        xi = x_edges if x_edges is not None else self._edges_from_centers(xs, default_x_step)
+        yi = y_edges if y_edges is not None else self._edges_from_centers(ys, 1.0)
+        x_index = {v: i for i, v in enumerate(xs)}
+        y_index = {v: i for i, v in enumerate(ys)}
+        zi = np.full((ys.size, xs.size), np.nan, dtype=float)
+        for xv, yv, zv in zip(x, y, z):
+            zi[y_index[yv], x_index[xv]] = zv
+        return xi, yi, np.ma.masked_invalid(zi)
+
+    def _epoch_starts(self, res):
+        dt = res.get("EPOCH: E")
+        if dt is None or dt.empty or "E" not in dt.columns or "START" not in dt.columns:
+            return None
+        return dt[["E", "START"]].copy()
+
+    def _derive_mtm(self, p, params):
+        t = f" t={params['t']}" if int(params.get("t", 0)) > 0 else ""
+        base = (
+            f"MTM sig={params['ch']} dB segment-sec={params['segment']}"
+            f" segment-inc={params['inc']} nw={params['nw']}{t}"
+            f" min={params['minf']} max={params['maxf']}"
+        )
+        if params["mtm_mode"] == "whole":
+            cmd = f"EPOCH dur=30 verbose & {base} epoch-output epoch-strata epoch-spectra"
+            res = p.silent_proc_lunascope(cmd)
+            df = res.get("MTM: CH_E_F")
+            starts = self._epoch_starts(res)
+            if df is None or df.empty or starts is None:
+                return {"xi": np.array([]), "yi": np.array([]), "zi": np.array([]), "title": "MTM"}
+            merged = df.merge(starts, on="E", how="left")
+            xi, yi, zi = self._grid_from_points(
+                merged["START"].to_numpy(float),
+                merged["F"].to_numpy(float),
+                merged["MTM"].to_numpy(float),
+                default_x_step=30.0,
+                winsor=params["winsor"],
+            )
+            freqs = np.sort(np.unique(merged["F"].to_numpy(float)))
+            fres = float(np.nanmedian(np.diff(freqs))) if freqs.size > 1 else np.nan
+            ne = len(starts)
+            status = (
+                f"MTM whole-night: {ne} epochs; freq res={fres:g}Hz; "
+                f"seg={params['segment']:g}s inc={params['inc']:g}s nw={params['nw']:g}"
+            )
+            return {
+                "xi": xi, "yi": yi, "zi": zi, "ylabel": "Frequency (Hz)",
+                "title": f"MTM whole night {params['ch']}", "cbar": "MTM (dB)", "status": status,
+            }
+
+        lo, hi = float(params["lo"]), float(params["hi"])
+        cmd = f"{base} segment-spectra start={lo:.6g} stop={hi:.6g}"
+        res = p.silent_proc_lunascope(cmd)
+        df = res.get("MTM: CH_F_SEG")
+        seg = res.get("MTM: CH_SEG")
+        if df is None or df.empty or seg is None or seg.empty:
+            return {"xi": np.array([]), "yi": np.array([]), "zi": np.array([]), "title": "MTM zoom"}
+        seg = seg[["SEG", "START", "STOP"]].copy()
+        merged = df.merge(seg, on="SEG", how="left")
+        merged = merged[(merged["STOP"].astype(float) >= lo) & (merged["START"].astype(float) <= hi)]
+        if merged.empty:
+            return {"xi": np.array([]), "yi": np.array([]), "zi": np.array([]), "title": "MTM zoom"}
+        x_centers = 0.5 * (merged["START"].to_numpy(float) + merged["STOP"].to_numpy(float))
+        starts = np.sort(np.unique(merged["START"].to_numpy(float)))
+        stops = np.sort(np.unique(merged["STOP"].to_numpy(float)))
+        if starts.size and stops.size and starts.size == stops.size:
+            x_edges = np.concatenate([[starts[0]], stops])
+        else:
+            x_edges = None
+        xi, yi, zi = self._grid_from_points(
+            x_centers, merged["F"].to_numpy(float), merged["MTM"].to_numpy(float),
+            x_edges=x_edges, default_x_step=float(params["inc"]), winsor=params["winsor"],
+        )
+        freqs = np.sort(np.unique(merged["F"].to_numpy(float)))
+        fres = float(np.nanmedian(np.diff(freqs))) if freqs.size > 1 else np.nan
+        status = (
+            f"MTM zoom: {len(np.unique(merged['SEG']))} segments; "
+            f"freq res={fres:g}Hz; seg={params['segment']:g}s inc={params['inc']:g}s"
+        )
+        return {
+            "xi": xi, "yi": yi, "zi": zi, "title": f"MTM zoom {params['ch']}",
+            "cbar": "MTM (dB)", "status": status, "xlim": (lo, hi),
+        }
+
+    def _derive_irasa(self, p, params):
+        cmd = (
+            f"EPOCH dur=30 verbose & IRASA sig={params['ch']} epoch dB"
+            f" min={params['minf']} max={params['maxf']}"
+        )
+        res = p.silent_proc_lunascope(cmd)
+        df = res.get("IRASA: CH_E_F")
+        starts = self._epoch_starts(res)
+        if df is None or df.empty or starts is None or "APER" not in df.columns or "PER" not in df.columns:
+            return {"xi": np.array([]), "yi": np.array([]), "zi": np.array([]), "title": "IRASA"}
+        merged = df.merge(starts, on="E", how="left")
+        components = {}
+        for value_col, label in (("APER", "Aperiodic"), ("PER", "Periodic")):
+            xi, yi, zi = self._grid_from_points(
+                merged["START"].to_numpy(float),
+                merged["F"].to_numpy(float),
+                merged[value_col].to_numpy(float),
+                default_x_step=30.0,
+                winsor=params["winsor"],
+            )
+            components[value_col] = {
+                "xi": xi, "yi": yi, "zi": zi, "title": f"IRASA {label} {params['ch']}",
+                "cbar": f"{label} (dB)",
+            }
+        return {"title": f"IRASA {params['ch']}", "components": components}
+
+    def _on_spec_window_range_changed(self, lo, hi):
+        if (
+            self._spec_record_ready()
+            and self._timefreq_mode() == "mtm"
+            and self.ui.combo_mtm_mode.currentData() == "zoom"
+        ):
+            self._spec_zoom_timer.start()
+
+    def _spec_on_zoom_timer(self):
+        if (
+            self._spec_record_ready()
+            and self._timefreq_mode() == "mtm"
+            and self.ui.combo_mtm_mode.currentData() == "zoom"
+        ):
+            self._calc_timefreq("mtm")
+
 
     # ------------------------------------------------------------
     # Caclculate a spectrogram
@@ -214,7 +800,7 @@ class SpecMixin:
             return
 
         # channel must exist in EDF (should always be the case)
-        ch = self.ui.combo_spectrogram.currentText()
+        ch = self._current_channel()
         if ch not in self.p.edf.channels():
             return
 
@@ -378,13 +964,26 @@ class SpecMixin:
     def _complete_spectrogram(self,xi,yi,zi):
         self._ensure_spectrogram_canvas()
         # we can now touch the GUI
-        ch = self.ui.combo_spectrogram.currentText()
+        ch = self._current_channel()
         minf = self.ui.spin_lwrfrq.value() 
         maxf = self.ui.spin_uprfrq.value()
+        self._spec_plot_kind = "spectrogram"
+        self._spec_plot_cache = {
+            "xi": xi, "yi": yi, "zi": zi, "title": f"Welch {ch}", "cbar": "PSD (dB)",
+        }
+        self._draw_heatmap_cache(self._spec_plot_cache)
+
+    def _draw_spectrogram_plot(self, xi, yi, zi, ch, minf, maxf):
         from .plts import plot_spec
-        plot_spec( xi,yi,zi, ch, minf, maxf, ax=self.spectrogramcanvas.ax , gui = self.ui )
-        if hasattr(self, "ns") and self.ns is not None and self.ns > 0:
-            self.spectrogramcanvas.ax.set_xlim(0, float(self.ns))
+        plot_spec(
+            xi, yi, zi, ch, minf, maxf,
+            ax=self.spectrogramcanvas.ax,
+            gui=self.ui,
+            show_legend=self._show_spec_legend(),
+        )
+        ns = getattr(self, "ns", None)
+        if ns is not None and ns > 0:
+            self.spectrogramcanvas.ax.set_xlim(0, float(ns))
 
         self.spectrogramcanvas.draw_idle()
 
@@ -408,17 +1007,29 @@ class SpecMixin:
             return
 
         # get channel
-        ch = self.ui.combo_spectrogram.currentText()
+        ch = self._current_channel()
 
         # check it still exists in the in-memory EDF                                          
         if ch not in self.p.edf.channels():
             return
 
         # do plot
+        self._spec_plot_kind = "hjorth"
+        self._spec_plot_cache = None
+        self._draw_hjorth_plot()
+
+    def _draw_hjorth_plot(self):
+        if not hasattr(self, "p"):
+            return
+        ch = self._current_channel()
+        if not ch:
+            return
         from .plts import plot_hjorth
         plot_hjorth( ch , ax=self.spectrogramcanvas.ax , p = self.p , gui = self.ui ,
-                     epoch_dur=self._get_epoch_dur() )
-        if hasattr(self, "ns") and self.ns is not None and self.ns > 0:
-            self.spectrogramcanvas.ax.set_xlim(0, float(self.ns))
+                     epoch_dur=self._get_epoch_dur(),
+                     show_legend=self._show_spec_legend() )
+        ns = getattr(self, "ns", None)
+        if ns is not None and ns > 0:
+            self.spectrogramcanvas.ax.set_xlim(0, float(ns))
 
         self.spectrogramcanvas.draw_idle()

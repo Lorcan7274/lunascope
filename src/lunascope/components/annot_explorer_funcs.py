@@ -222,7 +222,7 @@ def save_annex_cache(path: str, cohort: dict) -> None:
     subjects = cohort.get("subjects", []) if cohort else []
     offset = 0.0
 
-    with open(path, "w") as fh:
+    with open(path, "w", encoding="utf-8") as fh:
         fh.write(f"{ANNEX_CACHE_HEADER}\n")
         fh.write("# Subject marker rows use a reserved annotation class.\n")
         fh.write(f"{ANNEX_CACHE_COLUMNS}\n")

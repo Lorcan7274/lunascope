@@ -61,6 +61,9 @@ def create_topo_axes(fig):
     ax = fig.add_axes(_TOPO_AX_RECT)
     cax = fig.add_axes(_TOPO_CBAR_RECT)
     fig.patch.set_facecolor("#0d1117")
+    ax.set_facecolor("#0d1117")
+    cax.set_facecolor("#0d1117")
+    cax.set_axis_off()
     return ax, cax
 
 
@@ -180,7 +183,11 @@ def draw_topo(
     # --- colorbar ---
     sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
     sm.set_array([])
-    cbar = fig.colorbar(sm, cax=cax) if cax is not None else fig.colorbar(sm, ax=ax)
+    if cax is not None:
+        cax.set_axis_on()
+        cbar = fig.colorbar(sm, cax=cax)
+    else:
+        cbar = fig.colorbar(sm, ax=ax)
     cbar.ax.tick_params(colors=fg, labelsize=7)
     cbar.outline.set_edgecolor(fg)
 
@@ -330,11 +337,11 @@ class TopoRenderer:
                 )
 
         # colorbar
-        self._cbar = (
-            fig.colorbar(self._mesh, cax=cax)
-            if cax is not None else
-            fig.colorbar(self._mesh, ax=ax)
-        )
+        if cax is not None:
+            cax.set_axis_on()
+            self._cbar = fig.colorbar(self._mesh, cax=cax)
+        else:
+            self._cbar = fig.colorbar(self._mesh, ax=ax)
         self._cbar.ax.tick_params(colors=self.fg, labelsize=7)
         self._cbar.outline.set_edgecolor(self.fg)
 

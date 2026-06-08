@@ -69,6 +69,7 @@ from .components.moonbeam_dock import MoonbeamMixin
 from .components.explorer_dock import ExplorerMixin
 from .components.annotator import AnnotatorMixin
 from .components.predict_dock import PredictMixin
+from .components.new_edf import NewEDFMixin
 from .gui_help import apply_gui_help, set_render_button_help
 from .session_state import save_session_file, load_session_file, save_geometry_file, load_geometry_file
 from .runtime_paths import app_state_file
@@ -88,7 +89,7 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
                   SpecMixin , ActigraphyMixin, MasksMixin,
                   MoonbeamMixin, ExplorerMixin, AnnotatorMixin, TutorialMixin,
                   SaveEDFMixin, DropSignalsMixin,
-                  PSDOverlayMixin, PredictMixin ):
+                  PSDOverlayMixin, PredictMixin, NewEDFMixin ):
 
     sig_results_changed = Signal()   # emitted whenever self.results is repopulated
     sig_window_range_changed = Signal(float, float)
@@ -139,6 +140,8 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         explorer = getattr(self, "_tab_tables", None)
         if explorer is not None and hasattr(explorer, "refresh_font_scale"):
             explorer.refresh_font_scale(scale)
+        if hasattr(self, "_apply_signal_font_scale"):
+            self._apply_signal_font_scale(scale)
 
     def __init__(self, ui, proj):
 
@@ -149,7 +152,6 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         # Luna
         self.proj = proj
         self._font_controller = AppFontController(self.ui)
-        self._font_controller.apply_saved()
         
         # set up threading for compute funcs
         self._exec = ThreadPoolExecutor(max_workers=1)
@@ -191,6 +193,7 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         act_load_meta = QAction("Load Metadata File…", self)
         act_clear_meta = QAction("Clear Metadata", self)
         act_load_edf = QAction("Load EDF", self)
+        act_new_empty_edf = QAction("New Empty EDF…", self)
         act_load_annot = QAction("Load Annotations", self)
         act_save_edf = QAction("Export EDF + Annotations…", self)
         act_drop_signals = QAction("Drop channels / annotations…", self)
@@ -209,11 +212,16 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         act_load_meta.triggered.connect(self._load_meta_interactive)
         act_clear_meta.triggered.connect(self._clear_meta)
         act_load_edf.triggered.connect(self.open_edf)
+        act_new_empty_edf.triggered.connect(self._new_empty_edf_dialog)
         act_load_annot.triggered.connect(self.open_annot)
         act_save_edf.triggered.connect(self._save_edf_annots)
         act_drop_signals.triggered.connect(self._drop_signals_annots)
         act_refresh.triggered.connect(self._refresh)
+        act_refresh.setShortcut(QKeySequence("Ctrl+L"))
+        act_refresh.setShortcutContext(Qt.ApplicationShortcut)
         act_proj_eval.triggered.connect(self._proj_eval)
+        act_proj_eval.setShortcut(QKeySequence("Ctrl+Shift+Return"))
+        act_proj_eval.setShortcutContext(Qt.ApplicationShortcut)
         act_save_session.triggered.connect(self._save_session_state)
         act_load_session.triggered.connect(self._load_session_state)
         act_download_pops.triggered.connect(self._download_pops_resources)
@@ -228,6 +236,7 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         self.ui.menuProject.addAction(act_clear_meta)
         self.ui.menuProject.addSeparator()
         self.ui.menuProject.addAction(act_load_edf)
+        self.ui.menuProject.addAction(act_new_empty_edf)
         self.ui.menuProject.addAction(act_load_annot)
         self.ui.menuProject.addAction(act_save_edf)
         self.ui.menuProject.addAction(act_drop_signals)
@@ -498,6 +507,7 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
 
         apply_gui_help(self.ui, self._help_actions)
         set_render_button_help(self.ui, rendered=False, current=False)
+        self._font_controller.apply_now()
 
     def _set_initial_focus(self):
         target = getattr(self.ui, "pg1", None)
@@ -594,6 +604,13 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
             del self.p
 
     def _detach_inst_preserve_analysis(self):
+        self.ns = 0
+        self.ne = 0
+        self.ss = None
+        self.ssa = None
+        self.ss_chs = []
+        self.ss_anns = []
+
         if getattr(self, "events_table_proxy", None) is not None:
             clear_rows(self.events_table_proxy)
         if getattr(self, "signals_table_proxy", None) is not None:
@@ -601,7 +618,9 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         if getattr(self, "annots_table_proxy", None) is not None:
             clear_rows(self.annots_table_proxy)
 
+        self.ui.combo_spectrogram.blockSignals(True)
         self.ui.combo_spectrogram.clear()
+        self.ui.combo_spectrogram.blockSignals(False)
         self.ui.combo_actigraphy.clear()
         self.ui.combo_pops.clear()
         self.ui.combo_soap.clear()
@@ -751,7 +770,13 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         
         # attach EDF
         try:
-            self.p = self.proj.inst( id_str )
+            pending = getattr(self, "_pending_empty_inst", None)
+            if pending is not None and getattr(self, "_pending_empty_inst_id", None) == id_str:
+                self.p = pending
+                self._pending_empty_inst    = None
+                self._pending_empty_inst_id = None
+            else:
+                self.p = self.proj.inst( id_str )
             self._profile_attach_mark("proj.inst")
         except Exception as e:
             QMessageBox.critical(
@@ -865,6 +890,13 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
 
     def _clear_all(self):
 
+        self.ns = 0
+        self.ne = 0
+        self.ss = None
+        self.ssa = None
+        self.ss_chs = []
+        self.ss_anns = []
+
         if getattr(self, "events_table_proxy", None) is not None:
             clear_rows( self.events_table_proxy )
 
@@ -879,7 +911,9 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
 
         clear_rows( self.ui.anal_tables ) 
 
+        self.ui.combo_spectrogram.blockSignals(True)
         self.ui.combo_spectrogram.clear()
+        self.ui.combo_spectrogram.blockSignals(False)
         self.ui.combo_actigraphy.clear()
         self.ui.combo_pops.clear()
         self.ui.combo_soap.clear()
@@ -952,6 +986,9 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         
         self.rendered = rendered
         self.current  = current
+        if not rendered:
+            self._rendered_chs = []
+            self._rendered_anns = []
 
         if self.rendered:
             if self.current:
@@ -982,6 +1019,8 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
                 jump.setValue(30.0)
 
         set_render_button_help(self.ui, rendered=self.rendered, current=self.current)
+        if hasattr(self, "_apply_rendered_membership_colors"):
+            self._apply_rendered_membership_colors()
                         
         
     def show_about(self):

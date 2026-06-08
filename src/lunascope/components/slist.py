@@ -73,7 +73,7 @@ def _resolve_sample_list_path(base_dir: str, value: str) -> str:
 def _read_sample_list_rows(filename: str) -> list[list[str]]:
     base_dir = str(Path(filename).expanduser().resolve().parent)
     rows: list[list[str]] = []
-    with open(filename, "r", encoding="utf-8") as fh:
+    with open(filename, "r", encoding="utf-8-sig") as fh:
         for raw_line in fh:
             line = raw_line.rstrip("\r\n")
             if not line.strip():
@@ -809,7 +809,7 @@ class SListMixin:
             if not p.exists():
                 self._update_meta_delegate()
                 return False
-            df = pd.read_csv(str(p), sep="\t", dtype=str)
+            df = pd.read_csv(str(p), sep="\t", dtype=str, encoding="utf-8-sig")
             if df.empty or df.shape[1] < 2:
                 self._update_meta_delegate()
                 return False

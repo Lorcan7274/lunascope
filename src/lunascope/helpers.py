@@ -38,6 +38,7 @@ from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import QPlainTextEdit
 from PySide6.QtGui import QPalette
 import sys
+import re
 import random, colorsys
 import pyqtgraph as pg
 import pandas as pd
@@ -52,6 +53,10 @@ FONT_SCALE_STEP = 0.1
 FONT_SCALE_MIN = 0.8
 FONT_SCALE_MAX = 1.4
 _BASE_APP_FONT = None
+_WIDGET_BASE_FONT_PROP = "lunascope_base_font"
+_WIDGET_BASE_STYLE_PROP = "lunascope_base_stylesheet"
+_APP_BASE_STYLE_PROP = "lunascope_base_stylesheet"
+_FONT_SIZE_RE = re.compile(r"(font-size\s*:\s*)([0-9]+(?:\.[0-9]+)?)(\s*)(px|pt)", re.I)
 
 
 def clamp_font_scale(scale) -> float:
@@ -90,6 +95,46 @@ def _base_app_font(app) -> QFont:
     if _BASE_APP_FONT is None:
         _BASE_APP_FONT = QFont(app.font())
     return QFont(_BASE_APP_FONT)
+
+
+def _scaled_font(font: QFont, scale: float) -> QFont:
+    out = QFont(font)
+    point_size = out.pointSizeF()
+    if point_size > 0:
+        out.setPointSizeF(point_size * scale)
+        return out
+    pixel_size = out.pixelSize()
+    if pixel_size > 0:
+        out.setPixelSize(max(1, int(round(pixel_size * scale))))
+        return out
+    out.setPointSizeF(10.0 * scale)
+    return out
+
+
+def _unscaled_font(font: QFont, scale: float) -> QFont:
+    if scale <= 0:
+        scale = FONT_SCALE_DEFAULT
+    out = QFont(font)
+    point_size = out.pointSizeF()
+    if point_size > 0:
+        out.setPointSizeF(point_size / scale)
+        return out
+    pixel_size = out.pixelSize()
+    if pixel_size > 0:
+        out.setPixelSize(max(1, int(round(pixel_size / scale))))
+        return out
+    return out
+
+
+def _scaled_stylesheet(stylesheet: str, scale: float) -> str:
+    if not stylesheet or "font-size" not in stylesheet:
+        return stylesheet
+
+    def repl(match):
+        prefix, value, space, unit = match.groups()
+        return f"{prefix}{float(value) * scale:.1f}{space}{unit}"
+
+    return _FONT_SIZE_RE.sub(repl, stylesheet)
 
 
 class AppFontController(QObject):
@@ -141,14 +186,48 @@ class AppFontController(QObject):
         app = QApplication.instance()
         if app is None:
             return
+        live_scale = app.property("lunascope_font_scale")
+        previous_scale = clamp_font_scale(live_scale) if live_scale is not None else FONT_SCALE_DEFAULT
         base = _base_app_font(app)
-        size = base.pointSizeF()
-        if size <= 0:
-            size = float(base.pointSize() if base.pointSize() > 0 else 10.0)
-        base.setPointSizeF(size * self._scale)
-        app.setFont(base)
+        app.setFont(_scaled_font(base, self._scale))
         app.setProperty("lunascope_font_scale", self._scale)
+        self._apply_app_stylesheet(app)
+        self._apply_existing_widget_fonts(app, previous_scale)
         self.scaleChanged.emit(self._scale)
+
+    def _apply_app_stylesheet(self, app):
+        style = app.styleSheet()
+        base_style = app.property(_APP_BASE_STYLE_PROP)
+        if base_style is None:
+            base_style = style
+            app.setProperty(_APP_BASE_STYLE_PROP, base_style)
+
+        dock_title_size = 12.0 * self._scale
+        extra = (
+            "\nQDockWidget::title { "
+            f"font-size: {dock_title_size:.1f}px; "
+            "}\n"
+        )
+        app.setStyleSheet(str(base_style or "") + extra)
+
+    def _apply_existing_widget_fonts(self, app, previous_scale):
+        for widget in app.allWidgets():
+            try:
+                base_font = widget.property(_WIDGET_BASE_FONT_PROP)
+                if base_font is None:
+                    base_font = _unscaled_font(widget.font(), previous_scale)
+                    widget.setProperty(_WIDGET_BASE_FONT_PROP, base_font)
+                widget.setFont(_scaled_font(base_font, self._scale))
+
+                style = widget.styleSheet()
+                base_style = widget.property(_WIDGET_BASE_STYLE_PROP)
+                if base_style is None and style and "font-size" in style:
+                    base_style = style
+                    widget.setProperty(_WIDGET_BASE_STYLE_PROP, base_style)
+                if base_style:
+                    widget.setStyleSheet(_scaled_stylesheet(base_style, self._scale))
+            except RuntimeError:
+                continue
 
     def create_actions(self, parent):
         act_larger = QAction("Larger Text", parent)
@@ -162,6 +241,7 @@ class AppFontController(QObject):
         act_smaller.triggered.connect(self.decrease)
 
         act_reset = QAction("Reset Text Size", parent)
+        act_reset.setShortcut(QKeySequence("Ctrl+Shift+R"))
         act_reset.setShortcutContext(Qt.ApplicationShortcut)
         act_reset.triggered.connect(self.reset)
 
@@ -440,11 +520,7 @@ def add_dock_shortcuts(win, view_menu, toggle_zero=None, reset_layout=None):
     # reset to default layout
     if reset_layout is not None:
         act_reset = QAction("Reset to Default Layout", win, checkable=False)
-        act_reset.setShortcuts([
-            QKeySequence("Ctrl+R"),
-            QKeySequence("Ctrl+)"),
-            QKeySequence("Ctrl+Shift+0"),
-        ])
+        act_reset.setShortcut(QKeySequence("Ctrl+R"))
         act_reset.triggered.connect(reset_layout)
         view_menu.addAction(act_reset)
 
@@ -461,7 +537,7 @@ def add_dock_shortcuts(win, view_menu, toggle_zero=None, reset_layout=None):
             act.setShortcut("Ctrl+4")
         elif act.text() == "(5) Instances":
             act.setShortcut("Ctrl+5")
-        elif act.text() == "(6) Spectrograms":
+        elif act.text() in ("(6) Spectrograms", "(6) Time/Frequency"):
             act.setShortcut("Ctrl+6")
         elif act.text() == "(7) Hypnograms":
             act.setShortcut("")

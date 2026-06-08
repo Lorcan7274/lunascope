@@ -594,7 +594,7 @@ class TwoChannelDynamicsTab(_ExplorerTab):
         outer.addWidget(meta_box); outer.addWidget(gfx, 1)
 
         root.setStyleSheet(f"""
-            QWidget    {{ background: {BG}; color: {FG}; }}
+            QWidget    {{ color: {FG}; }}
             QGroupBox  {{ color: {FG}; border: 1px solid {SEP}; margin-top: 8px; }}
             QGroupBox::title {{ subcontrol-origin: margin; left: 8px; padding: 0 4px; }}
             QComboBox, QPushButton, QSlider {{

@@ -81,13 +81,21 @@ WIDGET_HELP: dict[str, str] = {
     "butt_save_param": "Save Param/Config text from the active tab.",
     "butt_reset_param": "Reset Param/Config text and reinitialize corresponding runtime state.",
 
-    # Spectrogram dock
-    "combo_spectrogram": "Signal to analyze (requires SR >= 32 Hz).",
-    "butt_spectrogram": "Compute and draw spectrogram for selected signal.",
-    "butt_hjorth": "Compute and draw Hjorth summary using selected signal.",
-    "spin_lwrfrq": "Lower spectrogram frequency bound in Hz.",
-    "spin_uprfrq": "Upper spectrogram frequency bound in Hz.",
-    "spin_win": "Winsorization fraction applied to PSD values.",
+    # Time/Frequency dock
+    "tab_timefreq": "Choose Welch, Hjorth, multitaper, or IRASA mode.",
+    "combo_spectrogram": "Primary signal to analyze; labels include sample rate.",
+    "butt_spectrogram": "Run the active Time/Frequency mode.",
+    "butt_hjorth": "Legacy Hjorth button; hidden by the Time/Frequency dock.",
+    "check_spec_legend": "Show axes labels and right-side colorbar legend for Dock 6 plots.",
+    "spin_lwrfrq": "Lower frequency bound in Hz.",
+    "spin_uprfrq": "Upper frequency bound in Hz.",
+    "spin_win": "Winsorization fraction applied to plotted values.",
+    "combo_mtm_mode": "Run multitaper as whole-night 30s summaries or <=30s segment zoom.",
+    "spin_mtm_nw": "Multitaper time half-bandwidth product.",
+    "spin_mtm_t": "Number of tapers; auto uses Luna's default.",
+    "spin_mtm_segment": "Multitaper segment size in seconds.",
+    "spin_mtm_inc": "Multitaper segment increment in seconds.",
+    "combo_irasa_component": "Show IRASA aperiodic or periodic component.",
 
     # Hypnogram dock
     "butt_calc_hypnostats": "Run HYPNO and update hypnogram/statistics outputs.",

@@ -51,6 +51,7 @@ from ..lwf import format_lwf_summary, format_lwf_summary_compact, load_lwf_direc
 
 TRACE_SUMMARY_THRESHOLD = 2000
 QUANTILE_SUBSAMPLE_LIMIT = 4000
+SHOW_LWF_WAVEFORM_TAB = False
 RENDER_BUTTON_STYLE = (
     "QPushButton {"
     " background-color:#1f6feb;"
@@ -1078,7 +1079,7 @@ def _safe_window_floor(seconds: float) -> float:
 
 
 def _read_binary_covariates(path: str) -> tuple[pd.DataFrame, list[str]]:
-    df = pd.read_csv(path, sep=None, engine="python")
+    df = pd.read_csv(path, sep=None, engine="python", encoding="utf-8-sig")
     if df.shape[1] < 2:
         raise ValueError("Covariate file must have at least two columns: ID and one binary variable.")
     id_col = str(df.columns[0])
@@ -1599,7 +1600,8 @@ class WaveformTab(_ExplorerTab):
 
         mode_tabs = QTabWidget()
         mode_tabs.addTab(record_tab, "Current Record")
-        mode_tabs.addTab(lwf_tab, "Loaded .lwf")
+        if SHOW_LWF_WAVEFORM_TAB:
+            mode_tabs.addTab(lwf_tab, "Loaded .lwf")
         mode_tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
         inspector_row = QWidget()
@@ -1827,6 +1829,8 @@ class WaveformTab(_ExplorerTab):
         QTimer.singleShot(0, self._sync_mode_tab_height)
 
     def _set_mode(self, mode: str):
+        if mode == "lwf" and not SHOW_LWF_WAVEFORM_TAB:
+            mode = "record"
         self._mode = mode
         tabs = getattr(self, "_tabs_mode", None)
         if mode == "lwf":

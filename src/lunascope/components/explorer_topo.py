@@ -211,7 +211,7 @@ class _ResultsPanel(QWidget):
     # ------------------------------------------------------------------
 
     def _build(self):
-        self.setStyleSheet(f"background: {BG}; color: {FG};")
+        self.setStyleSheet(f"color: {FG};")
         outer = QVBoxLayout(self)
         outer.setContentsMargins(6, 6, 6, 6)
         outer.setSpacing(4)
@@ -535,7 +535,7 @@ class _LiveTopoPanel(QWidget):
     # ------------------------------------------------------------------
 
     def _build(self):
-        self.setStyleSheet(f"background: {BG}; color: {FG};")
+        self.setStyleSheet(f"color: {FG};")
         outer = QVBoxLayout(self)
         outer.setContentsMargins(6, 6, 6, 6)
         outer.setSpacing(4)
@@ -1455,7 +1455,7 @@ class TopoTab(_ExplorerTab):
 
     def _build_widget(self):
         root = QWidget()
-        root.setStyleSheet(f"background: {BG}; color: {FG};")
+        root.setStyleSheet(f"color: {FG};")
         layout = QVBoxLayout(root)
         layout.setContentsMargins(0, 0, 0, 0)
 

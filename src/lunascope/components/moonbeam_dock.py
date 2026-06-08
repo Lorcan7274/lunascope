@@ -75,13 +75,13 @@ _CDIR_PATH = pathlib.Path.home() / '.config' / 'lunapi' / '.cdir'
 def _save_cdir(path: str) -> None:
     """Persist the chosen cache directory across sessions."""
     _CDIR_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _CDIR_PATH.write_text(path)
+    _CDIR_PATH.write_text(path, encoding="utf-8")
 
 
 def _load_cdir() -> str | None:
     """Return the previously saved cache directory, or None."""
     try:
-        p = _CDIR_PATH.read_text().strip()
+        p = _CDIR_PATH.read_text(encoding="utf-8").strip()
         return p if p else None
     except Exception:
         return None
@@ -843,7 +843,7 @@ class MoonbeamMixin:
         if not manifest.exists():
             return
         try:
-            mf = self._mb_parse_manifest(manifest.read_text())
+            mf = self._mb_parse_manifest(manifest.read_text(encoding="utf-8"))
         except Exception:
             return
         if not mf:

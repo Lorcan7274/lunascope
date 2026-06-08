@@ -93,7 +93,7 @@ CACHE_COLUMNS = "ID\tSTART_TOD\tN_EPOCHS\tTST\tEFF\tSOL\tEPOCHS"
 
 def save_hypnoscope_cache(path: str, subjects: list):
     """Write compiled staging data to a compact TSV cache file."""
-    with open(path, "w") as fh:
+    with open(path, "w", encoding="utf-8") as fh:
         fh.write(f"{CACHE_HEADER}\n")
         fh.write(f"# Generated: {datetime.now():%Y-%m-%d %H:%M}\n")
         fh.write(f"{CACHE_COLUMNS}\n")

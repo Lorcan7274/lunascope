@@ -28,7 +28,7 @@ from typing import Callable, Iterable, List, Optional
 from scipy.signal import butter, sosfilt
 
 from PySide6.QtWidgets import QHeaderView, QAbstractItemView, QTableView, QMessageBox
-from PySide6.QtGui import QStandardItemModel, QStandardItem, QColor
+from PySide6.QtGui import QBrush, QStandardItemModel, QStandardItem, QColor
 from PySide6.QtCore import Qt, QSortFilterProxyModel, QRegularExpression, QModelIndex, QSignalBlocker
 from PySide6.QtCore import QTimer
         
@@ -124,6 +124,79 @@ class _ComboDelegate(QStyledItemDelegate):
             
 
 class MetricsMixin:
+    def _redraw_signal_plot_if_ready(self):
+        if hasattr(self, "_signal_plot_ready") and not self._signal_plot_ready():
+            return
+        self._clear_pg1()
+        self._update_scaling()
+
+    def _on_signal_selection_changed(self, *_):
+        self._redraw_signal_plot_if_ready()
+
+    def _on_annot_selection_changed(self, anns):
+        self._update_instances(anns)
+        self._redraw_signal_plot_if_ready()
+        if hasattr(self, "_schedule_actigraphy_update"):
+            self._schedule_actigraphy_update()
+
+    def _rendered_membership_foreground(self, included: bool):
+        return QBrush(QColor("#D7DCE2" if included else "#777777"))
+
+    def _apply_rendered_membership_colors(self):
+        if not getattr(self, "rendered", False):
+            signal_keep = None
+            annot_keep = None
+        else:
+            signal_keep = set(map(str, getattr(self, "_rendered_chs", []) or []))
+            annot_keep = set(map(str, getattr(self, "_rendered_anns", []) or []))
+
+        self._apply_rendered_membership_colors_to_view(
+            getattr(self.ui, "tbl_desc_signals", None),
+            label_headers=("CH",),
+            included_labels=signal_keep,
+        )
+        self._apply_rendered_membership_colors_to_view(
+            getattr(self.ui, "tbl_desc_annots", None),
+            label_headers=("ANNOT", "Annotations", "CLASS"),
+            included_labels=annot_keep,
+        )
+
+    def _apply_rendered_membership_colors_to_view(self, view, *, label_headers, included_labels):
+        if view is None:
+            return
+        model = view.model()
+        if model is None:
+            return
+        src = model.sourceModel() if hasattr(model, "sourceModel") else model
+        if src is None or not hasattr(src, "rowCount") or not hasattr(src, "columnCount"):
+            return
+
+        label_col = None
+        for c in range(src.columnCount()):
+            header = str(src.headerData(c, Qt.Horizontal) or "")
+            if header in label_headers:
+                label_col = c
+                break
+        if label_col is None:
+            return
+
+        for r in range(src.rowCount()):
+            label = str(src.index(r, label_col).data(Qt.DisplayRole) or "")
+            included = included_labels is None or label in included_labels
+            brush = self._rendered_membership_foreground(included)
+            for c in range(src.columnCount()):
+                item = src.item(r, c) if hasattr(src, "item") else None
+                if item is not None:
+                    item.setForeground(brush)
+                elif hasattr(src, "setData"):
+                    src.setData(src.index(r, c), brush, Qt.ForegroundRole)
+
+        if src.rowCount() and src.columnCount():
+            src.dataChanged.emit(
+                src.index(0, 0),
+                src.index(src.rowCount() - 1, src.columnCount() - 1),
+                [Qt.ForegroundRole],
+            )
 
     def _apply_compact_dock_styles(self):
         button_names = ("butt_sig", "butt_annot")
@@ -194,6 +267,16 @@ class MetricsMixin:
         v.setMinimumSectionSize(row_height)
         v.setVisible(False)
         view.setShowGrid(False)
+        self._keep_dense_table_left_aligned(view)
+
+    def _keep_dense_table_left_aligned(self, view: QTableView):
+        def _reset_scroll():
+            bar = view.horizontalScrollBar()
+            if bar is not None and bar.value() != 0:
+                bar.setValue(0)
+
+        view.clicked.connect(lambda *_: QTimer.singleShot(0, _reset_scroll))
+        view.pressed.connect(lambda *_: QTimer.singleShot(0, _reset_scroll))
 
     def _init_metrics(self):
         self._apply_compact_dock_styles()
@@ -237,6 +320,26 @@ class MetricsMixin:
         view.horizontalHeader().setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self._configure_dense_table(view)
 
+        # events table — one-time view setup; proxy is created here and reused
+        # for every subsequent rebuild so we never pay setModel() or header
+        # reconfiguration costs on a checkbox toggle.
+        view = self.ui.tbl_desc_events
+        view.setSortingEnabled(False)
+        h = view.horizontalHeader()
+        h.setStretchLastSection(True)
+        h.setSectionResizeMode(QHeaderView.Interactive)
+        view.setSelectionBehavior(QAbstractItemView.SelectRows)
+        view.setSelectionMode(QAbstractItemView.SingleSelection)
+        h.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self._configure_dense_table(view)
+        self.events_table_proxy = QSortFilterProxyModel(view)
+        view.setModel(self.events_table_proxy)
+        # attach_comma_filter sees view.model() IS proxy, so it skips the
+        # proxy/model plumbing and only wires txt_events.textChanged once.
+        attach_comma_filter(view, self.ui.txt_events, proxy=self.events_table_proxy)
+        # flag: measure column widths on the first rebuild after each EDF load
+        self._events_cols_need_resize = True
+
         # wiring
         self.ui.butt_sig.clicked.connect( self._toggle_sigs )
         self.ui.butt_annot.clicked.connect( self._toggle_annots )
@@ -269,6 +372,8 @@ class MetricsMixin:
     # Attach EDF
 
     def _update_metrics(self):
+        # next _rebuild_instances_table call will re-measure column widths once
+        self._events_cols_need_resize = True
 
         # ------------------------------------------------------------
         # EDF header metrics --> status bar
@@ -398,7 +503,7 @@ class MetricsMixin:
             channel_col_before_insert=0,
             header_text="Sel",
             initial_checked=[],
-            on_change=lambda _: (self._clear_pg1(), self._update_scaling() ),
+            on_change=self._on_signal_selection_changed,
         )
         if hasattr(self, "_profile_attach_mark"):
             self._profile_attach_mark("_update_metrics signal check column")
@@ -539,6 +644,8 @@ class MetricsMixin:
                     if can_update_backend:
                         self.ss.clear_filter(ch_label)
 
+            if hasattr(self, "_signal_plot_ready") and not self._signal_plot_ready():
+                return
             self._clear_pg1()
             self._update_scaling() # calls _update_pg1() 
 
@@ -601,12 +708,7 @@ class MetricsMixin:
             channel_col_before_insert=0,  
             header_text="Sel",
             initial_checked=[],
-            on_change=lambda anns: (
-                self._update_instances(anns),
-                self._clear_pg1(),
-                self._update_scaling(),
-                self._schedule_actigraphy_update() if hasattr(self, "_schedule_actigraphy_update") else None
-            ),
+            on_change=self._on_annot_selection_changed,
         )
         if hasattr(self, "_profile_attach_mark"):
             self._profile_attach_mark("_update_metrics annot check column")
@@ -649,6 +751,7 @@ class MetricsMixin:
         self.set_palette()
         if hasattr(self, "_annotator_refresh_classes"):
             self._annotator_refresh_classes()
+        self._apply_rendered_membership_colors()
         if hasattr(self, "_profile_attach_mark"):
             self._profile_attach_mark("_update_metrics end")
 
@@ -677,10 +780,16 @@ class MetricsMixin:
         if not getattr(self.ui, "dock_annots", None) or not self.ui.dock_annots.isVisible():
             self._instances_update_dirty = True
             return
+        if getattr(self, "ssa", None) is None:
+            self._instances_update_dirty = True
+            return
         self._instances_update_dirty = False
         self._rebuild_instances_table(list(self._pending_instance_annots))
 
     def _rebuild_instances_table(self, anns):
+        if getattr(self, "ssa", None) is None:
+            self._instances_update_dirty = True
+            return
 
         # request w/ hms=True; new API returns 9 cols:
         # [class, label, hms, start_sec, dur, start_tp, stop_tp, inst_id, ch_str]
@@ -734,16 +843,17 @@ class MetricsMixin:
         except Exception:
             pass
 
-        def _get_meta(r):
-            start = round(float(r["start"]), 3)
-            stop  = round(float(r["stop"]),  3)
-            return meta_lookup.get((str(r["class"]), start, stop), "")
-
-        df["meta"] = df.apply(_get_meta, axis=1)
+        # meta lookup: list comprehension instead of df.apply (avoids pandas
+        # per-row overhead for each element)
+        df["meta"] = [
+            meta_lookup.get((str(cls), round(float(s), 3), round(float(e), 3)), "")
+            for cls, s, e in zip(df["class"], df["start"], df["stop"])
+        ]
 
         # store identity cols for the annotation editor (keyed by source row)
         # use int(float(...)) for tp cols: pandas may read uint64 strings as float64
         # (e.g. "22277570000000" → 22277570000000.0 → str gives "22277570000000.0")
+        # to_dict("records") is substantially faster than iterrows() for large tables
         self._events_identity = [
             {
                 "aclass":    str(row["class"]),
@@ -755,7 +865,7 @@ class MetricsMixin:
                 "stop_sec":  str(round(float(row["stop"]),  3)),
                 "meta":      str(row["meta"]),
             }
-            for _, row in df.iterrows()
+            for row in df.to_dict("records")
         ]
 
         # prefix class names for queued edits/deletes (visual indicator only;
@@ -763,52 +873,85 @@ class MetricsMixin:
         queued_del = getattr(self, "_queued_deletes", set())
         queued_edit = getattr(self, "_queued_edits", set())
         if queued_del or queued_edit:
-            def _class_disp(row):
-                key = (
-                    str(row["class"]),
-                    str(int(float(row["start_tp"]))),
-                    str(int(float(row["stop_tp"]))),
-                    str(row["inst_id"]),
-                    str(row["ch_str"]),
-                )
+            # iterate parallel lists — faster than df.apply for this key-lookup pattern
+            cls_list  = df["class"].tolist()
+            tp1_list  = [str(int(float(x))) for x in df["start_tp"]]
+            tp2_list  = [str(int(float(x))) for x in df["stop_tp"]]
+            inst_list = df["inst_id"].astype(str).tolist()
+            ch_list   = df["ch_str"].astype(str).tolist()
+            new_cls = []
+            for cls, tp1, tp2, inst, ch in zip(cls_list, tp1_list, tp2_list, inst_list, ch_list):
+                key = (str(cls), tp1, tp2, inst, ch)
                 if key in queued_del:
-                    return "(X) " + str(row["class"])
-                if key in queued_edit:
-                    return "(E) " + str(row["class"])
-                return str(row["class"])
+                    new_cls.append("(X) " + str(cls))
+                elif key in queued_edit:
+                    new_cls.append("(E) " + str(cls))
+                else:
+                    new_cls.append(str(cls))
             df = df.copy()
-            df["class"] = df.apply(_class_disp, axis=1)
+            df["class"] = new_cls
 
         df = df[["class", "hms", "start", "dur", "inst", "meta"]]
         self.events_model = self.df_to_model(df)
 
+        # swap source model in the long-lived proxy (created once in _init_metrics);
+        # the proxy keeps its filter pattern, so txt_events filtering stays active
+        # across all rebuilds without rewiring anything.
         view = self.ui.tbl_desc_events
-        self.events_table_proxy = attach_comma_filter(self.ui.tbl_desc_events, self.ui.txt_events)
         self.events_table_proxy.setSourceModel(self.events_model)
-        view.setModel(self.events_table_proxy)
-        
-        h = view.horizontalHeader()
-        h.setStretchLastSection(True)
-        h.setSectionResizeMode(QHeaderView.Interactive)
-        
-        self._configure_dense_table(view)
-        view.resizeColumnsToContents()
-        view.setSelectionBehavior(QAbstractItemView.SelectRows)
-        view.setSelectionMode(QAbstractItemView.SingleSelection)
-        view.horizontalHeader().setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        for col_name, width in {"inst": 32, "hms": 58, "start": 44, "dur": 38}.items():
-            for c in range(self.events_table_proxy.columnCount()):
-                header = str(self.events_table_proxy.headerData(c, Qt.Horizontal) or "")
-                if header == col_name:
-                    view.setColumnWidth(c, width)
-                    h.setSectionResizeMode(c, QHeaderView.Interactive)
-                    break
-        
+
+        # resize columns once per EDF load / annotation change
+        # (_events_cols_need_resize is set True by _update_metrics);
+        # subsequent checkbox toggles within the same EDF skip this entirely.
+        if getattr(self, "_events_cols_need_resize", True):
+            self._resize_events_columns(anns)
+            self._events_cols_need_resize = False
+
+        # disconnect before connect: the selection model is stable (we no longer
+        # call setModel on each rebuild), so without this each toggle would add
+        # another copy of the handler.  Skip disconnect on first call — nothing
+        # is connected yet and PySide6 emits a RuntimeWarning (not an exception).
         sel = view.selectionModel()
+        if getattr(self, "_events_row_handler_connected", False):
+            try:
+                sel.currentRowChanged.disconnect(self._on_row_changed)
+            except RuntimeError:
+                pass
         sel.currentRowChanged.connect(self._on_row_changed)
+        self._events_row_handler_connected = True
 
 
-    # ------------------------------------------------------------    
+    # ------------------------------------------------------------
+    # events table: column sizing
+
+    # compact widths for numeric/time columns; class stretches to fill the rest
+    _EVENTS_FIXED_COL_WIDTHS = {"hms": 72, "start": 62, "dur": 52, "inst": 44}
+    _EVENTS_META_DEFAULT_W   = 100
+
+    def _resize_events_columns(self, anns=None):
+        view  = self.ui.tbl_desc_events
+        proxy = self.events_table_proxy
+        h     = view.horizontalHeader()
+
+        class_c = -1
+        for c in range(proxy.columnCount()):
+            col = str(proxy.headerData(c, Qt.Horizontal) or "")
+            if col == "class":
+                class_c = c
+                h.setSectionResizeMode(c, QHeaderView.Stretch)
+            elif col in self._EVENTS_FIXED_COL_WIDTHS:
+                view.setColumnWidth(c, self._EVENTS_FIXED_COL_WIDTHS[col])
+                h.setSectionResizeMode(c, QHeaderView.Interactive)
+            elif col == "meta":
+                view.setColumnWidth(c, self._EVENTS_META_DEFAULT_W)
+                h.setSectionResizeMode(c, QHeaderView.Interactive)
+            else:
+                h.setSectionResizeMode(c, QHeaderView.Interactive)
+
+        if class_c >= 0:
+            QTimer.singleShot(0, lambda c=class_c: h.setSectionResizeMode(c, QHeaderView.Interactive))
+
+    # ------------------------------------------------------------
     # events table: allow filtering of events
 
     def _on_events_filter_text(self, text: str):
