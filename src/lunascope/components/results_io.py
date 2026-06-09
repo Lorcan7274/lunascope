@@ -27,9 +27,35 @@ import zipfile
 
 import pandas as pd
 
-from PySide6.QtCore import Qt, QEvent
+from PySide6.QtCore import Qt, QEvent, QObject, QTimer
+from PySide6.QtGui import QStandardItemModel
 from PySide6.QtWidgets import QFileDialog, QMessageBox, QHeaderView, QToolTip
 from ..file_dialogs import open_file_name, save_file_name
+
+_OUTPUT_DOCK_DRAG_CELL_LIMIT = 25_000
+
+
+class _OutputsDockDragFilter(QObject):
+    """Temporarily lighten large output tables while Qt reparents the dock."""
+
+    def __init__(self, owner):
+        super().__init__(owner.ui.dock_outputs)
+        self._owner = owner
+
+    def eventFilter(self, obj, event):
+        etype = event.type()
+        if etype in (
+            QEvent.Type.MouseButtonPress,
+            QEvent.Type.NonClientAreaMouseButtonPress,
+        ):
+            self._owner._suspend_outputs_table_for_dock_drag()
+        elif etype in (
+            QEvent.Type.MouseButtonRelease,
+            QEvent.Type.NonClientAreaMouseButtonRelease,
+            QEvent.Type.Move,
+        ):
+            self._owner._schedule_outputs_table_restore()
+        return False
 
 
 class HelpHeaderView(QHeaderView):
@@ -112,10 +138,65 @@ class ResultsIOMixin:
         # install help-aware header on the output table (done once at init)
         self._help_header = HelpHeaderView(self.ui.anal_table)
         self.ui.anal_table.setHorizontalHeader(self._help_header)
+        self._outputs_drag_saved_model = None
+        self._outputs_drag_saved_sorting = False
+        self._outputs_drag_restore_timer = QTimer(self.ui.dock_outputs)
+        self._outputs_drag_restore_timer.setSingleShot(True)
+        self._outputs_drag_restore_timer.setInterval(250)
+        self._outputs_drag_restore_timer.timeout.connect(self._restore_outputs_table_after_dock_drag)
+        self._outputs_dock_drag_filter = _OutputsDockDragFilter(self)
+        self.ui.dock_outputs.installEventFilter(self._outputs_dock_drag_filter)
+        self.ui.dock_outputs.topLevelChanged.connect(
+            lambda _floating: self._schedule_outputs_table_restore()
+        )
+        try:
+            self.ui.dock_outputs.dockLocationChanged.connect(
+                lambda _area: self._schedule_outputs_table_restore()
+            )
+        except AttributeError:
+            pass
 
     def _update_table(self, cmd, stratum):
         super()._update_table(cmd, stratum)
         self._help_header.set_help_context(cmd, stratum)
+
+    def _outputs_table_cell_count(self) -> int:
+        model = self.ui.anal_table.model()
+        if model is None:
+            return 0
+        try:
+            source = model.sourceModel()
+        except AttributeError:
+            source = model
+        try:
+            return int(source.rowCount()) * int(source.columnCount())
+        except RuntimeError:
+            return 0
+
+    def _suspend_outputs_table_for_dock_drag(self):
+        if self._outputs_drag_saved_model is not None:
+            return
+        if self._outputs_table_cell_count() <= _OUTPUT_DOCK_DRAG_CELL_LIMIT:
+            return
+        table = self.ui.anal_table
+        self._outputs_drag_restore_timer.stop()
+        self._outputs_drag_saved_model = table.model()
+        self._outputs_drag_saved_sorting = table.isSortingEnabled()
+        table.setSortingEnabled(False)
+        table.setModel(QStandardItemModel(0, 0, table))
+
+    def _schedule_outputs_table_restore(self):
+        if self._outputs_drag_saved_model is not None:
+            self._outputs_drag_restore_timer.start()
+
+    def _restore_outputs_table_after_dock_drag(self):
+        model = self._outputs_drag_saved_model
+        if model is None:
+            return
+        self._outputs_drag_saved_model = None
+        table = self.ui.anal_table
+        table.setModel(model)
+        table.setSortingEnabled(bool(self._outputs_drag_saved_sorting))
 
     def _render_tables(self, tbls):
         self._set_tsv_csv_mode(False)
@@ -243,10 +324,7 @@ class ResultsIOMixin:
 
         self._set_tsv_csv_mode(False)
         self.project_mode = project_mode
-        self.results = {
-            k: df.sort_values("ID").reset_index(drop=True) if "ID" in df.columns else df
-            for k, df in results.items()
-        }
+        self.results = dict(results)
         tree_df = pd.DataFrame(pairs, columns=["Command", "Strata"])
         self.set_tree_from_df(tree_df)
         self.ui.dock_outputs.show()

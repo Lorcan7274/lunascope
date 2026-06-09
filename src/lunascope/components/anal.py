@@ -20,18 +20,19 @@
 #
 #  --------------------------------------------------------------------
 
-import sys, traceback, threading
+import os, sys, traceback, threading, multiprocessing, queue
 import pandas as pd
 from typing import List, Tuple
 
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, FIRST_COMPLETED, wait
 
 from  ..helpers import clear_rows
 from .tbl_funcs import attach_comma_filter, copy_selection, save_table_as_tsv
 from .slist import NumericSortFilterProxy
 
 from PySide6.QtWidgets import QPlainTextEdit, QFileDialog, QMessageBox
-from PySide6.QtCore import QEvent, QMetaObject, Qt, Slot
+from PySide6.QtWidgets import QDialog, QDialogButtonBox, QFormLayout, QLabel, QSpinBox, QVBoxLayout
+from PySide6.QtCore import QEvent, QMetaObject, QSettings, Qt, Slot
 from PySide6.QtCore import Qt, QItemSelection, QSortFilterProxyModel, QRegularExpression
 from PySide6.QtGui import QStandardItemModel, QStandardItem
 from PySide6.QtWidgets import QAbstractItemView, QHeaderView
@@ -43,9 +44,205 @@ from PySide6.QtGui import QAction
 from ..file_dialogs import open_file_name, save_file_name
 
 
+_PROJECT_EVAL_WORKERS_KEY = "analysis/project_eval_workers"
+_PROJECT_EVAL_CHILD_PROJ = None
+_OUTPUT_TABLE_AUTOSORT_CELL_LIMIT = 250_000
+_OUTPUT_TABLE_AUTORESIZE_CELL_LIMIT = 25_000
+
+
+def _project_eval_settings() -> QSettings:
+    return QSettings("Lunascope", "Lunascope")
+
+
 def _diag_log(message: str) -> None:
     sys.stderr.write(f"[lunascope] {message}\n")
     sys.stderr.flush()
+
+
+def _default_project_eval_workers(cpu_count=None) -> int:
+    if cpu_count is None:
+        cpu_count = os.cpu_count()
+    try:
+        cpu_count = int(cpu_count)
+    except (TypeError, ValueError):
+        cpu_count = 1
+    return min(10, max(1, cpu_count // 2))
+
+
+def _clamp_project_eval_workers(value, total_records=None) -> int:
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        value = _default_project_eval_workers()
+    value = min(10, max(1, value))
+    if total_records is not None:
+        value = min(value, max(1, int(total_records)))
+    return value
+
+
+def _normalize_project_result_table(df, record_id):
+    if df is None:
+        return None
+
+    out = df.copy()
+    record_id = "" if record_id is None else str(record_id)
+
+    if "ID" not in out.columns:
+        out.insert(0, "ID", record_id)
+        return out
+
+    try:
+        id_col = out["ID"]
+        missing = id_col.isna()
+        if hasattr(id_col, "astype"):
+            missing = missing | id_col.astype(str).str.strip().eq("")
+        if missing.any():
+            out.loc[missing, "ID"] = record_id
+    except Exception:
+        pass
+
+    cols = ["ID"] + [c for c in out.columns if c != "ID"]
+    return out.loc[:, cols]
+
+
+def _project_eval_run_record(proj, record):
+    ordinal = record["ordinal"]
+    sample_row = record["sample_row"]
+    label = record["label"]
+    cmd = record["cmd"]
+    param = record["param"]
+    id_str = str(sample_row[0] or "").strip()
+
+    stdout_txt = ""
+    try:
+        proj.clear_vars()
+        proj.reinit()
+        for a, b in param:
+            proj.var(a, b)
+
+        p = proj.inst(id_str)
+        stdout_txt = p.eval_lunascope(cmd) or ""
+
+        tbls = p.strata()
+        tree_tbls = None
+        results = {}
+        if tbls is not None:
+            tree_tbls = tbls[["Command", "Strata"]].copy()
+            for row in tbls.itertuples(index=False):
+                key = f"{row.Command}_{row.Strata}"
+                df = _normalize_project_result_table(
+                    p.table(row.Command, row.Strata),
+                    id_str,
+                )
+                if df is not None:
+                    results[key] = df
+
+        try:
+            p.silent_proc("REPORT show-all")
+        except RuntimeError:
+            pass
+
+        return {
+            "ordinal": ordinal,
+            "label": label,
+            "id": id_str,
+            "stdout": stdout_txt,
+            "tbls": tree_tbls,
+            "results": results,
+            "error": None,
+        }
+    except Exception as e:
+        return {
+            "ordinal": ordinal,
+            "label": label,
+            "id": id_str,
+            "stdout": stdout_txt,
+            "tbls": None,
+            "results": {},
+            "error": f"{type(e).__name__}: {e}",
+        }
+
+
+def _project_eval_slice_worker(task):
+    global _PROJECT_EVAL_CHILD_PROJ
+
+    if _PROJECT_EVAL_CHILD_PROJ is None:
+        _init_project_eval_child()
+    proj = _PROJECT_EVAL_CHILD_PROJ
+
+    rows = task["rows"]
+    records = task["records"]
+    result_queue = task.get("result_queue")
+    try:
+        proj.clear()
+        proj.eng.set_sample_list(rows)
+        results = []
+        for record in records:
+            result = _project_eval_run_record(proj, record)
+            if result_queue is not None:
+                result_queue.put(result)
+            else:
+                results.append(result)
+        return {
+            "slice_index": task["slice_index"],
+            "start_ordinal": task["start_ordinal"],
+            "end_ordinal": task["end_ordinal"],
+            "results": results,
+        }
+    finally:
+        try:
+            proj.clear()
+        except Exception:
+            pass
+
+
+def _project_eval_slices(tasks, workers):
+    if not tasks:
+        return []
+    workers = _clamp_project_eval_workers(workers, len(tasks))
+    chunk_size = (len(tasks) + workers - 1) // workers
+    chunk_size = max(1, chunk_size)
+    chunks = []
+    for chunk_index, start in enumerate(range(0, len(tasks), chunk_size), start=1):
+        records = tasks[start:start + chunk_size]
+        if not records:
+            continue
+        chunks.append({
+            "slice_index": chunk_index,
+            "start_ordinal": records[0]["ordinal"],
+            "end_ordinal": records[-1]["ordinal"],
+            "rows": [list(record["sample_row"]) for record in records],
+            "records": records,
+        })
+    return chunks
+
+
+def _init_project_eval_child():
+    global _PROJECT_EVAL_CHILD_PROJ
+    import lunapi as lp
+
+    _PROJECT_EVAL_CHILD_PROJ = lp.proj()
+    _PROJECT_EVAL_CHILD_PROJ.silence(True)
+
+
+def _terminate_process_pool(executor) -> bool:
+    if hasattr(executor, "terminate_workers"):
+        try:
+            executor.terminate_workers()
+            return True
+        except Exception:
+            return False
+
+    processes = getattr(executor, "_processes", None)
+    if not processes:
+        return False
+    for proc in list(processes.values()):
+        try:
+            if proc.is_alive():
+                proc.terminate()
+        except Exception:
+            pass
+    return False
 
 
 
@@ -120,7 +317,7 @@ class AnalMixin:
         self._project_results_mode = False
         self._proj_cancel_event = threading.Event()
         self._proj_cancel_requested = False
-        self._proj_cancel_action = QAction("Stop project eval after current record", self.ui)
+        self._proj_cancel_action = QAction("Stop queued project eval records", self.ui)
         self._proj_cancel_action.setShortcuts(self._project_eval_cancel_shortcuts())
         self._proj_cancel_action.setShortcutContext(Qt.ApplicationShortcut)
         self._proj_cancel_action.triggered.connect(self._request_project_eval_cancel)
@@ -132,6 +329,62 @@ class AnalMixin:
         self.sig_proj_eval_progress.connect(self._proj_eval_update_progress, Qt.QueuedConnection)
         self.sig_proj_eval_finished.connect(self._proj_eval_done_ok, Qt.QueuedConnection)
         self.sig_proj_eval_failed.connect(self._proj_eval_done_err, Qt.QueuedConnection)
+
+
+    def _project_eval_config_dialog(self, total_records):
+        total_records = max(1, int(total_records))
+        default_workers = _default_project_eval_workers()
+        settings = _project_eval_settings()
+        saved_workers = _clamp_project_eval_workers(
+            settings.value(_PROJECT_EVAL_WORKERS_KEY, default_workers),
+            total_records,
+        )
+
+        dlg = QDialog(self.ui)
+        dlg.setWindowTitle("Evaluate Project")
+        layout = QVBoxLayout(dlg)
+        form = QFormLayout()
+
+        obs_label = QLabel(str(total_records))
+        jobs_per_process_label = QLabel("")
+
+        spin_workers = QSpinBox(dlg)
+        spin_workers.setRange(1, min(10, total_records))
+        spin_workers.setValue(saved_workers)
+        spin_workers.setToolTip("Number of parallel worker processes.")
+
+        def _sync_jobs_per_process_label(value=None):
+            workers = _clamp_project_eval_workers(
+                spin_workers.value() if value is None else value,
+                total_records,
+            )
+            jobs_per_process = (total_records + workers - 1) // workers
+            jobs_per_process_label.setText(str(jobs_per_process))
+
+        form.addRow("# of cores:", spin_workers)
+        form.addRow("# of obs:", obs_label)
+        form.addRow("# jobs per process:", jobs_per_process_label)
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, dlg)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+        ok_button = buttons.button(QDialogButtonBox.Ok)
+        if ok_button is not None:
+            ok_button.setDefault(True)
+            ok_button.setAutoDefault(True)
+        spin_workers.valueChanged.connect(_sync_jobs_per_process_label)
+        _sync_jobs_per_process_label()
+        spin_workers.selectAll()
+        spin_workers.setFocus(Qt.OtherFocusReason)
+
+        if dlg.exec() != QDialog.Accepted:
+            return None
+
+        workers = _clamp_project_eval_workers(spin_workers.value(), total_records)
+        settings.setValue(_PROJECT_EVAL_WORKERS_KEY, workers)
+        return {"workers": workers}
 
 
     def _project_eval_cancel_shortcuts(self):
@@ -255,6 +508,8 @@ class AnalMixin:
             if self.project_mode:
                 self._accumulate_project_results(tbls)
             else:
+                if hasattr(self, "_invalidate_spec_data_cache"):
+                    self._invalidate_spec_data_cache()
                 self._render_tables(tbls)
 
                 rendered_ss = getattr(self, "ss", None) if getattr(self, "rendered", False) else None
@@ -408,28 +663,7 @@ class AnalMixin:
             pass
 
     def _normalize_project_result_table(self, df, record_id):
-        if df is None:
-            return None
-
-        out = df.copy()
-        record_id = "" if record_id is None else str(record_id)
-
-        if "ID" not in out.columns:
-            out.insert(0, "ID", record_id)
-            return out
-
-        try:
-            id_col = out["ID"]
-            missing = id_col.isna()
-            if hasattr(id_col, "astype"):
-                missing = missing | id_col.astype(str).str.strip().eq("")
-            if missing.any():
-                out.loc[missing, "ID"] = record_id
-        except Exception:
-            pass
-
-        cols = ["ID"] + [c for c in out.columns if c != "ID"]
-        return out.loc[:, cols]
+        return _normalize_project_result_table(df, record_id)
 
         
     # ------------------------------------------------------------
@@ -490,18 +724,6 @@ class AnalMixin:
         
         tbl = self.results[ "_".join( [ cmd , stratum ] ) ]
 
-        # Keep Luna's original row order unless an ID column is present.
-        # If ID exists, sort stably by ID only.
-        if "ID" in tbl.columns:
-            try:
-                tbl = tbl.sort_values(
-                    ["ID"],
-                    na_position="last",
-                    kind="stable",
-                )
-            except Exception:
-                pass
-
         if not self.project_mode and not self._project_results_mode:
             tbl = tbl.drop(columns=["ID"])
 
@@ -512,8 +734,15 @@ class AnalMixin:
             tbl = tbl.T.reset_index()
             tbl.rename(columns={"index": "VAR"}, inplace=True)
             tbl.columns = ["VAR"] + [f"row{i}" for i in range(1, tbl.shape[1])]
+
+        cell_count = len(tbl) * max(1, len(tbl.columns))
+        is_large_output = cell_count > _OUTPUT_TABLE_AUTORESIZE_CELL_LIMIT
         
-        self.anal_model = self.df_to_model( tbl )
+        self.anal_model = self.df_to_model(
+            tbl,
+            coerce_numeric=False,
+            build_row_text=False,
+        )
 
         # single proxy handles both numeric sort and comma filter
         self.anal_table_proxy = NumericSortFilterProxy(self)
@@ -530,15 +759,24 @@ class AnalMixin:
         h = view.horizontalHeader()
         h.setSectionResizeMode(QHeaderView.Interactive)  # user-resizable
         h.setStretchLastSection(False)                   # no auto-stretch fighting you
-        h.setResizeContentsPrecision(50)                 # sample first 50 rows only
-        view.resizeColumnsToContents()
-        if "ID" in tbl.columns:
+        if is_large_output:
+            default_w = max(70, min(120, h.defaultSectionSize()))
+            h.setDefaultSectionSize(default_w)
+        else:
+            h.setResizeContentsPrecision(50)             # sample first 50 rows only
+            view.resizeColumnsToContents()
+        if (
+            "ID" in tbl.columns
+            and cell_count <= _OUTPUT_TABLE_AUTOSORT_CELL_LIMIT
+        ):
             try:
                 id_col = list(tbl.columns).index("ID")
                 view.setSortingEnabled(True)
                 view.sortByColumn(id_col, Qt.AscendingOrder)
             except Exception:
                 view.setSortingEnabled(False)
+        else:
+            view.setSortingEnabled(False)
 
         
     def _on_anal_filter_text(self, text: str):
@@ -716,6 +954,11 @@ class AnalMixin:
         if not records:
             return
 
+        eval_config = self._project_eval_config_dialog(len(records))
+        if eval_config is None:
+            return
+        workers = eval_config["workers"]
+
         self.project_mode = True
         self._project_results_mode = False
         self._proj_cancel_event.clear()
@@ -732,9 +975,20 @@ class AnalMixin:
         self.sb_progress.setValue(0)
         self.sb_progress.setFormat(f"0 / {len(records)}")
         shortcut_label = self._project_eval_cancel_shortcut_label()
-        self.lock_ui(f"Processing...\n\nPress {shortcut_label} to stop after this record")
+        worker_word = "process" if workers == 1 else "processes"
+        self.lock_ui(
+            f"Processing with {workers} {worker_word}...\n\n"
+            f"Press {shortcut_label} to stop queued records"
+        )
 
-        fut = self._exec.submit(self._project_eval_worker, records, all_rows, cmd, param)
+        fut = self._exec.submit(
+            self._project_eval_worker,
+            records,
+            all_rows,
+            cmd,
+            param,
+            workers,
+        )
 
         def _done(_f=fut):
             try:
@@ -746,76 +1000,175 @@ class AnalMixin:
 
         fut.add_done_callback(_done)
 
-    def _project_eval_worker(self, records, all_rows, cmd, param):
-        proj_tbls = []
-        proj_results = {}
+    def _project_eval_worker(self, records, all_rows, cmd, param, workers):
+        total = len(records)
+        workers = _clamp_project_eval_workers(workers, total)
+        tasks = [
+            {
+                "ordinal": i,
+                "sample_row": list(sample_row),
+                "label": label,
+                "cmd": cmd,
+                "param": list(param),
+            }
+            for i, (sample_row, label) in enumerate(records, start=1)
+        ]
+        slices = _project_eval_slices(tasks, workers)
+        completed = []
+        completed_ordinals = set()
+        errors = []
         cancelled = False
+        done = 0
 
-        try:
-            for i, (sample_row, label) in enumerate(records, start=1):
-                if self._proj_cancel_event.is_set():
-                    cancelled = True
-                    self.sig_proj_eval_stream.emit("\nInterrupted.\n")
-                    break
+        executor = None
+        manager = None
+        result_queue = None
+        pending = {}
 
-                header = (
-                    "\n\n------------------------------------------------------------------\n"
-                    f"Processing: {label} (#{i})\n"
-                )
-                for chunk in header.splitlines(True):
+        def _handle_record_result(result):
+            nonlocal done
+            ordinal = result.get("ordinal")
+            if ordinal in completed_ordinals:
+                return
+            completed_ordinals.add(ordinal)
+            done += 1
+            completed.append(result)
+            header = (
+                "\n\n------------------------------------------------------------------\n"
+                f"Finished: {result['label']} (#{result['ordinal']})\n"
+            )
+            self.sig_proj_eval_stream.emit(header)
+            stdout_txt = result.get("stdout") or ""
+            if stdout_txt:
+                for chunk in stdout_txt.splitlines(True):
                     self.sig_proj_eval_stream.emit(chunk)
 
-                stderr_txt = ""
-                id_str = str(sample_row[0] or "").strip()
+            err = result.get("error")
+            if err:
+                msg = f"{result['label']}: {err}"
+                errors.append(msg)
+                self.sig_proj_eval_stream.emit(f"\nERROR: {msg}\n")
+
+            self.sig_proj_eval_progress.emit(done, total)
+
+        def _drain_result_queue():
+            if result_queue is None:
+                return
+            while True:
                 try:
-                    self.proj.clear()
-                    self.proj.eng.set_sample_list([list(sample_row)])
-                    self.proj.clear_vars()
-                    self.proj.reinit()
-                    for a, b in param:
-                        self.proj.var(a, b)
+                    result = result_queue.get_nowait()
+                except (queue.Empty, EOFError, OSError):
+                    break
+                _handle_record_result(result)
 
-                    p = self.proj.inst(id_str)
-                    stderr_txt = p.eval_lunascope(cmd) or ""
-                    if stderr_txt:
-                        for chunk in stderr_txt.splitlines(True):
-                            self.sig_proj_eval_stream.emit(chunk)
+        try:
+            mp_context = multiprocessing.get_context("spawn")
+            manager = mp_context.Manager()
+            result_queue = manager.Queue()
+            executor = ProcessPoolExecutor(
+                max_workers=workers,
+                mp_context=mp_context,
+                initializer=_init_project_eval_child,
+            )
+            for task_slice in slices:
+                if self._proj_cancel_event.is_set():
+                    cancelled = True
+                    break
+                submitted_slice = dict(task_slice)
+                submitted_slice["result_queue"] = result_queue
+                fut = executor.submit(_project_eval_slice_worker, submitted_slice)
+                pending[fut] = task_slice
+                header = (
+                    "\n\n------------------------------------------------------------------\n"
+                    f"Queued slice {task_slice['slice_index']}: "
+                    f"records #{task_slice['start_ordinal']}-{task_slice['end_ordinal']}\n"
+                )
+                self.sig_proj_eval_stream.emit(header)
 
-                    tbls = p.strata()
-                    if tbls is not None:
-                        proj_tbls.append(tbls[["Command", "Strata"]].copy())
-                        for row in tbls.itertuples(index=False):
-                            key = f"{row.Command}_{row.Strata}"
-                            df = self._normalize_project_result_table(
-                                p.table(row.Command, row.Strata),
-                                id_str,
-                            )
-                            if key in proj_results:
-                                proj_results[key] = pd.concat([proj_results[key], df], ignore_index=True)
-                            else:
-                                proj_results[key] = df
+            while pending:
+                _drain_result_queue()
+                if self._proj_cancel_event.is_set():
+                    cancelled = True
+                    self.sig_proj_eval_stream.emit("\nInterrupted: stopping project eval slices.\n")
+                    for fut in pending:
+                        fut.cancel()
+                    break
 
+                done_futs, _ = wait(
+                    pending.keys(),
+                    timeout=0.2,
+                    return_when=FIRST_COMPLETED,
+                )
+                if not done_futs:
+                    continue
+
+                _drain_result_queue()
+                for fut in done_futs:
+                    task_slice = pending.pop(fut)
                     try:
-                        p.silent_proc("REPORT show-all")
-                    except RuntimeError:
-                        pass
-                except Exception as e:
-                    if stderr_txt:
-                        self.sig_proj_eval_stream.emit("\n")
-                    raise RuntimeError(f"{label}: {type(e).__name__}: {e}") from e
-
-                self.sig_proj_eval_progress.emit(i, len(records))
+                        slice_result = fut.result()
+                    except Exception as e:
+                        slice_result = {
+                            "slice_index": task_slice["slice_index"],
+                            "results": [
+                                {
+                                    "ordinal": record["ordinal"],
+                                    "label": record["label"],
+                                    "id": str(record["sample_row"][0] or "").strip(),
+                                    "stdout": "",
+                                    "tbls": None,
+                                    "results": {},
+                                    "error": f"{type(e).__name__}: {e}",
+                                }
+                                for record in task_slice["records"]
+                            ],
+                        }
+                    for result in slice_result.get("results", []):
+                        _handle_record_result(result)
         finally:
+            _drain_result_queue()
+            if executor is not None:
+                if cancelled:
+                    terminated = _terminate_process_pool(executor)
+                    if not terminated:
+                        executor.shutdown(wait=False, cancel_futures=True)
+                else:
+                    executor.shutdown(wait=True, cancel_futures=True)
+            if manager is not None:
+                manager.shutdown()
             self.proj.clear()
             if all_rows:
                 self.proj.eng.set_sample_list(all_rows)
+
+        completed.sort(key=lambda item: item.get("ordinal", 0))
+        proj_tbls = []
+        result_parts = {}
+        for result in completed:
+            tbls = result.get("tbls")
+            if tbls is not None:
+                proj_tbls.append(tbls)
+            for key, df in (result.get("results") or {}).items():
+                if df is not None:
+                    result_parts.setdefault(key, []).append(df)
 
         all_tbls = None
         if proj_tbls:
             all_tbls = pd.concat(proj_tbls, ignore_index=True)
             all_tbls = all_tbls.drop_duplicates(subset=["Command", "Strata"])
 
-        return {"tbls": all_tbls, "results": proj_results, "cancelled": cancelled}
+        proj_results = {
+            key: pd.concat(parts, ignore_index=True)
+            for key, parts in result_parts.items()
+            if parts
+        }
+
+        return {
+            "tbls": all_tbls,
+            "results": proj_results,
+            "cancelled": cancelled,
+            "errors": errors,
+            "workers": workers,
+        }
 
     def _request_project_eval_cancel(self):
         if not (getattr(self, "_busy", False) and getattr(self, "project_mode", False)):
@@ -834,9 +1187,9 @@ class AnalMixin:
             act.setText("Evaluate (project)")
             return
         if cancel_requested:
-            act.setText("Stopping project eval...")
+            act.setText("Stopping queued records...")
         else:
-            act.setText("Stop after current record")
+            act.setText("Stop project eval")
 
     @Slot(str)
     def _proj_eval_append_stream(self, text):
@@ -860,6 +1213,16 @@ class AnalMixin:
             self._project_results_mode = True
             if tbls is not None:
                 self._render_project_results(tbls)
+            errors = payload.get("errors") or []
+            if errors:
+                shown = "\n".join(errors[:12])
+                more = "" if len(errors) <= 12 else f"\n...and {len(errors) - 12} more."
+                QMessageBox.warning(
+                    self.ui,
+                    "Project evaluation completed with errors",
+                    f"{len(errors)} record(s) failed; successful results were kept.\n\n"
+                    f"{shown}{more}",
+                )
             self._detach_inst_preserve_analysis()
         finally:
             self.unlock_ui()

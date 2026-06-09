@@ -262,8 +262,10 @@ def add_check_column(view, channel_col_before_insert, header_text="✔",
                     out.append(str(_src.data(_src.index(r, _cc))))
         return out
 
+    _last_checked = tuple(_checked())
+
     def _emit_now():
-        nonlocal _scheduled, _in_on_change
+        nonlocal _scheduled, _in_on_change, _last_checked
         if not on_change:
             _scheduled = False
             return
@@ -272,9 +274,13 @@ def add_check_column(view, channel_col_before_insert, header_text="✔",
             _debounce.start(0)
             return
         _scheduled = False
+        checked_now = tuple(_checked())
+        if checked_now == _last_checked:
+            return
+        _last_checked = checked_now
         _in_on_change = True
         try:
-            on_change(_checked())
+            on_change(list(checked_now))
         finally:
             _in_on_change = False
 
@@ -407,7 +413,8 @@ def add_check_column(view, channel_col_before_insert, header_text="✔",
 # ------------------------------------------------------------
         
 def attach_comma_filter(table_view, line_edit, proxy=None):
-    from PySide6.QtCore import Qt, QRegularExpression, QSortFilterProxyModel
+    from PySide6.QtCore import Qt, QRegularExpression, QSortFilterProxyModel, QTimer
+    from shiboken6 import isValid
 
     # create new proxy only if none provided
     if proxy is None:
@@ -420,26 +427,63 @@ def attach_comma_filter(table_view, line_edit, proxy=None):
             proxy.setSourceModel(table_view.model())
             table_view.setModel(proxy)
 
-    def on_text_changed(text: str):
-        parts = [s.strip() for s in text.split(',') if s.strip()]
-        if not parts:
-            proxy.setFilterRegularExpression(QRegularExpression())
-            return
-        esc = [QRegularExpression.escape(p) for p in parts]
-        rx = QRegularExpression("(" + "|".join(esc) + ")")
-        rx.setPatternOptions(QRegularExpression.CaseInsensitiveOption)
-        proxy.setFilterRegularExpression(rx)
+    timer = QTimer(line_edit)
+    timer.setSingleShot(True)
+    timer.setInterval(250)
+    pending_text = {"text": line_edit.text()}
 
-    # avoid duplicate connects
-    if not hasattr(proxy, "_comma_filter_connected"):
-        line_edit.textChanged.connect(on_text_changed)
-        proxy._comma_filter_connected = True
+    def apply_filter():
+        if proxy is None or not isValid(proxy):
+            return
+        text = pending_text["text"]
+        parts = [s.strip() for s in text.split(',') if s.strip()]
+        try:
+            src = proxy.sourceModel()
+        except RuntimeError:
+            return
+        if src is None:
+            return
+        if hasattr(src, "set_filter_terms"):
+            try:
+                src.set_filter_terms(parts)
+            except RuntimeError:
+                return
+        esc = [QRegularExpression.escape(p) for p in parts]
+        rx = QRegularExpression() if not parts else QRegularExpression("(" + "|".join(esc) + ")")
+        if parts:
+            rx.setPatternOptions(QRegularExpression.CaseInsensitiveOption)
+        try:
+            proxy.setFilterRegularExpression(rx)
+        except (AttributeError, RuntimeError):
+            return
+
+    def on_text_changed(text: str):
+        pending_text["text"] = text
+        timer.start()
+
+    old_handler = getattr(line_edit, "_comma_filter_handler", None)
+    if old_handler is not None:
+        try:
+            line_edit.textChanged.disconnect(old_handler)
+        except (TypeError, RuntimeError):
+            pass
+    old_timer = getattr(line_edit, "_comma_filter_timer", None)
+    if old_timer is not None:
+        try:
+            old_timer.stop()
+            old_timer.deleteLater()
+        except RuntimeError:
+            pass
+    timer.timeout.connect(apply_filter)
+    line_edit.textChanged.connect(on_text_changed)
+    line_edit._comma_filter_handler = on_text_changed
+    line_edit._comma_filter_timer = timer
 
     proxy.setFilterKeyColumn(-1)
     proxy.setFilterCaseSensitivity(Qt.CaseInsensitive)
 
     # Apply any filter text already present (e.g. after table re-population)
-    on_text_changed(line_edit.text())
+    apply_filter()
 
     return proxy
 

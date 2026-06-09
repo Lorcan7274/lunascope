@@ -26,6 +26,7 @@ import signal
 import traceback
 import threading
 import faulthandler
+import multiprocessing
 
 from .runtime_paths import app_cache_root
 from .tls import configure_tls
@@ -439,6 +440,7 @@ def main(argv=None) -> int:
 #    faulthandler.enable(all_threads=True)
 #    if hasattr( faulthandler, "register" ):
 #        faulthandler.register(signal.SIGUSR1)  # kill -USR1 <pid> dumps stacks
+    multiprocessing.freeze_support()
 
     args = _parse_args(argv or sys.argv[1:])
     qInstallMessageHandler(_qt_message_handler)

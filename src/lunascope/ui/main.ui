@@ -509,7 +509,7 @@
       <number>0</number>
      </property>
      <item>
-      <widget class="QWidget" name="console_splitter" native="true">
+      <widget class="QWidget" name="console_splitter">
        <layout class="QVBoxLayout" name="verticalLayout_17">
         <property name="spacing">
          <number>0</number>
@@ -825,7 +825,7 @@
         <number>0</number>
        </property>
        <item>
-        <widget class="QWidget" name="anal_out_frame" native="true">
+        <widget class="QWidget" name="anal_out_frame">
          <layout class="QHBoxLayout" name="horizontalLayout_31">
           <item>
            <layout class="QHBoxLayout" name="anal_out_layout">
@@ -1992,7 +1992,7 @@
           <number>0</number>
          </property>
          <item>
-          <widget class="QWidget" name="widget" native="true">
+          <widget class="QWidget" name="widget">
            <layout class="QVBoxLayout" name="verticalLayout_18" stretch="0,5">
             <property name="spacing">
              <number>0</number>
@@ -2121,7 +2121,7 @@
                 <number>0</number>
                </property>
                <item>
-                <widget class="QWidget" name="host_soap" native="true"/>
+                <widget class="QWidget" name="host_soap"/>
                </item>
               </layout>
              </widget>
@@ -2282,7 +2282,7 @@
           </widget>
          </item>
          <item>
-          <widget class="QWidget" name="host_pops" native="true"/>
+          <widget class="QWidget" name="host_pops"/>
          </item>
         </layout>
        </widget>

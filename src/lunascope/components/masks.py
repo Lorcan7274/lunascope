@@ -298,6 +298,8 @@ class MasksMixin:
         self.curr_anns = self.ui.tbl_desc_annots.checked()
 
         self.p.eval_lunascope('MASK ' + msk + ' & RE ')
+        if hasattr(self, "_invalidate_spec_data_cache"):
+            self._invalidate_spec_data_cache()
 
         self._set_render_status(self.rendered, False)
         self._update_metrics()

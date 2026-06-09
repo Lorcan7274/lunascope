@@ -39,6 +39,27 @@ def _reset_figure_axes(ax):
             extra_ax.remove()
     return fig
 
+def _plot_background(show_legend=False):
+    return "white" if show_legend else "black"
+
+def _set_plot_background(ax, show_legend=False):
+    bg = _plot_background(show_legend)
+    ax.figure.patch.set_facecolor(bg)
+    ax.set_facecolor(bg)
+    return bg
+
+def _cmap_with_bad(cmap, bad_color):
+    cm = colormaps[cmap] if isinstance(cmap, str) else cmap
+    try:
+        cm = cm.copy()
+    except AttributeError:
+        pass
+    try:
+        cm.set_bad(bad_color)
+    except AttributeError:
+        pass
+    return cm
+
 @staticmethod
 def hypno(ss, e=None, ax=None, *, title=None, xsize=20, ysize=2, clear=True):
     """Plot a hypnogram into an existing Axes if provided."""
@@ -132,32 +153,26 @@ def spec(ss, e=None, ax=None, *, title=None, xsize=20, ysize=2, clear=True):
 # --------------------------------------------------------------------------------
 # plot a Hjorthgram
 
-@staticmethod
-def plot_hjorth( ch , ax , p , gui , epoch_dur=30, show_legend=False ):
-
-    fig = _reset_figure_axes(ax)
-    ax.clear()
-
-    # get stats
+def derive_hjorth_data(ch, p, winsor=0.0, epoch_dur=30):
     res = p.silent_proc_lunascope(f'EPOCH dur={epoch_dur} verbose & SIGSTATS epoch sig={ch}')
     df = res.get('SIGSTATS: CH_E')
     dt = res.get('EPOCH: E')
     if df is None or dt is None or len(df) == 0 or len(dt) == 0:
-        return ax
+        return None
 
     # Align Hjorth rows to epoch START using E, so gaps map consistently
     # with the spectrogram x-axis.
     if "E" in df.columns and "E" in dt.columns and "START" in dt.columns:
         dx = df[["E"]].merge(dt[["E", "START"]], on="E", how="left")
         if not dx["START"].notna().any():
-            return ax
+            return None
         x = dx["START"].to_numpy(float)
     elif "START" in dt.columns:
         x = dt["START"].to_numpy(float)
         if len(x) != len(df):
             x = x[:len(df)]
     else:
-        return ax
+        return None
     
     def _norm(arr: np.ndarray) -> np.ndarray:
         mn = np.nanmin(arr)
@@ -171,10 +186,33 @@ def plot_hjorth( ch , ax , p , gui , epoch_dur=30, show_legend=False ):
 
 
     # standardize Hjorth values
-    w = gui.spin_win.value()
-    y1 = _norm(winsorize_array(df["H1"].to_numpy(float), w))
-    y2 = _norm(winsorize_array(df["H2"].to_numpy(float), w))
-    y3 = _norm(winsorize_array(df["H3"].to_numpy(float), w))
+    y1 = _norm(winsorize_array(df["H1"].to_numpy(float), winsor))
+    y2 = _norm(winsorize_array(df["H2"].to_numpy(float), winsor))
+    y3 = _norm(winsorize_array(df["H3"].to_numpy(float), winsor))
+
+    return {
+        "x": x,
+        "y1": y1,
+        "y2": y2,
+        "y3": y3,
+        "epoch_dur": float(epoch_dur),
+    }
+
+
+def draw_hjorth_data(data, ax, show_legend=False):
+    fig = _reset_figure_axes(ax)
+    ax.clear()
+
+    if not data:
+        return ax
+
+    x = np.asarray(data["x"], dtype=float)
+    y1 = np.asarray(data["y1"], dtype=float)
+    y2 = np.asarray(data["y2"], dtype=float)
+    y3 = np.asarray(data["y3"], dtype=float)
+    elen = float(data.get("epoch_dur", 30.0))
+    if x.size == 0:
+        return ax
 
     # color axes
     idx2 = np.clip(np.rint(y2 * 99).astype(int), 0, 99)
@@ -183,7 +221,6 @@ def plot_hjorth( ch , ax , p , gui , epoch_dur=30, show_legend=False ):
     colors3 = colormaps["turbo"](y3)
 
     midy = 0
-    elen = epoch_dur
 
     rects_top = [Rectangle((xi, midy), elen, hi) for xi, hi in zip(x, y1)]
     rects_bot = [Rectangle((xi, midy - hi), elen, hi) for xi, hi in zip(x, y1)]
@@ -199,7 +236,7 @@ def plot_hjorth( ch , ax , p , gui , epoch_dur=30, show_legend=False ):
     ax.set_xlim(0, max(x) + elen)
     ax.set_ylim(-1, 1)
     ax.margins(0)
-    ax.figure.patch.set_facecolor("white")
+    _set_plot_background(ax, show_legend)
     ax.set_aspect("auto")
 
     if show_legend:
@@ -227,6 +264,12 @@ def plot_hjorth( ch , ax , p , gui , epoch_dur=30, show_legend=False ):
     return ax
 
 
+@staticmethod
+def plot_hjorth( ch , ax , p , gui , epoch_dur=30, show_legend=False ):
+    data = derive_hjorth_data(ch, p, winsor=gui.spin_win.value(), epoch_dur=epoch_dur)
+    return draw_hjorth_data(data, ax, show_legend=show_legend)
+
+
 # --------------------------------------------------------------------------------
 # plot a spectrogram
         
@@ -245,11 +288,10 @@ def plot_spec( xi,yi,zi, ch, minf, maxf, ax , gui, clear = True, show_legend=Fal
 
     fig = ax.figure
     fig.set_constrained_layout(False)
+    bg = _set_plot_background(ax, show_legend)
     if show_legend:
         fig.subplots_adjust(left=0.08, right=0.86, bottom=0.16, top=0.95, wspace=0, hspace=0)
         ax.set_position([0.08, 0.16, 0.74, 0.79])
-        fig.patch.set_facecolor("white")
-        ax.set_facecolor("white")
     else:
         fig.subplots_adjust(left=0, right=1, bottom=0, top=1, wspace=0, hspace=0)
         ax.set_position([0, 0, 1, 1])
@@ -258,7 +300,7 @@ def plot_spec( xi,yi,zi, ch, minf, maxf, ax , gui, clear = True, show_legend=Fal
     ax.set_ylabel('Frequency (Hz)')
     ax.set_axis_on()
     ax.set_ylim(float(yi[0]), float(yi[-1]))
-    p1 = ax.pcolormesh(xi, yi, zi, cmap = 'turbo' )
+    p1 = ax.pcolormesh(xi, yi, zi, cmap=_cmap_with_bad("turbo", bg))
     if len(xi) > 1:
         ax.set_xlim(0, float(np.nanmax(xi)))
     ax.set_aspect("auto")
@@ -281,11 +323,10 @@ def plot_tf_heatmap(xi, yi, zi, title, ax, *, y_label="Frequency (Hz)",
 
     fig = ax.figure
     fig.set_constrained_layout(False)
+    bg = _set_plot_background(ax, show_legend)
     if show_legend:
         fig.subplots_adjust(left=0.08, right=0.86, bottom=0.16, top=0.95, wspace=0, hspace=0)
         ax.set_position([0.08, 0.16, 0.74, 0.79])
-        fig.patch.set_facecolor("white")
-        ax.set_facecolor("white")
     else:
         fig.subplots_adjust(left=0, right=1, bottom=0, top=1, wspace=0, hspace=0)
         ax.set_position([0, 0, 1, 1])
@@ -307,7 +348,7 @@ def plot_tf_heatmap(xi, yi, zi, title, ax, *, y_label="Frequency (Hz)",
         if vmax <= 0:
             vmax = 1.0
         norm = TwoSlopeNorm(vmin=-vmax, vcenter=0.0, vmax=vmax)
-    p1 = ax.pcolormesh(xi, yi, zi, cmap=cmap, norm=norm)
+    p1 = ax.pcolormesh(xi, yi, zi, cmap=_cmap_with_bad(cmap, bg), norm=norm)
     ax.set_aspect("auto")
     ax.margins(x=0, y=0)
     if len(xi) > 1:

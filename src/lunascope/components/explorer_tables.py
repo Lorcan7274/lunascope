@@ -213,6 +213,43 @@ def _publication_table_plan(summary_df, group_cols=None, stats=None):
     if len(group_cols) == 1:
         group = group_cols[0]
         levels = _levels_for_column(summary_df, group)
+        measure_stat_cols = len(measures) * max(len(stats), 1)
+        if 1 < len(measures) <= 4 and measure_stat_cols <= 10 and stats:
+            columns = [group] + [
+                f"{measure} {stat}"
+                for measure in measures
+                for stat in stats
+            ]
+            header_rows = [
+                [
+                    {"text": group, "rowspan": 2},
+                    *[
+                        {"text": measure, "colspan": len(stats)}
+                        for measure in measures
+                    ],
+                ],
+                [{"text": stat} for _measure in measures for stat in stats],
+            ]
+            rows = []
+            for level in levels:
+                out = [_display_level(level)]
+                for measure in measures:
+                    row = _matching_summary_row(summary_df, [group], [level], measure)
+                    out.extend(
+                        [_format_publication_value(row.get(stat), stat) for stat in stats]
+                        if row is not None else [""] * len(stats)
+                    )
+                rows.append(out)
+            return [
+                {
+                    "title": group,
+                    "columns": columns,
+                    "header_rows": header_rows,
+                    "rows": rows,
+                    "layout": "measure_columns",
+                }
+            ]
+
         if len(levels) <= 8 and len(measures) * max(len(levels), 1) <= 80:
             columns = ["Measure"] + [_display_level(level) for level in levels]
             rows = []
@@ -335,10 +372,30 @@ def _publication_table_html(summary_df, group_cols=None, stats=None, title="", f
     for section in sections:
         if section["title"]:
             parts.append(f"<h3>{_html_escape(section['title'])}</h3>")
-        parts.append("<table><thead><tr>")
-        for col in section["columns"]:
-            parts.append(f"<th>{_html_escape(col)}</th>")
-        parts.append("</tr></thead><tbody>")
+        parts.append("<table><thead>")
+        header_rows = section.get("header_rows")
+        if header_rows:
+            for header_row in header_rows:
+                parts.append("<tr>")
+                for cell in header_row:
+                    text = cell.get("text", "") if isinstance(cell, dict) else cell
+                    attrs = []
+                    if isinstance(cell, dict):
+                        colspan = int(cell.get("colspan", 1) or 1)
+                        rowspan = int(cell.get("rowspan", 1) or 1)
+                        if colspan > 1:
+                            attrs.append(f"colspan='{colspan}'")
+                        if rowspan > 1:
+                            attrs.append(f"rowspan='{rowspan}'")
+                    attr_text = "" if not attrs else " " + " ".join(attrs)
+                    parts.append(f"<th{attr_text}>{_html_escape(text)}</th>")
+                parts.append("</tr>")
+        else:
+            parts.append("<tr>")
+            for col in section["columns"]:
+                parts.append(f"<th>{_html_escape(col)}</th>")
+            parts.append("</tr>")
+        parts.append("</thead><tbody>")
         for row in section["rows"]:
             parts.append("<tr>")
             for cell in row:

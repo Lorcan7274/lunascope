@@ -601,7 +601,10 @@ class MetricsMixin:
                            src=src_sig, target_col=target_src_col, ch_col=CH_SRC_COL):
             if not (top_left.column() <= target_col <= bottom_right.column()):
                 return
-            can_update_backend = hasattr(self, "ss") and getattr(self, "rendered", False)
+            can_update_backend = (
+                getattr(self, "ss", None) is not None
+                and getattr(self, "rendered", False)
+            )
             for r in range(top_left.row(), bottom_right.row() + 1):
                 val = src.index(r, target_col).data(Qt.EditRole) or 'None'
                 ch_label = src.index(r, ch_col).data(Qt.DisplayRole)

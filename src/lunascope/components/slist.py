@@ -70,6 +70,18 @@ def _resolve_sample_list_path(base_dir: str, value: str) -> str:
     return os.path.normpath(os.path.join(base_dir, text))
 
 
+def _term_could_match_numeric(term: str) -> bool:
+    text = str(term or "").strip()
+    if not text:
+        return False
+    if text[0] in "+-":
+        text = text[1:]
+    if text.count(".") > 1:
+        return False
+    text = text.replace(".", "")
+    return bool(text) and text.isdigit()
+
+
 def _read_sample_list_rows(filename: str) -> list[list[str]]:
     base_dir = str(Path(filename).expanduser().resolve().parent)
     rows: list[list[str]] = []
@@ -120,8 +132,13 @@ class NumericSortFilterProxy(QSortFilterProxyModel):
         if not rx.pattern():
             return True
         src = self.sourceModel()
-        if isinstance(src, DataFrameModel) and source_row < len(src._row_text):
-            return bool(rx.match(src._row_text[source_row]).hasMatch())
+        if isinstance(src, DataFrameModel):
+            mask = src.filter_mask()
+            if mask is not None and source_row < len(mask):
+                return bool(mask[source_row])
+            row_text = src.row_text()
+            if source_row < len(row_text):
+                return bool(rx.match(row_text[source_row]).hasMatch())
         return super().filterAcceptsRow(source_row, source_parent)
 
 
@@ -140,37 +157,69 @@ class DataFrameModel(QAbstractTableModel):
         float_decimals_per_col=None,
         preserve_text_cols=None,
         parent=None,
+        coerce_numeric=True,
+        build_row_text=True,
     ):
         super().__init__(parent)
-        # coerce_numeric_df does df.copy() internally — model owns its data
-        # SListMixin is defined later in this same file; resolved at call time
-        self._df = SListMixin.coerce_numeric_df(
-            df,
-            decimals_default=float_decimals_default,
-            decimals_per_col=float_decimals_per_col or {},
-            preserve_text_cols=preserve_text_cols or set(),
-        )
+        if coerce_numeric:
+            # coerce_numeric_df does df.copy() internally — model owns its data
+            # SListMixin is defined later in this same file; resolved at call time
+            self._df = SListMixin.coerce_numeric_df(
+                df,
+                decimals_default=float_decimals_default,
+                decimals_per_col=float_decimals_per_col or {},
+                preserve_text_cols=preserve_text_cols or set(),
+            )
+        else:
+            self._df = df.copy(deep=False)
         digs = float_decimals_per_col or {}
         cols = list(self._df.columns)
         self._col_is_int   = [pd.api.types.is_integer_dtype(self._df[c].dtype) for c in cols]
         self._col_is_float = [pd.api.types.is_float_dtype(self._df[c].dtype)   for c in cols]
         self._float_digs   = [digs.get(c, float_decimals_default) for c in cols]
-        # Pre-compute a tab-joined search string per row for fast proxy filtering.
-        # Built once here; NumericSortFilterProxy.filterAcceptsRow uses it directly.
-        self._row_text = self._build_row_text()
+        self._row_text = self._build_row_text() if build_row_text else None
+        self._filter_mask = None
+
+    def row_text(self) -> list[str]:
+        if self._row_text is None:
+            self._row_text = self._build_row_text()
+        return self._row_text
+
+    def filter_mask(self):
+        return self._filter_mask
+
+    def set_filter_terms(self, terms) -> None:
+        terms = [str(term).casefold() for term in (terms or []) if str(term).strip()]
+        if not terms:
+            self._filter_mask = None
+            return
+
+        scan_numeric = any(_term_could_match_numeric(term) for term in terms)
+        mask = pd.Series(False, index=self._df.index)
+        for c, col in enumerate(self._df.columns):
+            if (self._col_is_int[c] or self._col_is_float[c]) and not scan_numeric:
+                continue
+            s = self._formatted_string_series(col, c).str.casefold()
+            col_mask = pd.Series(False, index=self._df.index)
+            for term in terms:
+                col_mask |= s.str.contains(term, regex=False, na=False)
+            mask |= col_mask
+        self._filter_mask = mask.reset_index(drop=True).to_numpy(dtype=bool, copy=False)
+
+    def _formatted_string_series(self, col, c) -> pd.Series:
+        s = self._df[col]
+        if self._col_is_int[c]:
+            return s.map(lambda v: "" if pd.isna(v) else str(int(v)))
+        if self._col_is_float[c]:
+            digs = self._float_digs[c]
+            return s.map(lambda v, d=digs: "" if pd.isna(v) else f"{float(v):.{d}f}")
+        return s.astype(object).where(~s.isna(), "").astype(str)
 
     def _build_row_text(self) -> list[str]:
         """Build one tab-joined search string per row using vectorised pandas ops."""
         parts = []
         for c, col in enumerate(self._df.columns):
-            s = self._df[col]
-            if self._col_is_int[c]:
-                parts.append(s.apply(lambda v: "" if pd.isna(v) else str(int(v))))
-            elif self._col_is_float[c]:
-                digs = self._float_digs[c]
-                parts.append(s.apply(lambda v, d=digs: "" if pd.isna(v) else f"{float(v):.{d}f}"))
-            else:
-                parts.append(s.fillna("").astype(str))
+            parts.append(self._formatted_string_series(col, c))
         if not parts:
             return [""] * len(self._df)
         combined = parts[0].astype(object)
@@ -1195,6 +1244,8 @@ class SListMixin:
         float_decimals_default: int = 3,
         float_decimals_per_col: dict[str, int] | None = None,
         preserve_text_cols: set[str] | None = None,
+        coerce_numeric: bool = True,
+        build_row_text: bool = True,
     ) -> DataFrameModel:
         """Virtual model — Qt only renders visible cells. Fast for large tables."""
         return DataFrameModel(
@@ -1202,6 +1253,8 @@ class SListMixin:
             float_decimals_default,
             float_decimals_per_col,
             preserve_text_cols,
+            coerce_numeric=coerce_numeric,
+            build_row_text=build_row_text,
         )
 
     @staticmethod

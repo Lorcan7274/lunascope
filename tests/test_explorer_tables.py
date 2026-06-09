@@ -94,6 +94,55 @@ def test_publication_plan_one_factor_uses_levels_as_readable_columns():
     assert plan[0]["rows"] == [["TST", "n=2; 330 (42.426)", "n=2; 450 (42.426)"]]
 
 
+def test_publication_plan_one_factor_few_measures_use_measure_major_columns():
+    df = pd.DataFrame(
+        {
+            "Band": ["ALPHA", "ALPHA", "BETA", "BETA"],
+            "PSD": [1.0, 3.0, 10.0, 14.0],
+            "RELPSD": [0.1, 0.3, 0.4, 0.8],
+        }
+    )
+    summary = _summary_stat_rows(df, ["PSD", "RELPSD"], ["Band"], ["N", "Mean", "SD"])
+
+    plan = _publication_table_plan(summary, ["Band"], ["N", "Mean", "SD"])
+
+    assert plan[0]["layout"] == "measure_columns"
+    assert plan[0]["columns"] == [
+        "Band",
+        "PSD N",
+        "PSD Mean",
+        "PSD SD",
+        "RELPSD N",
+        "RELPSD Mean",
+        "RELPSD SD",
+    ]
+    assert plan[0]["header_rows"] == [
+        [
+            {"text": "Band", "rowspan": 2},
+            {"text": "PSD", "colspan": 3},
+            {"text": "RELPSD", "colspan": 3},
+        ],
+        [{"text": "N"}, {"text": "Mean"}, {"text": "SD"}, {"text": "N"}, {"text": "Mean"}, {"text": "SD"}],
+    ]
+    assert plan[0]["rows"][0] == ["ALPHA", "2", "2", "1.414", "2", "0.2", "0.141"]
+
+
+def test_publication_plan_many_measures_keeps_long_fallback():
+    df = pd.DataFrame(
+        {
+            "Band": ["ALPHA", "BETA"],
+            **{f"M{i}": [float(i), float(i + 1)] for i in range(1, 6)},
+        }
+    )
+    measures = [f"M{i}" for i in range(1, 6)]
+    summary = _summary_stat_rows(df, measures, ["Band"], ["N", "Mean", "SD"])
+
+    plan = _publication_table_plan(summary, ["Band"], ["N", "Mean", "SD"])
+
+    assert plan[0]["layout"] == "long"
+    assert plan[0]["columns"] == ["Band", "Measure", "N", "Mean", "SD"]
+
+
 def test_publication_plan_two_factors_sections_first_factor():
     df = pd.DataFrame(
         {
@@ -126,3 +175,20 @@ def test_publication_html_escapes_text_and_includes_sections():
     assert "Demo &lt;Table&gt;" in html
     assert "A&amp;B" in html
     assert "Power &lt;delta&gt;" in html
+
+
+def test_publication_html_renders_grouped_headers():
+    summary = pd.DataFrame(
+        {
+            "Band": ["A&B", "A&B"],
+            "Measure": ["PSD <x>", "RELPSD"],
+            "N": [2, 2],
+            "Mean": [1.5, 0.2],
+        }
+    )
+
+    html = _publication_table_html(summary, ["Band"], ["N", "Mean"], title="Demo")
+
+    assert "rowspan='2'" in html
+    assert "colspan='2'" in html
+    assert "PSD &lt;x&gt;" in html

@@ -1292,6 +1292,7 @@ class SoapPopsMixin:
             df, has_staging, tbls = self._last_result
             self.pops_df = df
             self._render_pops_hypno()
+            self._set_render_status(False, False)
             # Recreate a minimal self.ssa before _render_tables, which calls
             # self.ssa.populate().  _update_metrics() (inside _render_tables)
             # will do a full rebuild, but we need a valid object first.

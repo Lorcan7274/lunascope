@@ -69,6 +69,7 @@ class SpecMixin:
         self._spec_plot_kind = None
         self._spec_plot_cache = None
         self._spec_cache = {}
+        self._spec_data_version = 0
         self._spec_job_token = 0
         self._spec_zoom_timer = QtCore.QTimer(self.ui)
         self._spec_zoom_timer.setSingleShot(True)
@@ -113,7 +114,6 @@ class SpecMixin:
 
         tabs = QTabWidget(self.ui.frame_3)
         tabs.setObjectName("tab_timefreq")
-        tabs.setMinimumWidth(610)
         tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         tabs.addTab(QtWidgets.QWidget(), "Welch")
         tabs.addTab(QtWidgets.QWidget(), "Hjorth")
@@ -174,7 +174,7 @@ class SpecMixin:
 
         def label(text):
             lab = QLabel(text, self.ui.frame_3)
-            lab.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            lab.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
             lab.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
             return lab
 
@@ -199,18 +199,30 @@ class SpecMixin:
         self.ui.label_mtm_segment = label("Segment")
         self.ui.label_mtm_inc = label("Inc")
         self.ui.label_irasa_component = label("IRASA")
-        layout.addWidget(self.ui.label_mtm_mode, 2, 0)
-        layout.addWidget(self.ui.combo_mtm_mode, 2, 1)
-        layout.addWidget(self.ui.label_mtm_nw, 2, 2)
-        layout.addWidget(self.ui.spin_mtm_nw, 2, 3)
-        layout.addWidget(self.ui.label_mtm_t, 2, 4)
-        layout.addWidget(self.ui.spin_mtm_t, 2, 5)
-        layout.addWidget(self.ui.label_mtm_segment, 2, 6)
-        layout.addWidget(self.ui.spin_mtm_segment, 2, 7)
-        layout.addWidget(self.ui.label_mtm_inc, 2, 8)
-        layout.addWidget(self.ui.spin_mtm_inc, 2, 9)
-        layout.addWidget(self.ui.label_irasa_component, 2, 0)
-        layout.addWidget(self.ui.combo_irasa_component, 2, 1)
+
+        self.ui.panel_mtm_controls = QtWidgets.QWidget(self.ui.frame_3)
+        mtm_layout = QtWidgets.QHBoxLayout(self.ui.panel_mtm_controls)
+        mtm_layout.setContentsMargins(0, 0, 0, 0)
+        mtm_layout.setSpacing(4)
+        for w in (
+            self.ui.label_mtm_mode, self.ui.combo_mtm_mode,
+            self.ui.label_mtm_nw, self.ui.spin_mtm_nw,
+            self.ui.label_mtm_t, self.ui.spin_mtm_t,
+            self.ui.label_mtm_segment, self.ui.spin_mtm_segment,
+            self.ui.label_mtm_inc, self.ui.spin_mtm_inc,
+        ):
+            mtm_layout.addWidget(w)
+        mtm_layout.addStretch(1)
+        layout.addWidget(self.ui.panel_mtm_controls, 2, 0, 1, 12)
+
+        self.ui.panel_irasa_controls = QtWidgets.QWidget(self.ui.frame_3)
+        irasa_layout = QtWidgets.QHBoxLayout(self.ui.panel_irasa_controls)
+        irasa_layout.setContentsMargins(0, 0, 0, 0)
+        irasa_layout.setSpacing(4)
+        irasa_layout.addWidget(self.ui.label_irasa_component)
+        irasa_layout.addWidget(self.ui.combo_irasa_component)
+        irasa_layout.addStretch(1)
+        layout.addWidget(self.ui.panel_irasa_controls, 2, 0, 1, 12)
 
         for w in (
             self.ui.combo_mtm_mode, self.ui.spin_mtm_nw, self.ui.spin_mtm_t,
@@ -262,7 +274,7 @@ class SpecMixin:
         else:
             values = (
                 (self.ui.spin_mtm_segment, 2.0),
-                (self.ui.spin_mtm_inc, 1.0),
+                (self.ui.spin_mtm_inc, 0.1),
                 (self.ui.spin_mtm_nw, 3.0),
             )
         for spin, value in values:
@@ -275,19 +287,63 @@ class SpecMixin:
         mode = self._timefreq_mode()
         is_mtm = mode == "mtm"
         is_irasa = mode == "irasa"
-        for w in (
-            self.ui.combo_mtm_mode, self.ui.spin_mtm_nw, self.ui.spin_mtm_t,
-            self.ui.spin_mtm_segment, self.ui.spin_mtm_inc,
-            self.ui.label_mtm_mode, self.ui.label_mtm_nw, self.ui.label_mtm_t,
-            self.ui.label_mtm_segment, self.ui.label_mtm_inc,
-        ):
-            w.setVisible(is_mtm)
-        self.ui.label_irasa_component.setVisible(is_irasa)
-        self.ui.combo_irasa_component.setVisible(is_irasa)
+        current_kind = getattr(self, "_spec_plot_kind", None)
+        self.ui.panel_mtm_controls.setVisible(is_mtm)
+        self.ui.panel_irasa_controls.setVisible(is_irasa)
         self._set_timefreq_status("")
         self.ui.butt_spectrogram.setText("Run Hjorth" if mode == "hjorth" else "Run")
+
+        if current_kind != mode:
+            if self._restore_cached_timefreq_plot(mode):
+                return
+            self._clear_spectrogram_plot()
+
         if is_mtm and self.ui.combo_mtm_mode.currentData() == "zoom" and self._spec_record_ready():
             self._spec_zoom_timer.start()
+
+    def _restore_cached_timefreq_plot(self, mode):
+        if not hasattr(self, "p"):
+            return False
+        if self.ui.combo_spectrogram.model().rowCount() == 0:
+            return False
+        ch = self._current_channel()
+        if not ch or ch not in self.p.edf.channels():
+            return False
+        if mode == "hjorth":
+            params = self._hjorth_params(ch)
+            key = self._spec_cache_key(mode, params)
+            result = self._spec_cache.get(key)
+            if result is None:
+                return False
+            self._complete_hjorth(result, cache_key=key)
+            return True
+        params = self._spec_params(mode, ch)
+        if params is None:
+            return False
+        if not self._should_cache_timefreq(mode, params):
+            return False
+        key = self._spec_cache_key(mode, params)
+        result = self._spec_cache.get(key)
+        if result is None:
+            return False
+        self._complete_timefreq(mode, result, cache_key=key)
+        return True
+
+    def _clear_spectrogram_plot(self):
+        self._spec_plot_kind = None
+        self._spec_plot_cache = None
+        if getattr(self, "spectrogramcanvas", None) is None:
+            return
+        ax = self.spectrogramcanvas.ax
+        fig = ax.figure
+        for extra_ax in list(fig.axes):
+            if extra_ax is not ax:
+                extra_ax.remove()
+        ax.clear()
+        ax.set_facecolor("black")
+        ax.set_axis_off()
+        fig.patch.set_facecolor("black")
+        self.spectrogramcanvas.draw_idle()
 
     def _on_spec_channel_changed(self, *_):
         """Auto-set frequency spin boxes to sensible limits for the selected channel's SR."""
@@ -333,6 +389,10 @@ class SpecMixin:
 
     def _invalidate_spec_cache(self, *_):
         self._spec_cache = {}
+
+    def _invalidate_spec_data_cache(self, *_):
+        self._spec_data_version = int(getattr(self, "_spec_data_version", 0) or 0) + 1
+        self._invalidate_spec_cache()
 
     # ------------------------------------------------------------    
     # right-click menus to save/copy images
@@ -476,8 +536,9 @@ class SpecMixin:
         params = self._spec_params(mode, ch)
         if params is None:
             return
-        key = self._spec_cache_key(mode, params)
-        if key in self._spec_cache:
+        use_cache = self._should_cache_timefreq(mode, params)
+        key = self._spec_cache_key(mode, params) if use_cache else None
+        if use_cache and key in self._spec_cache:
             self._complete_timefreq(mode, self._spec_cache[key], cache_key=key)
             return
 
@@ -547,7 +608,14 @@ class SpecMixin:
         return int(segs * bins)
 
     def _spec_cache_key(self, mode, params):
-        pieces = [mode, params.get("ch"), params.get("minf"), params.get("maxf"), params.get("winsor")]
+        pieces = [
+            int(getattr(self, "_spec_data_version", 0) or 0),
+            mode,
+            params.get("ch"),
+            params.get("minf"),
+            params.get("maxf"),
+            params.get("winsor"),
+        ]
         if mode == "mtm":
             pieces.extend([
                 params.get("mtm_mode"), params.get("nw"), params.get("t"),
@@ -555,7 +623,21 @@ class SpecMixin:
             ])
             if params.get("mtm_mode") == "zoom":
                 pieces.extend([round(float(params.get("lo", 0.0)), 3), round(float(params.get("hi", 0.0)), 3)])
+        elif mode == "hjorth":
+            pieces.append(params.get("epoch_dur"))
         return tuple(pieces)
+
+    def _should_cache_timefreq(self, mode, params):
+        return not (mode == "mtm" and params.get("mtm_mode") == "zoom")
+
+    def _hjorth_params(self, ch):
+        return {
+            "ch": ch,
+            "minf": None,
+            "maxf": None,
+            "winsor": float(self.ui.spin_win.value()),
+            "epoch_dur": self._get_epoch_dur(),
+        }
 
     def _derive_timefreq(self, p, mode, params):
         if mode == "welch":
@@ -577,7 +659,8 @@ class SpecMixin:
             token, mode, key, result = self._last_result
             if token != self._spec_job_token:
                 return
-            self._spec_cache[key] = result
+            if key is not None:
+                self._spec_cache[key] = result
             self._complete_timefreq(mode, result, cache_key=key)
         finally:
             self._end_spec_job()
@@ -656,14 +739,86 @@ class SpecMixin:
             return np.array([]), np.array([]), np.array([])
         xs = np.sort(np.unique(x))
         ys = np.sort(np.unique(y))
-        xi = x_edges if x_edges is not None else self._edges_from_centers(xs, default_x_step)
-        yi = y_edges if y_edges is not None else self._edges_from_centers(ys, 1.0)
-        x_index = {v: i for i, v in enumerate(xs)}
+        xi = np.asarray(x_edges, dtype=float) if x_edges is not None else self._edges_from_centers(xs, default_x_step)
+        yi = np.asarray(y_edges, dtype=float) if y_edges is not None else self._edges_from_centers(ys, 1.0)
+        if xi.size < 2 or yi.size < 2:
+            return np.array([]), np.array([]), np.array([])
+        if x_edges is None:
+            x_lookup = {v: i for i, v in enumerate(xs)}
+            x_bins = np.array([x_lookup[v] for v in x], dtype=int)
+            xn = xs.size
+        else:
+            x_bins = np.searchsorted(xi, x, side="right") - 1
+            x_bins[x == xi[-1]] = xi.size - 2
+            xn = xi.size - 1
         y_index = {v: i for i, v in enumerate(ys)}
-        zi = np.full((ys.size, xs.size), np.nan, dtype=float)
-        for xv, yv, zv in zip(x, y, z):
-            zi[y_index[yv], x_index[xv]] = zv
+        zi = np.full((ys.size, xn), np.nan, dtype=float)
+        for xb, yv, zv in zip(x_bins, y, z):
+            if 0 <= xb < xn:
+                zi[y_index[yv], xb] = zv
         return xi, yi, np.ma.masked_invalid(zi)
+
+    def _grid_elapsed_points(
+        self,
+        x,
+        y,
+        z,
+        minf,
+        maxf,
+        w,
+        *,
+        total_epochs=0,
+        total_seconds=0.0,
+        timeline_starts=None,
+    ):
+        x = np.asarray(x, dtype=float)
+        y = np.asarray(y, dtype=float)
+        z = np.asarray(z, dtype=float)
+
+        ok = np.isfinite(x) & np.isfinite(y) & np.isfinite(z) & (y >= minf) & (y <= maxf)
+        x = x[ok]
+        y = y[ok]
+        z = winsorize_array(z[ok], w)
+        if x.size == 0 or y.size == 0:
+            return np.array([]), np.array([]), np.array([])
+
+        x0 = float(np.min(x))
+        x1 = float(np.max(x))
+        xn = int(np.unique(x).size)
+        if total_epochs is not None and int(total_epochs) > 0 and total_seconds is not None and float(total_seconds) > 0:
+            x0 = 0.0
+            x1 = float(total_seconds)
+            xn = int(total_epochs)
+        elif timeline_starts is not None:
+            xt = np.sort(np.unique(np.asarray(timeline_starts, dtype=float)))
+            xt = xt[np.isfinite(xt)]
+            if xt.size > 0:
+                step = 1.0
+                if xt.size > 1:
+                    d = np.diff(xt)
+                    d = d[d > 0]
+                    if d.size > 0:
+                        step = float(np.median(d))
+                x0 = float(xt[0])
+                x1 = float(xt[-1] + step)
+                xn = int(xt.size)
+
+        yn = np.unique(y).size
+        if xn < 1 or yn < 1:
+            return np.array([]), np.array([]), np.array([])
+        if not np.isfinite(x0) or not np.isfinite(x1) or x1 <= x0:
+            return np.array([]), np.array([]), np.array([])
+
+        zi, yi, xi = np.histogram2d(
+            y, x, bins=(yn, xn), range=((minf, maxf), (x0, x1)), weights=z, density=False
+        )
+        counts, _, _ = np.histogram2d(
+            y, x, bins=(yn, xn), range=((minf, maxf), (x0, x1))
+        )
+        with np.errstate(divide="ignore", invalid="ignore"):
+            zi = zi / counts
+            zi = np.ma.masked_invalid(zi)
+        return xi, yi, zi
 
     def _epoch_starts(self, res):
         dt = res.get("EPOCH: E")
@@ -686,12 +841,16 @@ class SpecMixin:
             if df is None or df.empty or starts is None:
                 return {"xi": np.array([]), "yi": np.array([]), "zi": np.array([]), "title": "MTM"}
             merged = df.merge(starts, on="E", how="left")
-            xi, yi, zi = self._grid_from_points(
+            xi, yi, zi = self._grid_elapsed_points(
                 merged["START"].to_numpy(float),
                 merged["F"].to_numpy(float),
                 merged["MTM"].to_numpy(float),
-                default_x_step=30.0,
-                winsor=params["winsor"],
+                params["minf"],
+                params["maxf"],
+                params["winsor"],
+                total_epochs=params.get("ne", 0),
+                total_seconds=params.get("ns", 0.0),
+                timeline_starts=starts["START"].to_numpy(float),
             )
             freqs = np.sort(np.unique(merged["F"].to_numpy(float)))
             fres = float(np.nanmedian(np.diff(freqs))) if freqs.size > 1 else np.nan
@@ -706,7 +865,13 @@ class SpecMixin:
             }
 
         lo, hi = float(params["lo"]), float(params["hi"])
-        cmd = f"{base} segment-spectra start={lo:.6g} stop={hi:.6g}"
+        half_seg = max(0.0, float(params["segment"]) / 2.0)
+        req_lo = max(0.0, lo - half_seg)
+        req_hi = hi + half_seg
+        ns = float(params.get("ns", 0.0) or 0.0)
+        if ns > 0:
+            req_hi = min(ns, req_hi)
+        cmd = f"{base} segment-spectra start={req_lo:.6g} stop={req_hi:.6g}"
         res = p.silent_proc_lunascope(cmd)
         df = res.get("MTM: CH_F_SEG")
         seg = res.get("MTM: CH_SEG")
@@ -718,15 +883,15 @@ class SpecMixin:
         if merged.empty:
             return {"xi": np.array([]), "yi": np.array([]), "zi": np.array([]), "title": "MTM zoom"}
         x_centers = 0.5 * (merged["START"].to_numpy(float) + merged["STOP"].to_numpy(float))
-        starts = np.sort(np.unique(merged["START"].to_numpy(float)))
-        stops = np.sort(np.unique(merged["STOP"].to_numpy(float)))
-        if starts.size and stops.size and starts.size == stops.size:
-            x_edges = np.concatenate([[starts[0]], stops])
-        else:
-            x_edges = None
+        edge_tol = max(1e-9, float(params["inc"]) * 1e-6)
+        in_view = (x_centers >= lo - edge_tol) & (x_centers <= hi + edge_tol)
+        merged = merged.loc[in_view].copy()
+        x_centers = x_centers[in_view]
+        if merged.empty:
+            return {"xi": np.array([]), "yi": np.array([]), "zi": np.array([]), "title": "MTM zoom"}
         xi, yi, zi = self._grid_from_points(
             x_centers, merged["F"].to_numpy(float), merged["MTM"].to_numpy(float),
-            x_edges=x_edges, default_x_step=float(params["inc"]), winsor=params["winsor"],
+            default_x_step=float(params["inc"]), winsor=params["winsor"],
         )
         freqs = np.sort(np.unique(merged["F"].to_numpy(float)))
         fres = float(np.nanmedian(np.diff(freqs))) if freqs.size > 1 else np.nan
@@ -752,12 +917,16 @@ class SpecMixin:
         merged = df.merge(starts, on="E", how="left")
         components = {}
         for value_col, label in (("APER", "Aperiodic"), ("PER", "Periodic")):
-            xi, yi, zi = self._grid_from_points(
+            xi, yi, zi = self._grid_elapsed_points(
                 merged["START"].to_numpy(float),
                 merged["F"].to_numpy(float),
                 merged[value_col].to_numpy(float),
-                default_x_step=30.0,
-                winsor=params["winsor"],
+                params["minf"],
+                params["maxf"],
+                params["winsor"],
+                total_epochs=params.get("ne", 0),
+                total_seconds=params.get("ns", 0.0),
+                timeline_starts=starts["START"].to_numpy(float),
             )
             components[value_col] = {
                 "xi": xi, "yi": yi, "zi": zi, "title": f"IRASA {label} {params['ch']}",
@@ -908,57 +1077,21 @@ class SpecMixin:
         if x is None:
             x = df['E'].to_numpy(dtype=float)
 
-        y = df['F'].to_numpy(dtype=float)
-        z = df[ 'PSD' ].to_numpy(dtype=float)
+        timeline_starts = None
+        if dt is not None and 'START' in dt.columns and len(dt) > 0:
+            timeline_starts = dt['START'].to_numpy(dtype=float)
 
-        incl = np.zeros(len(df), dtype=bool)
-        incl[ (y >= minf) & (y <= maxf) ] = True
-        x = x[ incl ]
-        y = y[ incl ]
-        z = z[ incl ]
-        z = winsorize_array(z, w)
-
-        if x.size == 0 or y.size == 0:
-            return np.array([]), np.array([]), np.array([])
-
-        # Use full epoch timeline bounds; prefer known full-record bounds
-        # so masked runs keep the same temporal resolution.
-        x0 = float(np.min(x))
-        x1 = float(np.max(x))
-        xn = int(np.unique(x).size)
-        if total_epochs is not None and int(total_epochs) > 0 and total_seconds is not None and float(total_seconds) > 0:
-            x0 = 0.0
-            x1 = float(total_seconds)
-            xn = int(total_epochs)
-        elif dt is not None and 'START' in dt.columns and len(dt) > 0:
-            xt = np.sort(np.unique(dt['START'].to_numpy(dtype=float)))
-            if xt.size > 0:
-                step = 1.0
-                if xt.size > 1:
-                    d = np.diff(xt)
-                    d = d[d > 0]
-                    if d.size > 0:
-                        step = float(np.median(d))
-                x0 = float(xt[0])
-                x1 = float(xt[-1] + step)
-                xn = int(xt.size)
-
-        yn = np.unique(y).size
-        if xn < 1 or yn < 1:
-            return np.array([]), np.array([]), np.array([])
-        if not np.isfinite(x0) or not np.isfinite(x1) or x1 <= x0:
-            return np.array([]), np.array([]), np.array([])
-        zi, yi, xi = np.histogram2d(
-            y, x, bins=(yn, xn), range=((minf, maxf), (x0, x1)), weights=z, density=False
+        return self._grid_elapsed_points(
+            x,
+            df['F'].to_numpy(dtype=float),
+            df['PSD'].to_numpy(dtype=float),
+            minf,
+            maxf,
+            w,
+            total_epochs=total_epochs,
+            total_seconds=total_seconds,
+            timeline_starts=timeline_starts,
         )
-        counts, _, _ = np.histogram2d(
-            y, x, bins=(yn, xn), range=((minf, maxf), (x0, x1))
-        )
-        with np.errstate(divide='ignore', invalid='ignore'):
-            zi = zi / counts
-            zi = np.ma.masked_invalid(zi)
-
-        return xi, yi, zi
 
 
     def _complete_spectrogram(self,xi,yi,zi):
@@ -1013,21 +1146,46 @@ class SpecMixin:
         if ch not in self.p.edf.channels():
             return
 
-        # do plot
-        self._spec_plot_kind = "hjorth"
-        self._spec_plot_cache = None
-        self._draw_hjorth_plot()
+        params = self._hjorth_params(ch)
+        key = self._spec_cache_key("hjorth", params)
+        result = self._spec_cache.get(key)
+        if result is None:
+            from .plts import derive_hjorth_data
+            result = derive_hjorth_data(
+                ch,
+                self.p,
+                winsor=params["winsor"],
+                epoch_dur=params["epoch_dur"],
+            )
+            if result is not None:
+                self._spec_cache[key] = result
+        self._complete_hjorth(result, cache_key=key)
 
-    def _draw_hjorth_plot(self):
+    def _complete_hjorth(self, result, cache_key=None):
+        self._spec_plot_kind = "hjorth"
+        self._spec_plot_cache = result
+        self._draw_hjorth_plot(result)
+
+    def _draw_hjorth_plot(self, result=None):
         if not hasattr(self, "p"):
             return
         ch = self._current_channel()
         if not ch:
             return
-        from .plts import plot_hjorth
-        plot_hjorth( ch , ax=self.spectrogramcanvas.ax , p = self.p , gui = self.ui ,
-                     epoch_dur=self._get_epoch_dur(),
-                     show_legend=self._show_spec_legend() )
+        if result is None:
+            result = getattr(self, "_spec_plot_cache", None)
+        if result is None:
+            params = self._hjorth_params(ch)
+            from .plts import derive_hjorth_data
+            result = derive_hjorth_data(
+                ch,
+                self.p,
+                winsor=params["winsor"],
+                epoch_dur=params["epoch_dur"],
+            )
+        from .plts import draw_hjorth_data
+        draw_hjorth_data(result, ax=self.spectrogramcanvas.ax,
+                         show_legend=self._show_spec_legend())
         ns = getattr(self, "ns", None)
         if ns is not None and ns > 0:
             self.spectrogramcanvas.ax.set_xlim(0, float(ns))

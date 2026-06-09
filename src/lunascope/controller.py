@@ -143,6 +143,11 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         if hasattr(self, "_apply_signal_font_scale"):
             self._apply_signal_font_scale(scale)
 
+    @staticmethod
+    def _force_plain_dock_container(widget):
+        widget.setAttribute(Qt.WA_NativeWindow, False)
+        widget.setAttribute(Qt.WA_DontCreateNativeAncestors, True)
+
     def __init__(self, ui, proj):
 
         super().__init__()
@@ -385,6 +390,7 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
 
         # add QSplitter for console
         container = self.ui.console_splitter
+        self._force_plain_dock_container(container)
         layout = container.layout()  # that's your console_layout
         splitter = QSplitter(Qt.Vertical)
         self.ui.txt_out.setParent(None)
@@ -396,6 +402,7 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         
         # add QSplitter for output
         container2 = self.ui.anal_out_frame
+        self._force_plain_dock_container(container2)
         layout2 = container2.layout()  # that's your console_layout
         self.ui.anal_tables.setParent(None)
         self.ui.anal_right_table.setParent(None)
@@ -403,6 +410,10 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         splitter2.addWidget(self.ui.anal_tables)
         splitter2.addWidget(self.ui.anal_right_table)
         layout2.addWidget(splitter2)
+        for name in ("widget", "host_soap", "host_pops"):
+            host = getattr(self.ui, name, None)
+            if host is not None:
+                self._force_plain_dock_container(host)
 
         # short keyboard cuts
         add_dock_shortcuts( self.ui, self.ui.menuView, self._toggle_signals_only_or_default, self._reset_to_default_layout )
@@ -778,6 +789,8 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
             else:
                 self.p = self.proj.inst( id_str )
             self._profile_attach_mark("proj.inst")
+            if hasattr(self, "_invalidate_spec_data_cache"):
+                self._invalidate_spec_data_cache()
         except Exception as e:
             QMessageBox.critical(
                 self.ui,

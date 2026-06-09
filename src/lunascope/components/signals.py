@@ -1767,6 +1767,10 @@ class SignalsMixin:
 
         self.pg1_footer_height = 0.025
 
+        if getattr(self, "rendered", False) and getattr(self, "ss", None) is None:
+            self._set_render_status(False, False)
+            return
+
         if not self._signal_plot_ready():
             return
 
@@ -1778,41 +1782,43 @@ class SignalsMixin:
         if len(self.ss_chs) == 0:
             self.pg1_annot_height = 0.8
 
-        # if cmap values specifed, use those
-        ch_set = [ ]
-        for ch in self.ss_chs:
-            if ch in self.cmap_fixed_min:
-                self.ss.fix_physical_scale( ch , self.cmap_fixed_min[ch] , self.cmap_fixed_max[ch] )
-                ch_set.append( ch )
-            elif self._channel_uses_pp_display(ch):
-                lo, hi = self._resolve_channel_phys_range(ch)
-                self.ss.fix_physical_scale(ch, lo, hi)
-                ch_set.append(ch)
-            
-        # use empirical vals (default) 
-        if self.ui.radio_empiric.isChecked():
+        if self.rendered is True:
+            # Rendered mode uses segsrv-backed scaling.  Simple mode scales raw
+            # slices in _update_pg1_simple(), and may have no self.ss after POPS.
+            ch_set = [ ]
             for ch in self.ss_chs:
-                if ch not in ch_set:
-                    self.ss.empirical_physical_scale( ch )
+                if ch in self.cmap_fixed_min:
+                    self.ss.fix_physical_scale( ch , self.cmap_fixed_min[ch] , self.cmap_fixed_max[ch] )
+                    ch_set.append( ch )
+                elif self._channel_uses_pp_display(ch):
+                    lo, hi = self._resolve_channel_phys_range(ch)
+                    self.ss.fix_physical_scale(ch, lo, hi)
+                    ch_set.append(ch)
 
-            # & turn off other fixed scale , if set
-            if self.ui.radio_fixedscale.isChecked() :
-                with QSignalBlocker(self.ui.radio_fixedscale):
-                    self.ui.radio_fixedscale.setChecked(False)
+            # use empirical vals (default)
+            if self.ui.radio_empiric.isChecked():
+                for ch in self.ss_chs:
+                    if ch not in ch_set:
+                        self.ss.empirical_physical_scale( ch )
 
-        elif self.ui.radio_fixedscale.isChecked():
-            lwr = self.ui.spin_fixed_min.value()
-            upr = self.ui.spin_fixed_max.value()
-            if lwr >= upr:   # degenerate range: fall back to unit defaults
-                lwr = -1
-                upr = +1
-            for ch in self.ss_chs:
-                if ch not in ch_set:
-                    self.ss.fix_physical_scale( ch , lwr, upr )
-        else:
-            for ch in self.ss_chs:
-                if ch not in ch_set:
-                    self.ss.free_physical_scale( ch )
+                # & turn off other fixed scale , if set
+                if self.ui.radio_fixedscale.isChecked() :
+                    with QSignalBlocker(self.ui.radio_fixedscale):
+                        self.ui.radio_fixedscale.setChecked(False)
+
+            elif self.ui.radio_fixedscale.isChecked():
+                lwr = self.ui.spin_fixed_min.value()
+                upr = self.ui.spin_fixed_max.value()
+                if lwr >= upr:   # degenerate range: fall back to unit defaults
+                    lwr = -1
+                    upr = +1
+                for ch in self.ss_chs:
+                    if ch not in ch_set:
+                        self.ss.fix_physical_scale( ch , lwr, upr )
+            else:
+                for ch in self.ss_chs:
+                    if ch not in ch_set:
+                        self.ss.free_physical_scale( ch )
 
         self.clip_signals = self.ui.radio_clip.isChecked()
         

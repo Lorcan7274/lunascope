@@ -231,7 +231,7 @@ class AppFontController(QObject):
 
     def create_actions(self, parent):
         act_larger = QAction("Larger Text", parent)
-        act_larger.setShortcuts([QKeySequence("Ctrl+="), QKeySequence("Ctrl+Shift+=")])
+        act_larger.setShortcut(QKeySequence("Ctrl+Shift+="))
         act_larger.setShortcutContext(Qt.ApplicationShortcut)
         act_larger.triggered.connect(self.increase)
 
