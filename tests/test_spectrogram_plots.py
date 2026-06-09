@@ -106,7 +106,10 @@ def test_heatmap_background_black_after_hjorth_compact_redraw():
 
         assert ax.get_facecolor()[:3] == (0.0, 0.0, 0.0)
         assert fig.get_facecolor()[:3] == (0.0, 0.0, 0.0)
-        assert ax.collections[0].cmap.get_bad()[:3] == (0.0, 0.0, 0.0)
+        np.testing.assert_allclose(
+            ax.collections[0].cmap.get_bad()[:3],
+            (0.0, 0.0, 0.0),
+        )
     finally:
         plt.close(fig)
 

@@ -103,8 +103,9 @@ def test_filter_design_tab_constructs(qapp):
     tab = FilterDesignTab(ctrl)
     try:
         assert tab.widget() is not None
-        assert tab._subtabs.count() == 2
+        assert tab._subtabs.count() == 3
         assert tab._subtabs.tabText(0) == "FIR"
-        assert tab._subtabs.tabText(1) == "CWT"
+        assert tab._subtabs.tabText(1) == "NGaus"
+        assert tab._subtabs.tabText(2) == "CWT"
     finally:
         ctrl._exec.shutdown(wait=False, cancel_futures=True)

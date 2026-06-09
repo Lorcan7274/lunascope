@@ -250,7 +250,7 @@ def _publication_table_plan(summary_df, group_cols=None, stats=None):
                 }
             ]
 
-        if len(levels) <= 8 and len(measures) * max(len(levels), 1) <= 80:
+        if len(measures) <= 4 and len(levels) <= 8 and len(measures) * max(len(levels), 1) <= 80:
             columns = ["Measure"] + [_display_level(level) for level in levels]
             rows = []
             for measure in measures:

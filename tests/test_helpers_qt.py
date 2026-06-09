@@ -76,7 +76,7 @@ def test_clear_rows_handles_none_model(qapp):
     clear_rows(view)
 
 
-def test_add_dock_shortcuts_registers_windows_friendly_reset_shortcut(qapp):
+def test_add_dock_shortcuts_keeps_ctrl_r_layout_reset_shortcut(qapp):
     from PySide6.QtGui import QAction
     from PySide6.QtWidgets import QMainWindow, QMenu
 
@@ -95,9 +95,9 @@ def test_add_dock_shortcuts_registers_windows_friendly_reset_shortcut(qapp):
     )
     shortcuts = {seq.toString() for seq in reset_action.shortcuts()}
 
-    assert "Ctrl+R" not in shortcuts
-    assert "Ctrl+)" in shortcuts
-    assert "Ctrl+Shift+0" in shortcuts
+    assert "Ctrl+R" in shortcuts
+    assert "Ctrl+)" not in shortcuts
+    assert "Ctrl+Shift+0" not in shortcuts
     assert mask_action.shortcut().toString() == "Ctrl+-"
 
 
@@ -237,7 +237,8 @@ def test_font_controller_actions_do_not_use_mask_subset_shortcut(qapp, tmp_path)
         "Smaller Text",
         "Reset Text Size",
     ]
-    assert "Ctrl+R" in shortcuts
+    assert "Ctrl+Shift+R" in shortcuts
+    assert "Ctrl+R" not in shortcuts
     assert "Ctrl+-" not in shortcuts
 
 
