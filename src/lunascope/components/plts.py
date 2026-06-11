@@ -230,7 +230,7 @@ def draw_hjorth_data(data, ax, show_legend=False):
     ax.add_collection(pc_bot)
 
 
-    fig.set_constrained_layout(False)      # or: fig.set_layout_engine(None)
+    fig.set_layout_engine(None)
     ax.margins(x=0, y=0)
 
     ax.set_xlim(0, max(x) + elen)
@@ -287,7 +287,7 @@ def plot_spec( xi,yi,zi, ch, minf, maxf, ax , gui, clear = True, show_legend=Fal
     if len(xi) == 0: return ax
 
     fig = ax.figure
-    fig.set_constrained_layout(False)
+    fig.set_layout_engine(None)
     bg = _set_plot_background(ax, show_legend)
     if show_legend:
         fig.subplots_adjust(left=0.08, right=0.86, bottom=0.16, top=0.95, wspace=0, hspace=0)
@@ -322,7 +322,7 @@ def plot_tf_heatmap(xi, yi, zi, title, ax, *, y_label="Frequency (Hz)",
         ax.clear()
 
     fig = ax.figure
-    fig.set_constrained_layout(False)
+    fig.set_layout_engine(None)
     bg = _set_plot_background(ax, show_legend)
     if show_legend:
         fig.subplots_adjust(left=0.08, right=0.86, bottom=0.16, top=0.95, wspace=0, hspace=0)

@@ -280,11 +280,6 @@ class MetricsMixin:
 
     def _init_metrics(self):
         self._apply_compact_dock_styles()
-        self._pending_instance_annots = []
-        self._instances_update_dirty = False
-        self._instances_update_timer = QTimer(self.ui)
-        self._instances_update_timer.setSingleShot(True)
-        self._instances_update_timer.timeout.connect(self._flush_instances_update)
         if hasattr(self.ui, "dock_annots"):
             self.ui.dock_annots.visibilityChanged.connect(self._on_instances_dock_visibility_changed)
         
@@ -764,34 +759,23 @@ class MetricsMixin:
     # populate annotation instances (updated when annots selected)
 
     def _mark_instances_dirty(self, anns):
-        self._pending_instance_annots = list(anns or [])
-        self._instances_update_dirty = True
+        self._update_instances(anns)
 
     def _update_instances(self, anns):
-        self._pending_instance_annots = list(anns or [])
         if not getattr(self.ui, "dock_annots", None) or not self.ui.dock_annots.isVisible():
-            self._instances_update_dirty = True
-            return
-        self._instances_update_dirty = False
-        self._instances_update_timer.start(0)
-
-    def _on_instances_dock_visibility_changed(self, visible: bool):
-        if visible and (self._instances_update_dirty or self._pending_instance_annots):
-            self._instances_update_timer.start(0)
-
-    def _flush_instances_update(self):
-        if not getattr(self.ui, "dock_annots", None) or not self.ui.dock_annots.isVisible():
-            self._instances_update_dirty = True
             return
         if getattr(self, "ssa", None) is None:
-            self._instances_update_dirty = True
             return
-        self._instances_update_dirty = False
-        self._rebuild_instances_table(list(self._pending_instance_annots))
+        self._rebuild_instances_table(list(anns or []))
+
+    def _on_instances_dock_visibility_changed(self, visible: bool):
+        if not visible or getattr(self, "ssa", None) is None:
+            return
+        anns = self.ui.tbl_desc_annots.checked() if hasattr(self.ui.tbl_desc_annots, "checked") else []
+        self._rebuild_instances_table(list(anns))
 
     def _rebuild_instances_table(self, anns):
         if getattr(self, "ssa", None) is None:
-            self._instances_update_dirty = True
             return
 
         # request w/ hms=True; new API returns 9 cols:

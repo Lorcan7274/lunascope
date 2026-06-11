@@ -685,111 +685,6 @@ def _full_source_table(path, member=None, proj=None):
     raise ValueError(f"Unsupported source type: {path}")
 
 
-def _repeated_manifest_from_columns(metric_cols, meta_cols=None):
-    """Build a minimal manifest-like frame for repeated-observation metrics."""
-    metric_cols = [str(col) for col in metric_cols if str(col).strip()]
-    meta_cols = [str(col) for col in (meta_cols or []) if str(col).strip()]
-    rows = []
-    for col in metric_cols:
-        row = {"VAR": col, "BASE": col, "GRP": ".", "NI": ""}
-        for meta_col in meta_cols:
-            row[meta_col] = ""
-        rows.append(row)
-    return pd.DataFrame(rows, columns=["VAR", "BASE", "GRP", "NI"] + meta_cols)
-
-
-def _build_repeated_matrix(
-    source_df: pd.DataFrame,
-    subject_id_col: str,
-    obs_key_cols,
-    metric_cols,
-    meta_cols=None,
-    filters=None,
-):
-    """Return an explorer-local repeated-observation matrix plus metadata."""
-    if source_df is None or source_df.empty:
-        raise ValueError("Selected source table is empty.")
-
-    obs_key_cols = [str(col) for col in (obs_key_cols or []) if str(col).strip()]
-    metric_cols = [str(col) for col in (metric_cols or []) if str(col).strip()]
-    meta_cols = [str(col) for col in (meta_cols or []) if str(col).strip()]
-    if not subject_id_col:
-        raise ValueError("Select a subject ID column.")
-    if not obs_key_cols:
-        raise ValueError("Select at least one observation key column.")
-    if not metric_cols:
-        raise ValueError("Select at least one metric column.")
-
-    needed = _unique_preserve([subject_id_col] + obs_key_cols + metric_cols + meta_cols)
-    missing = [col for col in needed if col not in source_df.columns]
-    if missing:
-        raise ValueError("Missing source columns: " + ", ".join(missing[:8]))
-
-    work = source_df[needed].copy()
-    work = work.replace(".", np.nan)
-    filters = filters or {}
-    applied_filters = {}
-    for col, keep_vals in filters.items():
-        vals = [str(v).strip() for v in keep_vals if str(v).strip()]
-        if not vals or col not in work.columns:
-            continue
-        applied_filters[col] = vals
-        work = work[work[col].astype(str).isin(set(vals))].copy()
-    if work.empty:
-        raise ValueError("No rows remain after applying repeated-observation filters.")
-
-    key_block = work[[subject_id_col] + obs_key_cols].copy()
-    missing_mask = key_block.isna() | key_block.astype(str).apply(lambda s: s.str.strip() == "")
-    if bool(missing_mask.any(axis=1).any()):
-        bad = work.loc[missing_mask.any(axis=1), [subject_id_col] + obs_key_cols].head(5)
-        raise ValueError(
-            "Missing subject/key values in repeated-observation columns.\n"
-            + bad.to_string(index=False)
-        )
-
-    safe = key_block.astype(str).apply(lambda s: s.str.replace("|", "/", regex=False))
-    tmp_id = safe[[subject_id_col] + obs_key_cols].agg("|".join, axis=1)
-    dup_mask = tmp_id.duplicated(keep=False)
-    if bool(dup_mask.any()):
-        dup = work.loc[dup_mask, [subject_id_col] + obs_key_cols].head(8)
-        raise ValueError(
-            "Repeated-observation key does not uniquely identify rows.\n"
-            + dup.to_string(index=False)
-        )
-
-    matrix = work.copy()
-    matrix.insert(0, "RID", tmp_id.tolist())
-    if subject_id_col != "ID":
-        matrix.insert(1, "ID", work[subject_id_col].astype(str).tolist())
-    else:
-        matrix["ID"] = matrix["ID"].astype(str)
-    for col in metric_cols:
-        matrix[col] = pd.to_numeric(matrix[col], errors="coerce")
-
-    manifest = _repeated_manifest_from_columns(metric_cols, meta_cols=meta_cols)
-    for col in meta_cols:
-        levels = sorted({
-            str(v).strip()
-            for v in work[col].dropna().astype(str).tolist()
-            if str(v).strip() and str(v).strip() != "."
-        })
-        joined = ", ".join(levels[:8])
-        if len(levels) > 8:
-            joined += ", …"
-        manifest[col] = joined
-
-    return {
-        "matrix": matrix,
-        "manifest": manifest,
-        "row_count": int(len(matrix)),
-        "subject_count": int(matrix["ID"].astype(str).nunique()) if "ID" in matrix.columns else int(len(matrix)),
-        "metric_cols": metric_cols,
-        "meta_cols": meta_cols,
-        "obs_key_cols": obs_key_cols,
-        "subject_id_col": subject_id_col,
-        "filters": applied_filters,
-    }
-
 
 def _rank_select_predictors(df: pd.DataFrame, names, roles):
     """Keep the largest stable full-rank subset, preserving input order."""
@@ -1111,6 +1006,7 @@ def _auto_roles(df, strata_cols=None):
     has_meta = strata_cols is not None
     known_fac = set(strata_cols) if has_meta else set()
     roles = {}
+    seen_var = False
     for col in df.columns:
         if col.upper() == "ID":
             roles[col] = "ID"
@@ -1118,17 +1014,19 @@ def _auto_roles(df, strata_cols=None):
             roles[col] = "FAC"
         elif has_meta:
             roles[col] = "VAR"
+            seen_var = True
         else:
             vals = df[col].dropna()
             vals = vals[vals != "."]
-            n_uniq = vals.nunique()
             numeric_frac = pd.to_numeric(vals, errors="coerce").notna().mean()
             if numeric_frac >= 0.8:
                 roles[col] = "VAR"
-            elif n_uniq <= max(10, len(df) * 0.25):
-                roles[col] = "FAC"
+                seen_var = True
+            elif seen_var:
+                # Categorical column appearing after numeric columns — exclude
+                roles[col] = "exclude"
             else:
-                roles[col] = "VAR"
+                roles[col] = "FAC"
     return roles
 
 
@@ -1514,11 +1412,6 @@ class GPATab(_ExplorerTab):
         self._assoc_ranked_labels: list[str] = []
         self._assoc_matrix_cache_key = None
         self._assoc_matrix_cache_df: pd.DataFrame | None = None
-        self._assoc_repeated_manifest_df: pd.DataFrame | None = None
-        self._assoc_repeated_meta_cols: list[str] = []
-        self._assoc_repeated_metric_cols: list[str] = []
-        self._assoc_repeated_row_info: dict = {}
-
         self._render_timer = QTimer(self)
         self._render_timer.setSingleShot(True)
         self._render_timer.setInterval(250)
@@ -1606,7 +1499,6 @@ class GPATab(_ExplorerTab):
         self._root = root
 
     def _init_assoc_mode_ui(self):
-        self._refresh_assoc_repeated_sources()
         self._on_assoc_mode_changed()
 
     def _apply_assoc_default_splitter_sizes(self):
@@ -2558,14 +2450,6 @@ class GPATab(_ExplorerTab):
         lay.setContentsMargins(6, 6, 6, 6)
         lay.setSpacing(6)
 
-        mode_row = QHBoxLayout()
-        mode_row.addWidget(QLabel("Mode"))
-        self._assoc_mode_combo = QComboBox()
-        self._assoc_mode_combo.addItem("Standard .dat", "standard")
-        self._assoc_mode_combo.addItem("Repeated observations", "repeated")
-        mode_row.addWidget(self._assoc_mode_combo, 1)
-        lay.addLayout(mode_row)
-
         self._assoc_standard_frame = QFrame()
         std_lay = QVBoxLayout(self._assoc_standard_frame)
         std_lay.setContentsMargins(0, 0, 0, 0)
@@ -2607,81 +2491,6 @@ class GPATab(_ExplorerTab):
         )
         std_lay.addWidget(self._assoc_pool_picker)
         lay.addWidget(self._assoc_standard_frame)
-
-        self._assoc_repeated_frame = QFrame()
-        rep_lay = QVBoxLayout(self._assoc_repeated_frame)
-        rep_lay.setContentsMargins(0, 0, 0, 0)
-        rep_lay.setSpacing(6)
-
-        rep_src_row = QHBoxLayout()
-        rep_src_row.addWidget(QLabel("Source table"))
-        self._assoc_rep_source_combo = QComboBox()
-        self._assoc_rep_source_combo.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
-        btn_rep_refresh = QPushButton("Refresh")
-        btn_rep_refresh.setFixedWidth(70)
-        rep_src_row.addWidget(self._assoc_rep_source_combo, 1)
-        rep_src_row.addWidget(btn_rep_refresh)
-        rep_lay.addLayout(rep_src_row)
-
-        rep_id_row = QHBoxLayout()
-        rep_id_row.addWidget(QLabel("Subject ID"))
-        self._assoc_rep_subject_combo = QComboBox()
-        self._assoc_rep_subject_combo.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
-        rep_id_row.addWidget(self._assoc_rep_subject_combo, 1)
-        rep_lay.addLayout(rep_id_row)
-
-        rep_lists = QSplitter(Qt.Horizontal)
-        rep_lists.setHandleWidth(4)
-
-        self._assoc_rep_key_list = QListWidget()
-        self._assoc_rep_key_list.setSelectionMode(QAbstractItemView.MultiSelection)
-        self._assoc_rep_metric_list = QListWidget()
-        self._assoc_rep_metric_list.setSelectionMode(QAbstractItemView.MultiSelection)
-        self._assoc_rep_meta_list = QListWidget()
-        self._assoc_rep_meta_list.setSelectionMode(QAbstractItemView.MultiSelection)
-        for box, title in (
-            (self._assoc_rep_key_list, "Observation key"),
-            (self._assoc_rep_metric_list, "Metric columns"),
-            (self._assoc_rep_meta_list, "Subsetting/color columns"),
-        ):
-            frame = QFrame()
-            box_lay = QVBoxLayout(frame)
-            box_lay.setContentsMargins(0, 0, 0, 0)
-            box_lay.setSpacing(3)
-            box_lay.addWidget(QLabel(title))
-            box.setStyleSheet(
-                "QListWidget { background:#0d1117; border:1px solid #21262d; font-size:11px; }"
-                "QListWidget::item { padding:2px 4px; }"
-            )
-            box_lay.addWidget(box, 1)
-            rep_lists.addWidget(frame)
-        rep_lists.setSizes([180, 220, 220])
-        rep_lay.addWidget(rep_lists, 1)
-
-        rep_filter_lbl = QLabel("Row filters")
-        rep_lay.addWidget(rep_filter_lbl)
-        self._assoc_rep_filter_table = QTableWidget(0, 2)
-        self._assoc_rep_filter_table.setHorizontalHeaderLabels(["Column", "Keep values (comma-separated)"])
-        self._assoc_rep_filter_table.verticalHeader().setVisible(False)
-        self._assoc_rep_filter_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self._assoc_rep_filter_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        self._assoc_rep_filter_table.setSelectionBehavior(QAbstractItemView.SelectItems)
-        self._assoc_rep_filter_table.setSelectionMode(QAbstractItemView.SingleSelection)
-        self._assoc_rep_filter_table.setEditTriggers(
-            QAbstractItemView.CurrentChanged
-            | QAbstractItemView.SelectedClicked
-            | QAbstractItemView.DoubleClicked
-            | QAbstractItemView.EditKeyPressed
-        )
-        self._assoc_rep_filter_table.setMinimumHeight(110)
-        self._assoc_rep_filter_table.setMaximumHeight(160)
-        rep_lay.addWidget(self._assoc_rep_filter_table)
-
-        self._assoc_rep_summary = QLabel("")
-        self._assoc_rep_summary.setWordWrap(True)
-        self._assoc_rep_summary.setStyleSheet(f"color:#888; font-size:11px;")
-        rep_lay.addWidget(self._assoc_rep_summary)
-        lay.addWidget(self._assoc_repeated_frame)
 
         sep_targets = QFrame()
         sep_targets.setFrameShape(QFrame.HLine)
@@ -2736,15 +2545,6 @@ class GPATab(_ExplorerTab):
         self._assoc_status.setWordWrap(True)
         self._assoc_status.setStyleSheet(f"color:#888; font-size:11px;")
         lay.addWidget(self._assoc_status)
-
-        self._assoc_mode_combo.currentIndexChanged.connect(self._on_assoc_mode_changed)
-        btn_rep_refresh.clicked.connect(self._refresh_assoc_repeated_sources)
-        self._assoc_rep_source_combo.currentIndexChanged.connect(self._on_assoc_repeated_source_changed)
-        self._assoc_rep_subject_combo.currentIndexChanged.connect(self._update_assoc_repeated_summary)
-        self._assoc_rep_key_list.itemSelectionChanged.connect(self._update_assoc_repeated_summary)
-        self._assoc_rep_metric_list.itemSelectionChanged.connect(self._on_assoc_repeated_metrics_changed)
-        self._assoc_rep_meta_list.itemSelectionChanged.connect(self._on_assoc_repeated_meta_changed)
-        self._assoc_rep_filter_table.itemChanged.connect(lambda *_: self._update_assoc_repeated_summary())
 
         lay.addStretch(1)
         return w
@@ -3056,7 +2856,6 @@ class GPATab(_ExplorerTab):
                 "Could not read columns from:\n" + "\n".join(failed))
 
         self._files_list.setCurrentRow(self._files_list.count() - 1)
-        self._refresh_assoc_repeated_sources()
         self._sync_ui_to_json()
 
     def _add_one_source_file(self, fn, proj):
@@ -3126,7 +2925,6 @@ class GPATab(_ExplorerTab):
         self._files_list.takeItem(row)
         self._col_frame.setVisible(False)
         self._col_table_path = None
-        self._refresh_assoc_repeated_sources()
         self._sync_ui_to_json()
 
     def _item_key(self, item):
@@ -3361,7 +3159,6 @@ class GPATab(_ExplorerTab):
         cur = self._files_list.currentRow()
         if cur >= 0:
             self._on_file_selected(cur)
-        self._refresh_assoc_repeated_sources()
 
     def _save_json(self):
         fn, _ = save_file_name(
@@ -3654,41 +3451,17 @@ class GPATab(_ExplorerTab):
         n_ids  = int(df["NI"].iloc[1]) if "NI" in df.columns and len(df) > 1 else "?"
         self._manifest_desc.setText(f"{n_vars} variables  ·  N={n_ids}")
 
-    def _assoc_mode(self):
-        return str(getattr(self, "_assoc_mode_combo", None).currentData() or "standard")
-
-    def _assoc_is_repeated_mode(self):
-        return self._assoc_mode() == "repeated"
-
     def _active_assoc_manifest_df(self):
-        if self._assoc_is_repeated_mode() and self._assoc_repeated_manifest_df is not None:
-            return self._assoc_repeated_manifest_df
         return self._manifest_df
 
     def _on_assoc_mode_changed(self, *_args):
-        repeated = self._assoc_is_repeated_mode()
-        self._assoc_standard_frame.setVisible(not repeated)
-        self._assoc_repeated_frame.setVisible(repeated)
-        pca_points_combo = getattr(self, "_assoc_pca_points_combo", None)
-        if pca_points_combo is not None:
-            pca_points_combo.setEnabled(repeated)
-        if repeated:
-            self._assoc_seed_picker.set_title("Seed metric")
-            self._assoc_seed_long_label.setText("Selected seed metric")
-            self._assoc_seed_long_label.setVisible(False)
-            self._assoc_seed_long_list.setVisible(False)
-        else:
-            self._assoc_seed_picker.set_title("Seed variable")
-            self._assoc_seed_long_label.setText("Actual seed variable")
-            self._assoc_seed_long_label.setVisible(True)
-            self._assoc_seed_long_list.setVisible(True)
-        manifest_df = (
-            self._assoc_repeated_manifest_df
-            if repeated and self._assoc_repeated_manifest_df is not None
-            else (pd.DataFrame() if repeated else self._manifest_df)
-        )
-        self._assoc_seed_picker.populate(manifest_df)
-        self._assoc_pool_picker.populate(manifest_df)
+        self._assoc_standard_frame.setVisible(True)
+        self._assoc_seed_picker.set_title("Seed variable")
+        self._assoc_seed_long_label.setText("Actual seed variable")
+        self._assoc_seed_long_label.setVisible(True)
+        self._assoc_seed_long_list.setVisible(True)
+        self._assoc_seed_picker.populate(self._manifest_df)
+        self._assoc_pool_picker.populate(self._manifest_df)
         self._refresh_assoc_seed_long_list(preferred=self._assoc_seed_long)
         self._clear_assoc_matrix_cache()
         self._assoc_corr_df = pd.DataFrame()
@@ -3697,160 +3470,9 @@ class GPATab(_ExplorerTab):
         self._populate_assoc_corr_table(pd.DataFrame())
         self._populate_assoc_pca_table(pd.DataFrame())
         self._populate_assoc_pca_color_combo()
-        if repeated:
-            self._refresh_assoc_repeated_sources()
-
-    def _refresh_assoc_repeated_sources(self):
-        combo = getattr(self, "_assoc_rep_source_combo", None)
-        if combo is None:
-            return
-        current = str(combo.currentData() or "")
-        combo.blockSignals(True)
-        combo.clear()
-        for i in range(self._files_list.count()):
-            item = self._files_list.item(i)
-            key = self._item_key(item)
-            combo.addItem(item.text(), key)
-        combo.blockSignals(False)
-        idx = 0
-        for i in range(combo.count()):
-            if str(combo.itemData(i) or "") == current:
-                idx = i
-                break
-        if combo.count():
-            combo.setCurrentIndex(idx)
-        self._on_assoc_repeated_source_changed()
-
-    def _assoc_repeated_selected_key(self):
-        return str(self._assoc_rep_source_combo.currentData() or "").strip()
-
-    def _assoc_repeated_assignment(self):
-        return self._col_assignments.get(self._assoc_repeated_selected_key(), {})
-
-    def _assoc_repeated_source_parts(self):
-        key = self._assoc_repeated_selected_key()
-        if not key:
-            return "", None
-        if "::" in key:
-            path, member = key.split("::", 1)
-            return path, member
-        return key, None
-
-    def _on_assoc_repeated_source_changed(self, *_args):
-        asgn = self._assoc_repeated_assignment()
-        preview = asgn.get("_df_preview")
-        columns = list(preview.columns) if isinstance(preview, pd.DataFrame) else []
-        roles = asgn.get("_roles", {})
-
-        self._assoc_rep_subject_combo.blockSignals(True)
-        self._assoc_rep_subject_combo.clear()
-        id_candidates = [col for col in columns if roles.get(col) == "ID"] or [col for col in columns if str(col).upper() == "ID"] or columns[:1]
-        for col in columns:
-            self._assoc_rep_subject_combo.addItem(str(col), str(col))
-        if id_candidates:
-            wanted = str(id_candidates[0])
-            for i in range(self._assoc_rep_subject_combo.count()):
-                if str(self._assoc_rep_subject_combo.itemData(i) or "") == wanted:
-                    self._assoc_rep_subject_combo.setCurrentIndex(i)
-                    break
-        self._assoc_rep_subject_combo.blockSignals(False)
-
-        def _fill_list(widget, selected):
-            widget.blockSignals(True)
-            widget.clear()
-            for col in columns:
-                item = QListWidgetItem(str(col))
-                widget.addItem(item)
-                if col in selected:
-                    item.setSelected(True)
-            widget.blockSignals(False)
-
-        fac_cols = [col for col in columns if roles.get(col) == "FAC"]
-        var_cols = [col for col in columns if roles.get(col) == "VAR"]
-        if not var_cols:
-            var_cols = [
-                col for col in columns
-                if col not in id_candidates and pd.to_numeric(preview[col], errors="coerce").notna().mean() >= 0.5
-            ] if isinstance(preview, pd.DataFrame) else []
-        non_factor_cols = [col for col in columns if col not in id_candidates and roles.get(col) != "FAC"]
-        default_metric = var_cols or non_factor_cols
-        _fill_list(self._assoc_rep_key_list, fac_cols)
-        _fill_list(self._assoc_rep_metric_list, default_metric)
-        _fill_list(self._assoc_rep_meta_list, [])
-        self._rebuild_assoc_repeated_filter_rows()
-        self._on_assoc_repeated_metrics_changed()
 
     def _selected_list_values(self, widget):
         return [item.text() for item in widget.selectedItems()]
-
-    def _rebuild_assoc_repeated_filter_rows(self):
-        meta_cols = self._selected_list_values(self._assoc_rep_meta_list)
-        existing = {}
-        for row in range(self._assoc_rep_filter_table.rowCount()):
-            key_item = self._assoc_rep_filter_table.item(row, 0)
-            val_item = self._assoc_rep_filter_table.item(row, 1)
-            if key_item is not None and val_item is not None:
-                existing[key_item.text()] = val_item.text()
-        self._assoc_rep_filter_table.blockSignals(True)
-        self._assoc_rep_filter_table.setRowCount(0)
-        for col in meta_cols:
-            row = self._assoc_rep_filter_table.rowCount()
-            self._assoc_rep_filter_table.insertRow(row)
-            name_item = QTableWidgetItem(col)
-            name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
-            self._assoc_rep_filter_table.setItem(row, 0, name_item)
-            value_item = QTableWidgetItem(existing.get(col, ""))
-            value_item.setToolTip("Comma-separated values to keep, e.g. Cz,Pz or N2,N3")
-            self._assoc_rep_filter_table.setItem(row, 1, value_item)
-        self._assoc_rep_filter_table.blockSignals(False)
-
-    def _on_assoc_repeated_metrics_changed(self):
-        metric_cols = self._selected_list_values(self._assoc_rep_metric_list)
-        self._assoc_repeated_metric_cols = metric_cols
-        self._assoc_repeated_manifest_df = _repeated_manifest_from_columns(
-            metric_cols, meta_cols=self._selected_list_values(self._assoc_rep_meta_list)
-        )
-        self._assoc_seed_picker.populate(self._assoc_repeated_manifest_df)
-        self._assoc_pool_picker.populate(self._assoc_repeated_manifest_df)
-        self._populate_assoc_pca_color_combo()
-        self._refresh_assoc_seed_long_list(preferred=self._assoc_seed_long)
-        self._update_assoc_repeated_summary()
-
-    def _on_assoc_repeated_meta_changed(self):
-        self._assoc_repeated_meta_cols = self._selected_list_values(self._assoc_rep_meta_list)
-        self._rebuild_assoc_repeated_filter_rows()
-        self._on_assoc_repeated_metrics_changed()
-
-    def _assoc_repeated_filter_map(self):
-        filters = {}
-        for row in range(self._assoc_rep_filter_table.rowCount()):
-            key_item = self._assoc_rep_filter_table.item(row, 0)
-            val_item = self._assoc_rep_filter_table.item(row, 1)
-            if key_item is None or val_item is None:
-                continue
-            vals = [part.strip() for part in val_item.text().split(",") if part.strip()]
-            if vals:
-                filters[key_item.text()] = vals
-        return filters
-
-    def _update_assoc_repeated_summary(self):
-        summary = []
-        subject_id_col = str(self._assoc_rep_subject_combo.currentData() or "")
-        if subject_id_col:
-            summary.append(f"subject={subject_id_col}")
-        key_cols = self._selected_list_values(self._assoc_rep_key_list)
-        metric_cols = self._selected_list_values(self._assoc_rep_metric_list)
-        meta_cols = self._selected_list_values(self._assoc_rep_meta_list)
-        if key_cols:
-            summary.append("key=" + ",".join(key_cols))
-        if metric_cols:
-            summary.append(f"metrics={len(metric_cols)}")
-        if meta_cols:
-            summary.append(f"meta={len(meta_cols)}")
-        filt = self._assoc_repeated_filter_map()
-        if filt:
-            summary.append("filters=" + " ; ".join(f"{k}={','.join(v)}" for k, v in filt.items()))
-        self._assoc_rep_summary.setText("  ·  ".join(summary))
 
     def _assoc_candidate_long_names(self):
         selected = self._assoc_pool_picker.selected_long_names()
@@ -3878,18 +3500,10 @@ class GPATab(_ExplorerTab):
         current = str(combo.currentData() or "")
         combo.clear()
         combo.addItem("(none)", "none")
-        if self._assoc_is_repeated_mode():
-            point_kind = str((self._assoc_pca_result or {}).get("point_kind") or "")
-            if point_kind == "observation" and self._assoc_pca_df is not None and not self._assoc_pca_df.empty:
-                for col in self._assoc_pca_df.columns:
-                    if col.startswith("PC") or col == "RID":
-                        continue
-                    combo.addItem(col, col)
-        else:
-            combo.addItem("group", "group")
-            combo.addItem("base var", "base")
-            for col in _assoc_pca_color_fields(self._active_assoc_manifest_df()):
-                combo.addItem(col, col)
+        combo.addItem("group", "group")
+        combo.addItem("base var", "base")
+        for col in _assoc_pca_color_fields(self._active_assoc_manifest_df()):
+            combo.addItem(col, col)
         idx = 0
         for i in range(combo.count()):
             if str(combo.itemData(i) or "") == current:
@@ -3920,11 +3534,7 @@ class GPATab(_ExplorerTab):
         self._assoc_seed_long_list.blockSignals(False)
 
     def _on_assoc_seed_picker_changed(self):
-        if self._assoc_is_repeated_mode():
-            longs = self._assoc_seed_picker.selected_long_names()
-            self._assoc_seed_long = str(longs[0]) if longs else ""
-        else:
-            self._refresh_assoc_seed_long_list()
+        self._refresh_assoc_seed_long_list()
         self._maybe_auto_run_assoc_corr()
 
     def _on_assoc_seed_long_row_changed(self, row):
@@ -3940,13 +3550,9 @@ class GPATab(_ExplorerTab):
             return
         if getattr(self.ctrl, "_busy", False):
             return
-        if self._assoc_is_repeated_mode():
-            if not self._assoc_repeated_selected_key():
-                return
-        else:
-            dat_path = self._dat_edit.text().strip()
-            if not dat_path or not os.path.exists(dat_path):
-                return
+        dat_path = self._dat_edit.text().strip()
+        if not dat_path or not os.path.exists(dat_path):
+            return
         if not self._assoc_seed_long:
             return
         self._run_assoc_correlations()
@@ -3972,8 +3578,6 @@ class GPATab(_ExplorerTab):
             self._run_assoc_correlations()
 
     def _collect_assoc_dump_filters(self):
-        if self._assoc_is_repeated_mode():
-            return {}
         return self._joint_dump_filters()
 
     def _clear_assoc_matrix_cache(self):
@@ -3981,20 +3585,6 @@ class GPATab(_ExplorerTab):
         self._assoc_matrix_cache_df = None
 
     def _assoc_matrix_cache_payload(self, dat_path, requested_cols):
-        if self._assoc_is_repeated_mode():
-            key = (
-                "repeated",
-                self._assoc_repeated_selected_key(),
-                tuple(sorted(self._assoc_repeated_filter_map().items())),
-                tuple(_unique_preserve([str(col) for col in requested_cols if str(col).strip()])),
-                str(self._assoc_rep_subject_combo.currentData() or ""),
-                tuple(self._selected_list_values(self._assoc_rep_key_list)),
-                tuple(self._selected_list_values(self._assoc_rep_metric_list)),
-                tuple(self._selected_list_values(self._assoc_rep_meta_list)),
-            )
-            if self._assoc_matrix_cache_key == key and self._assoc_matrix_cache_df is not None:
-                return {"cache_key": key, "df": self._assoc_matrix_cache_df, "from_cache": True, "filters": {}}
-            return {"cache_key": key, "df": None, "from_cache": False, "filters": {}}
         dump_filters = self._collect_assoc_dump_filters()
         cache_key = _assoc_dump_cache_key(dat_path, requested_cols, dump_filters)
         if self._assoc_matrix_cache_key == cache_key and self._assoc_matrix_cache_df is not None:
@@ -4024,19 +3614,6 @@ class GPATab(_ExplorerTab):
         dump_opts["lvars"] = ",".join(cols)
         return gpa_dump(dat_path, **dump_opts)
 
-    @staticmethod
-    def _assoc_repeated_matrix_worker(source_path, member, subject_id_col, obs_key_cols, metric_cols, meta_cols, filters):
-        df = _full_source_table(source_path, member=member)
-        built = _build_repeated_matrix(
-            df,
-            subject_id_col=subject_id_col,
-            obs_key_cols=obs_key_cols,
-            metric_cols=metric_cols,
-            meta_cols=meta_cols,
-            filters=filters,
-        )
-        return built
-
     def _run_assoc_correlations(self):
         seed_var = str(self._assoc_seed_long or "").strip()
         if not seed_var:
@@ -4052,12 +3629,11 @@ class GPATab(_ExplorerTab):
         meta = self._manifest_meta_for_vars(_unique_preserve([seed_var] + candidates))
         requested_cols = _unique_preserve([seed_var] + candidates)
         dat_path = self._dat_edit.text().strip()
-        if not self._assoc_is_repeated_mode():
-            if not dat_path or not os.path.exists(dat_path):
-                self._end_work()
-                QtWidgets.QMessageBox.warning(self._root, "Assoc", "Load a valid .dat file first.")
-                return
-            self._set_dat_path(dat_path)
+        if not dat_path or not os.path.exists(dat_path):
+            self._end_work()
+            QtWidgets.QMessageBox.warning(self._root, "Assoc", "Load a valid .dat file first.")
+            return
+        self._set_dat_path(dat_path)
         cache = self._assoc_matrix_cache_payload(dat_path, requested_cols)
         if cache["from_cache"]:
             fut = self.ctrl._exec.submit(
@@ -4068,36 +3644,10 @@ class GPATab(_ExplorerTab):
                 meta,
             )
         else:
-            if self._assoc_is_repeated_mode():
-                source_path, member = self._assoc_repeated_source_parts()
-                if not source_path:
-                    self._end_work()
-                    QtWidgets.QMessageBox.warning(self._root, "Assoc", "Select one source table first.")
-                    return
-                subject_id_col = str(self._assoc_rep_subject_combo.currentData() or "")
-                obs_key_cols = self._selected_list_values(self._assoc_rep_key_list)
-                metric_cols = self._selected_list_values(self._assoc_rep_metric_list)
-                meta_cols = self._selected_list_values(self._assoc_rep_meta_list)
-                filters = self._assoc_repeated_filter_map()
-                fut = self.ctrl._exec.submit(
-                    self._assoc_repeated_corr_worker,
-                    source_path,
-                    member,
-                    subject_id_col,
-                    obs_key_cols,
-                    metric_cols,
-                    meta_cols,
-                    filters,
-                    seed_var,
-                    candidates,
-                    meta,
-                    cache["cache_key"],
-                )
-            else:
-                fut = self.ctrl._exec.submit(
-                    self._assoc_corr_worker,
-                    dat_path, seed_var, candidates, cache["filters"], meta, cache["cache_key"],
-                )
+            fut = self.ctrl._exec.submit(
+                self._assoc_corr_worker,
+                dat_path, seed_var, candidates, cache["filters"], meta, cache["cache_key"],
+            )
         def _done(_f=fut):
             try:
                 self._sig_ok.emit({"type": "assoc_corr", "result": _f.result()})
@@ -4125,29 +3675,6 @@ class GPATab(_ExplorerTab):
         out = GPATab._assoc_corr_from_df_worker(raw_df, seed_var, candidates, meta_df)
         out["cache_key"] = cache_key
         out["raw_df"] = raw_df
-        return out
-
-    @staticmethod
-    def _assoc_repeated_corr_worker(
-        source_path,
-        member,
-        subject_id_col,
-        obs_key_cols,
-        metric_cols,
-        meta_cols,
-        filters,
-        seed_var,
-        candidates,
-        meta_df,
-        cache_key,
-    ):
-        built = GPATab._assoc_repeated_matrix_worker(
-            source_path, member, subject_id_col, obs_key_cols, metric_cols, meta_cols, filters
-        )
-        out = GPATab._assoc_corr_from_df_worker(built["matrix"], seed_var, candidates, meta_df)
-        out["cache_key"] = cache_key
-        out["raw_df"] = built["matrix"]
-        out["repeated_info"] = built
         return out
 
     def _run_assoc_pca(self):
@@ -4190,34 +3717,6 @@ class GPATab(_ExplorerTab):
         result = GPATab._assoc_pca_from_df_worker(raw_df, candidates, meta_df, min_prop, row_mode, standardize, point_mode=point_mode)
         result["cache_key"] = cache_key
         result["raw_df"] = raw_df
-        return result
-
-    @staticmethod
-    def _assoc_repeated_pca_worker(
-        source_path,
-        member,
-        subject_id_col,
-        obs_key_cols,
-        metric_cols,
-        meta_cols,
-        filters,
-        candidates,
-        meta_df,
-        min_prop,
-        row_mode,
-        standardize,
-        cache_key,
-        point_mode,
-    ):
-        built = GPATab._assoc_repeated_matrix_worker(
-            source_path, member, subject_id_col, obs_key_cols, metric_cols, meta_cols, filters
-        )
-        result = GPATab._assoc_pca_from_df_worker(
-            built["matrix"], candidates, meta_df, min_prop, row_mode, standardize, point_mode=point_mode
-        )
-        result["cache_key"] = cache_key
-        result["raw_df"] = built["matrix"]
-        result["repeated_info"] = built
         return result
 
     # ======================================================================
@@ -4819,6 +4318,8 @@ class GPATab(_ExplorerTab):
         keep = {}
         if "winsor" in opts and opts["winsor"] not in (None, ""):
             keep["winsor"] = opts["winsor"]
+        if "inc-ids" in opts and opts["inc-ids"] not in (None, ""):
+            keep["inc-ids"] = opts["inc-ids"]
         return _with_dump_qc_disabled(keep)
 
     def _start_joint_fit(self):
@@ -5252,8 +4753,6 @@ class GPATab(_ExplorerTab):
                 self._assoc_scatter_from_df_worker, cache["df"], seed_var, target_var
             )
         else:
-            if self._assoc_is_repeated_mode():
-                return
             if not dat_path or not os.path.exists(dat_path):
                 return
             fut = self.ctrl._exec.submit(
@@ -6025,23 +5524,16 @@ class GPATab(_ExplorerTab):
             seed = (result or {}).get("seed", "")
             row_count = int((result or {}).get("row_count", 0))
             missing = (result or {}).get("missing") or []
-            repeated_info = (result or {}).get("repeated_info") or {}
             raw_df = (result or {}).get("raw_df")
             cache_key = (result or {}).get("cache_key")
             if raw_df is not None and cache_key is not None:
                 self._store_assoc_matrix_cache(cache_key, raw_df)
-            self._assoc_repeated_row_info = repeated_info
             self._assoc_corr_df = table if isinstance(table, pd.DataFrame) else pd.DataFrame()
             self._populate_assoc_corr_table(self._assoc_corr_df)
             shown = len(self._filtered_assoc_corr_df())
             status = f"{seed}: {len(self._assoc_corr_df)} correlations computed from {row_count} rows; showing {shown}."
             if missing:
                 status += f"  Dropped {len(missing)} unavailable variables."
-            if repeated_info:
-                status += (
-                    f"  Subjects={repeated_info.get('subject_count', 0)}"
-                    f"  Key={','.join(repeated_info.get('obs_key_cols') or [])}"
-                )
             self._assoc_status.setText(status)
             self._assoc_plot_mode = "ranked"
             self._assoc_ranked_btn.setChecked(True)
@@ -6054,7 +5546,6 @@ class GPATab(_ExplorerTab):
 
         elif t == "assoc_pca":
             self._assoc_pca_result = result or {}
-            self._assoc_repeated_row_info = self._assoc_pca_result.get("repeated_info") or {}
             raw_df = self._assoc_pca_result.get("raw_df")
             cache_key = self._assoc_pca_result.get("cache_key")
             if raw_df is not None and cache_key is not None:
@@ -6099,8 +5590,6 @@ class GPATab(_ExplorerTab):
                     bits.append(f"{len(low_obs)} below missingness threshold")
                 if dropped_const:
                     bits.append(f"{len(dropped_const)} constant")
-                if self._assoc_repeated_row_info:
-                    bits.append(f"subjects={self._assoc_repeated_row_info.get('subject_count', 0)}")
                 self._assoc_status.setText("  ".join(bits))
             self._render_assoc_pca_plot()
 
@@ -6117,9 +5606,22 @@ class GPATab(_ExplorerTab):
             self._analyze_status.setText("Error.")
         if hasattr(self, "_assoc_status"):
             self._assoc_status.setText("Error.")
-        QtWidgets.QMessageBox.critical(
-            self._root, "GPA Error",
-            f"An error occurred:\n\n{tb[-600:]}")
+
+        # Extract the final exception line for a readable summary, and keep
+        # the full traceback in the detail section.
+        tb_str = tb if isinstance(tb, str) else ""
+        last_line = ""
+        for line in reversed(tb_str.splitlines()):
+            line = line.strip()
+            if line and not line.startswith("File ") and not line.startswith("Traceback"):
+                last_line = line
+                break
+        summary = last_line or tb_str[-300:].strip()
+
+        msg = QtWidgets.QMessageBox(QtWidgets.QMessageBox.Critical, "GPA Error",
+                                    summary, parent=self._root)
+        msg.setDetailedText(tb_str)
+        msg.exec()
 
     def _on_progress(self, msg):
         self._analyze_status.setText(msg)

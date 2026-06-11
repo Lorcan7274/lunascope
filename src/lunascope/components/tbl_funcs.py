@@ -262,7 +262,7 @@ def add_check_column(view, channel_col_before_insert, header_text="✔",
                     out.append(str(_src.data(_src.index(r, _cc))))
         return out
 
-    _last_checked = tuple(_checked())
+    _last_checked = None  # None on first emit so on_change always fires once (resets stale state)
 
     def _emit_now():
         nonlocal _scheduled, _in_on_change, _last_checked
@@ -275,7 +275,7 @@ def add_check_column(view, channel_col_before_insert, header_text="✔",
             return
         _scheduled = False
         checked_now = tuple(_checked())
-        if checked_now == _last_checked:
+        if _last_checked is not None and checked_now == _last_checked:
             return
         _last_checked = checked_now
         _in_on_change = True

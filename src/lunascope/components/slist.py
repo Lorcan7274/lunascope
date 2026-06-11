@@ -1038,6 +1038,11 @@ class SListMixin:
 
     def _refresh(self):
 
+        for _name in ("txt_signals", "txt_annots", "txt_events"):
+            w = getattr(self.ui, _name, None)
+            if w is not None:
+                w.clear()
+
         view = self.ui.tbl_slist
         model = view.model()
         if not model: return

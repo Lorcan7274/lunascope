@@ -664,6 +664,7 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         self.proj.reinit()
         if hasattr(self, "p"):
             del self.p
+        self._slist_loaded_key = None
 
         try:
             self.ui.tbl_slist.clearSelection()

@@ -432,9 +432,11 @@ class AnnotExplorerMixin:
             saved_id = getattr(self, "_annex_saved_id", None)
             if saved_id:
                 try:
+                    self.proj.reinit()
                     self.p = self.proj.inst(saved_id)
                 except Exception:
                     pass
+            self._slist_loaded_key = None
             self._annex_post_compile()
         finally:
             self._annex_compile_cleanup()

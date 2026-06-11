@@ -1353,9 +1353,11 @@ class AnnotTab(_ExplorerTab):
         saved = getattr(self, "_saved_id", None)
         if saved:
             try:
+                self.ctrl.proj.reinit()
                 self.ctrl.p = self.ctrl.proj.inst(saved)
             except Exception:
                 pass
+        self.ctrl._slist_loaded_key = None
 
         self._schedule_render()
 
