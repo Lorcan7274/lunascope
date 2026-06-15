@@ -45,17 +45,19 @@ Pre-built apps for macOS and Windows are available from the
 [Latest Build release](https://github.com/Lorcan7274/lunascope/releases/tag/latest-build).
 
 **macOS**
-1. Download `Lunascope.app.zip` and unzip it.
-2. Move `Lunascope.app` to **Applications** (or anywhere).
+1. Download `Lunascope-macOS-Silicon-Desktop.dmg` for Apple Silicon or `Lunascope-macOS-Intel-Desktop.dmg` for Intel Macs.
+2. Open the `.dmg`, then drag `Lunascope.app` into **Applications** or another folder.
 3. First launch: right-click → **Open** to bypass Gatekeeper, then click **Open**. If you see *"will damage your computer"* with no Open option, run once in Terminal:
    ```
    xattr -dr com.apple.quarantine /path/to/Lunascope.app
    ```
+4. If the Desktop build is blocked by local security tools, download the matching `Lunascope-macOS-*-Diagnostic.zip`, unzip it, and run `Lunascope.app` from the extracted folder.
 
 **Windows**
-1. Download `Lunascope-Windows.zip` and unzip it.
-2. Open the `Lunascope.dist` folder and double-click **Lunascope.exe**.
+1. Download and run `Lunascope-Windows-Desktop-Setup.exe`.
+2. Launch Lunascope from the Start menu or desktop shortcut.
 3. First launch: click **More info → Run anyway** if SmartScreen appears.
+4. If the Desktop installer is blocked by local security tools or install permissions, download `Lunascope-Windows-Diagnostic.zip`, unzip it, and double-click **Lunascope.exe** in the extracted folder.
 
 > These binaries are unsigned. Browser or antivirus warnings are expected. The source is fully open and auditable here.
 
