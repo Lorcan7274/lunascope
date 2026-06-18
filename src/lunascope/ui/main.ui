@@ -680,8 +680,20 @@
           </property>
          </widget>
         </item>
-        <item>
-         <widget class="QPushButton" name="butt_anal_exec">
+       <item>
+        <widget class="QPushButton" name="butt_anal_refresh_exec">
+         <property name="font">
+          <font>
+           <italic>true</italic>
+          </font>
+         </property>
+         <property name="text">
+          <string>Refresh &amp;&amp; Evaluate</string>
+         </property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QPushButton" name="butt_anal_exec">
           <property name="palette">
            <palette>
             <active>
@@ -767,13 +779,14 @@
           <property name="font">
            <font>
             <bold>true</bold>
+            <italic>true</italic>
            </font>
-          </property>
-          <property name="text">
-           <string>Execute</string>
-          </property>
-         </widget>
-        </item>
+         </property>
+         <property name="text">
+          <string>Evaluate</string>
+         </property>
+        </widget>
+       </item>
        </layout>
       </widget>
      </item>

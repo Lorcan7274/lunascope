@@ -32,13 +32,13 @@ from .slist import NumericSortFilterProxy
 
 from PySide6.QtWidgets import QPlainTextEdit, QFileDialog, QMessageBox
 from PySide6.QtWidgets import QDialog, QDialogButtonBox, QFormLayout, QLabel, QSpinBox, QVBoxLayout
-from PySide6.QtCore import QEvent, QMetaObject, QSettings, Qt, Slot
+from PySide6.QtCore import QEvent, QMetaObject, QSettings, Qt, QTimer, Slot
 from PySide6.QtCore import Qt, QItemSelection, QSortFilterProxyModel, QRegularExpression
 from PySide6.QtGui import QStandardItemModel, QStandardItem
-from PySide6.QtWidgets import QAbstractItemView, QHeaderView
+from PySide6.QtWidgets import QAbstractItemView, QHeaderView, QSizePolicy
 from PySide6.QtGui import QTextCursor
 
-from PySide6.QtGui import QKeySequence, QGuiApplication, QShortcut
+from PySide6.QtGui import QKeySequence, QGuiApplication
 
 from PySide6.QtGui import QAction
 from ..file_dialogs import open_file_name, save_file_name
@@ -267,11 +267,10 @@ class AnalMixin:
 
     def _init_anal(self):
 
-        self.ui.butt_anal_exec.clicked.connect( self._exec_single_luna )
-        sc_exec = QShortcut(QKeySequence("Ctrl+Return"), self.ui)
-        sc_exec.setContext(Qt.ApplicationShortcut)
-        sc_exec.activated.connect(self._exec_single_luna)
+        self._init_anal_exec_buttons()
 
+        self.ui.butt_anal_exec.clicked.connect( self._exec_single_luna )
+        self.ui.butt_anal_refresh_exec.clicked.connect( self._refresh_and_exec_single_luna )
         self.ui.butt_anal_load.clicked.connect( self._load_luna )
 
         self.ui.butt_anal_save.clicked.connect( self._save_luna )
@@ -329,6 +328,20 @@ class AnalMixin:
         self.sig_proj_eval_progress.connect(self._proj_eval_update_progress, Qt.QueuedConnection)
         self.sig_proj_eval_finished.connect(self._proj_eval_done_ok, Qt.QueuedConnection)
         self.sig_proj_eval_failed.connect(self._proj_eval_done_err, Qt.QueuedConnection)
+
+    def _init_anal_exec_buttons(self):
+        buttons = (
+            self.ui.butt_anal_load,
+            self.ui.butt_anal_save,
+            self.ui.butt_anal_clear,
+            self.ui.butt_anal_refresh_exec,
+            self.ui.butt_anal_exec,
+        )
+        layout = self.ui.horizontalLayout_8
+        for i, btn in enumerate(buttons):
+            btn.setMinimumWidth(0)
+            btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            layout.setStretch(i, 1)
 
 
     def _project_eval_config_dialog(self, total_records):
@@ -419,6 +432,13 @@ class AnalMixin:
         self.project_mode = False
         self._project_results_mode = False
         self._exec_luna()
+
+    def _refresh_and_exec_single_luna(self):
+        self._refresh()
+        clear_rows( self.ui.anal_tables )
+        clear_rows( self.ui.anal_table )
+        self.ui.txt_out.clear()
+        QTimer.singleShot(0, self._exec_single_luna)
         
     # ------------------------------------------------------------
     # Run a Luna command
@@ -564,6 +584,8 @@ class AnalMixin:
     def _buttons( self, status ):
         stage_tools_enabled = status and not getattr(self, 'multiday_mode', False)
         self.ui.butt_anal_exec.setEnabled(status)
+        if hasattr(self.ui, "butt_anal_refresh_exec"):
+            self.ui.butt_anal_refresh_exec.setEnabled(status)
         self.ui.butt_spectrogram.setEnabled(status)
         self.ui.butt_hjorth.setEnabled(status)
         self.ui.butt_calc_hypnostats.setEnabled(stage_tools_enabled)

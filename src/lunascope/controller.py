@@ -203,6 +203,8 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         act_save_edf = QAction("Export EDF + Annotations…", self)
         act_drop_signals = QAction("Drop channels / annotations…", self)
         act_refresh = QAction("Refresh", self)
+        act_single_eval = QAction("Evaluate", self)
+        act_refresh_single_eval = QAction("Refresh && Evaluate", self)
         act_proj_eval = QAction("Evaluate (project)", self)
         act_save_session = QAction("Save Session...", self)
         act_load_session = QAction("Load Session...", self)
@@ -224,6 +226,12 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         act_refresh.triggered.connect(self._refresh)
         act_refresh.setShortcut(QKeySequence("Ctrl+L"))
         act_refresh.setShortcutContext(Qt.ApplicationShortcut)
+        act_single_eval.triggered.connect(self._exec_single_luna)
+        act_single_eval.setShortcut(QKeySequence("Ctrl+Return"))
+        act_single_eval.setShortcutContext(Qt.ApplicationShortcut)
+        act_refresh_single_eval.triggered.connect(self._refresh_and_exec_single_luna)
+        act_refresh_single_eval.setShortcut(QKeySequence("Ctrl+Alt+Return"))
+        act_refresh_single_eval.setShortcutContext(Qt.ApplicationShortcut)
         act_proj_eval.triggered.connect(self._proj_eval)
         act_proj_eval.setShortcut(QKeySequence("Ctrl+Shift+Return"))
         act_proj_eval.setShortcutContext(Qt.ApplicationShortcut)
@@ -248,6 +256,8 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         self.ui.menuProject.addSeparator()
         self.ui.menuProject.addAction(act_refresh)
         self.ui.menuProject.addSeparator()
+        self.ui.menuProject.addAction(act_single_eval)
+        self.ui.menuProject.addAction(act_refresh_single_eval)
         self.ui.menuProject.addAction(act_proj_eval)
         self.ui.menuProject.addSeparator()
         self.ui.menuProject.addAction(act_download_pops)
@@ -275,9 +285,9 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         self.ui.addAction(act_7)   # attach to window so it fires globally
         self.ui.menuView.addAction(act_7)
         self.ui.menuView.addSeparator()
-        self.ui.menuView.addAction(self.ui.dock_mask.toggleViewAction())
         self.ui.menuView.addAction(self.ui.dock_console.toggleViewAction())
         self.ui.menuView.addAction(self.ui.dock_outputs.toggleViewAction())
+        self.ui.menuView.addAction(self.ui.dock_mask.toggleViewAction())
         self.ui.menuView.addSeparator()
         act_moonbeam = self.ui.dock_moonbeam.toggleViewAction()
         act_moonbeam.setShortcut(QKeySequence("Ctrl+M"))
@@ -354,6 +364,8 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
             "project_load_edf": act_load_edf,
             "project_load_annot": act_load_annot,
             "project_refresh": act_refresh,
+            "project_single_eval": act_single_eval,
+            "project_refresh_single_eval": act_refresh_single_eval,
             "project_eval": act_proj_eval,
             "project_save_session": act_save_session,
             "project_load_session": act_load_session,

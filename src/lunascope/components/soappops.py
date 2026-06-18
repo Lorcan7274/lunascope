@@ -21,6 +21,7 @@
 
 from PySide6.QtWidgets import (
     QApplication,
+    QMenu,
     QToolButton,
     QVBoxLayout,
     QMessageBox,
@@ -37,9 +38,10 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
 )
 from PySide6.QtCore import QEvent, QMetaObject, Qt, QTimer, Slot, QSize, Signal
-from PySide6.QtGui import QStandardItemModel, QStandardItem
+from PySide6.QtGui import QImage, QStandardItemModel, QStandardItem
 from shiboken6 import isValid
 import html
+import io
 import json
 import os
 import shutil
@@ -50,7 +52,7 @@ from pathlib import Path
 import pandas as pd
 
 from ..runtime_paths import app_cache_root, app_state_file
-from ..file_dialogs import existing_directory
+from ..file_dialogs import existing_directory, save_file_name
 
 
 POPS_DOWNLOAD_URL = "https://zzz.nyspi.org/dist/luna/pops.zip"
@@ -855,6 +857,7 @@ class SoapPopsMixin:
         from .mplcanvas import MplCanvas
         self.soapcanvas = MplCanvas(self.ui.host_soap)
         layout.addWidget(self.soapcanvas)
+        self._init_soap_pops_canvas_menu(self.soapcanvas, "soap")
         return self.soapcanvas
 
     def _ensure_pops_canvas(self):
@@ -870,7 +873,41 @@ class SoapPopsMixin:
         from .mplcanvas import MplCanvas
         self.popscanvas = MplCanvas(self.ui.host_pops)
         layout.addWidget(self.popscanvas)
+        self._init_soap_pops_canvas_menu(self.popscanvas, "pops")
         return self.popscanvas
+
+    def _init_soap_pops_canvas_menu(self, canvas, stem):
+        canvas.setContextMenuPolicy(Qt.CustomContextMenu)
+        canvas.customContextMenuRequested.connect(
+            lambda pos, c=canvas, s=stem: self._soap_pops_context_menu(c, s, pos)
+        )
+
+    def _soap_pops_context_menu(self, canvas, stem, pos):
+        menu = QMenu(canvas)
+        act_copy = menu.addAction("Copy to Clipboard")
+        act_save = menu.addAction("Save As...")
+        action = menu.exec(canvas.mapToGlobal(pos))
+        if action == act_copy:
+            self._copy_soap_pops_canvas_to_clipboard(canvas)
+        elif action == act_save:
+            self._save_soap_pops_canvas(canvas, stem)
+
+    def _copy_soap_pops_canvas_to_clipboard(self, canvas):
+        buf = io.BytesIO()
+        canvas.figure.savefig(buf, format="png", bbox_inches="tight")
+        img = QImage.fromData(buf.getvalue(), "PNG")
+        QApplication.clipboard().setImage(img)
+
+    def _save_soap_pops_canvas(self, canvas, stem):
+        fn, _ = save_file_name(
+            canvas,
+            "Save Figure",
+            stem,
+            "PNG (*.png);;SVG (*.svg);;PDF (*.pdf)"
+        )
+        if not fn:
+            return
+        canvas.figure.savefig(fn, bbox_inches="tight")
 
     # valid staging:
     #   - EDF/annotations attached
