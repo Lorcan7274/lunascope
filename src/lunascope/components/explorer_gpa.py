@@ -2006,23 +2006,28 @@ class GPATab(_ExplorerTab):
         )].reset_index(drop=True)
 
         grp_to_longs: dict = {}
-        t_grps.blockSignals(True)
-        t_grps.setRowCount(0)
         for _, row in pr_sel.iterrows():
             grp_key = str(row["GRP"])
-            longs_for_grp = list(row["LONGS"])
-            grp_to_longs.setdefault(grp_key, []).extend(longs_for_grp)
-            ni_min = row.get("NI_MIN")
-            ni_max = row.get("NI_MAX")
-            if ni_min is None or (isinstance(ni_min, float) and np.isnan(ni_min)):
+            grp_to_longs.setdefault(grp_key, []).extend(list(row["LONGS"]))
+
+        # Aggregate per-GRP so one row appears per group regardless of how many bases
+        # were selected within that group.
+        t_grps.blockSignals(True)
+        t_grps.setRowCount(0)
+        for grp_key, grp_rows in pr_sel.groupby("GRP", sort=False):
+            grp_key = str(grp_key)
+            n_long = int(grp_rows["N_LONG"].sum())
+            ni_mins = grp_rows["NI_MIN"].dropna().tolist()
+            ni_maxs = grp_rows["NI_MAX"].dropna().tolist()
+            all_ni = [v for v in ni_mins + ni_maxs if not (isinstance(v, float) and np.isnan(v))]
+            if not all_ni:
                 n_str = ""
-            elif ni_min == ni_max:
-                n_str = str(int(ni_min))
             else:
-                n_str = f"{int(ni_min)}–{int(ni_max)}"
+                lo, hi = int(min(all_ni)), int(max(all_ni))
+                n_str = str(lo) if lo == hi else f"{lo}–{hi}"
             r = t_grps.rowCount()
             t_grps.insertRow(r)
-            for ci, val in enumerate((grp_key, str(int(row["N_LONG"])), n_str)):
+            for ci, val in enumerate((grp_key, str(n_long), n_str)):
                 item = QTableWidgetItem(val)
                 item.setFlags(item.flags() & ~Qt.ItemIsEditable)
                 t_grps.setItem(r, ci, item)
@@ -3063,7 +3068,8 @@ class GPATab(_ExplorerTab):
                 if ext == ".zip":
                     file_path = os.path.join(wd, os.path.basename(member))
                 elif ext in (".pkl", ".pickle", ".db"):
-                    file_path = os.path.join(wd, member + ".tsv")
+                    src_base = os.path.splitext(os.path.basename(path))[0]
+                    file_path = os.path.join(wd, f"{src_base}__{member}.tsv")
                 else:
                     file_path = path
             else:
@@ -3265,10 +3271,12 @@ class GPATab(_ExplorerTab):
                 dest = os.path.join(wd, os.path.basename(member))
                 zip_members.append((path, member, dest))
             elif ext_i in (".pkl", ".pickle"):
-                dest = os.path.join(wd, member + ".tsv")
+                src_base = os.path.splitext(os.path.basename(path))[0]
+                dest = os.path.join(wd, f"{src_base}__{member}.tsv")
                 pkl_members.append((path, member, dest))
             elif ext_i == ".db":
-                dest = os.path.join(wd, member + ".tsv")
+                src_base = os.path.splitext(os.path.basename(path))[0]
+                dest = os.path.join(wd, f"{src_base}__{member}.tsv")
                 db_members.append((path, member, dest))
 
         if not self._start_work("Running --gpa-prep…"):

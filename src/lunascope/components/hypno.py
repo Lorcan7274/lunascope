@@ -133,7 +133,7 @@ class HypnoMixin:
 
         # Luna call to get full HYPNO outputs
         try:
-            res = self.p.silent_proc(cmd_str)
+            self.p.silent_proc(cmd_str)
             if hasattr(self, "_profile_attach_mark"):
                 self._profile_attach_mark("_calc_hypnostats HYPNO command")
         except Exception as e:

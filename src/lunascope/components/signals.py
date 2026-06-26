@@ -699,7 +699,7 @@ class SignalsMixin:
         # ------------------------------------------------------------
         # set lights out/on
 
-        res = self.p.silent_proc( 'HEADERS' )
+        self.p.silent_proc( 'HEADERS' )
         df = self.p.table( 'HEADERS' )
         if hasattr(self, "_profile_attach_mark"):
             self._profile_attach_mark("_render_hypnogram HEADERS")
