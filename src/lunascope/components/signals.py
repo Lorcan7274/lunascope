@@ -3658,6 +3658,11 @@ class MainTraceNavProxy(QtCore.QObject):
             if self.owner._annotator_handle_maintrace_key_press(ev):
                 return True
 
+        if ev.key() == QtCore.Qt.Key_C and not ev.isAutoRepeat():
+            if hasattr(self.owner, "_snapshot_mode_active") and self.owner._snapshot_mode_active():
+                if self.owner._snapshot_record_current_view():
+                    return True
+
         key = ev.key()
         mods = ev.modifiers()
         shift = bool(mods & QtCore.Qt.ShiftModifier)

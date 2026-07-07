@@ -70,6 +70,7 @@ from .components.explorer_dock import ExplorerMixin
 from .components.annotator import AnnotatorMixin
 from .components.predict_dock import PredictMixin
 from .components.new_edf import NewEDFMixin
+from .components.snapshot import SnapshotMixin
 from .gui_help import apply_gui_help, set_render_button_help
 from .session_state import save_session_file, load_session_file, save_geometry_file, load_geometry_file
 from .runtime_paths import app_state_file
@@ -89,7 +90,7 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
                   SpecMixin , ActigraphyMixin, MasksMixin,
                   MoonbeamMixin, ExplorerMixin, AnnotatorMixin, TutorialMixin,
                   SaveEDFMixin, DropSignalsMixin,
-                  PSDOverlayMixin, PredictMixin, NewEDFMixin ):
+                  PSDOverlayMixin, PredictMixin, NewEDFMixin, SnapshotMixin ):
 
     sig_results_changed = Signal()   # emitted whenever self.results is repopulated
     sig_window_range_changed = Signal(float, float)
@@ -185,7 +186,8 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         self._init_annotator()
         self._init_psd_overlay()
         self._init_predict()
-        
+        self._init_snapshot()
+
         # for the tables added above, ensure all are read-only
         for v in self.ui.findChildren(QTableView):
             v.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -312,6 +314,20 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         act_predict.setText("Predict")
         self.ui.addAction(act_predict)
         self.ui.menuView.addAction(act_predict)
+        # Use the dock's own toggle action (not a separate QAction) so it
+        # stays in sync when the window is closed via its native close
+        # button — AuxiliaryWindow's showEvent/hideEvent keep this action's
+        # checked state correct regardless of how visibility changed. Mode
+        # state itself (self._snapshot_mode_on) is wired to the dock's
+        # visibilityChanged signal instead (see _init_snapshot), since
+        # hideEvent blocks the action's own toggled signal while unchecking
+        # it — visibilityChanged fires unconditionally either way.
+        act_snapshot = self.ui.dock_snapshot.toggleViewAction()
+        act_snapshot.setText("Snapshots")
+        act_snapshot.setShortcut(QKeySequence("Ctrl+Shift+C"))
+        act_snapshot.setShortcutContext(Qt.ApplicationShortcut)
+        self.ui.addAction(act_snapshot)
+        self.ui.menuView.addAction(act_snapshot)
         self.ui.menuView.addSeparator()
         for act in self._font_controller.create_actions(self.ui):
             self.ui.addAction(act)
@@ -565,7 +581,7 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
 
     def _lunascope_window_cycle_order(self):
         windows = [self.ui]
-        for name in ("dock_explorer", "dock_moonbeam", "dock_actigraphy", "dock_predict"):
+        for name in ("dock_explorer", "dock_moonbeam", "dock_actigraphy", "dock_predict", "dock_snapshot"):
             win = getattr(self.ui, name, None)
             if win is not None:
                 windows.append(win)
@@ -749,6 +765,19 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         finally:
             if sel_model is not None:
                 sel_model.blockSignals(was_blocked)
+        # Blocking signals above means _on_slist_current_row_changed never
+        # fires, so the expanded-row detail pane (EDF:/Annot: lines) is
+        # never told the selection moved — it silently keeps showing
+        # whatever row was expanded before. Refresh it explicitly.
+        # _expand_slist_row() only resizes the *newly* expanded row
+        # (resizeRowToContents on that one index) — it never shrinks
+        # whatever row was previously tall. _refresh_slist_row_heights()
+        # loops over every row and is what a real click also benefits from
+        # (via _on_slist_current_row_changed), so call it too.
+        if hasattr(self, "_expand_slist_row"):
+            self._expand_slist_row(idx)
+        if hasattr(self, "_refresh_slist_row_heights"):
+            self._refresh_slist_row_heights()
         self._attach_inst(idx, None)
         return True
             
