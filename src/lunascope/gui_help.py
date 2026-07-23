@@ -40,14 +40,11 @@ WIDGET_HELP: dict[str, str] = {
 
     # Main signal controls
     "butt_render": "Render selected signals/annotations for the current window and settings.",
-    "spin_spacing": "Vertical spacing between traces.",
-    "spin_scale": "Global amplitude scale multiplier for rendered traces.",
-    "spin_fixed_max": "Upper Y limit used when Fixed Y is enabled.",
-    "spin_fixed_min": "Lower Y limit used when Fixed Y is enabled.",
-    "radio_fixedscale": "Use fixed Y limits from Fixed min/max controls.",
+    "spin_spacing": "Vertical spacing between traces; available in Signal Properties.",
+    "spin_scale": "Global amplitude scale multiplier for rendered traces; available in Signal Properties.",
     "radio_clip": "Clip traces to the current Y range.",
     "radio_empiric": "Use empiric/auto scaling from current rendered data.",
-    "check_labels": "Show or hide signal labels in the main trace panel.",
+    "check_labels": "Show or hide signal labels in the main trace panel; available in Signal Properties.",
 
     # Signals/annotations/instances docks
     "butt_sig": "Toggle select-all/select-none for visible signal rows.",
@@ -141,6 +138,7 @@ ACTION_HELP: dict[str, str] = {
     "project_build_slist": "Build a sample list from a selected folder.",
     "project_attach_annots": "Scan a folder and append matching annotation files onto the current sample list by ID.",
     "project_load_edf": "Load one EDF file as an internal sample list.",
+    "moonbeam_bdc": "Select BDC in Moonbeam, enter the Seven Bridges endpoint and BDC API token, connect, select a project, and load its EDF recordings.",
     "project_load_annot": "Load annotations for current sample/EDF.",
     "project_refresh": "Refresh and reattach the currently selected sample.",
     "project_single_eval": "Evaluate commands for the currently attached sample.",

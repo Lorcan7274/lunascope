@@ -29,7 +29,7 @@ or batch analysis at any point.
 - **Annotation editor** — create, edit, and delete interval annotations; changes are immediately reflected in Luna's data model
 - **Automated sleep staging** — POPS and SOAP models accessible directly from the interface
 - **Cohort-level Explorer** — Hypnoscope alignment, annotation summaries, waveform displays, and table-based plots across a sample list
-- **Moonbeam NSRR module** — import recordings directly from the National Sleep Research Resource into the analysis context
+- **Moonbeam data module** — import recordings directly from NSRR or an authorized NIH BioData Catalyst Gen3 project into the analysis context
 - **Embedded scripting console** — execute any Luna command and receive structured result tables without leaving the application
 - **Command browser** — searchable Luna command and parameter reference with embedded documentation
 - **Multiday / actigraphy views** — support for EDF+D gapped recordings and long-form waveform review

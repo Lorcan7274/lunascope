@@ -541,6 +541,18 @@ class AnalMixin:
                 if hasattr(self, "_update_hypnogram"):
                     self._update_hypnogram()
 
+                if rendered_ss is not None:
+                    # _render_hypnogram()/_update_hypnogram() above run their own
+                    # internal Luna commands (EPOCH align/STAGE) against self.p on
+                    # every eval, regardless of what command the user actually ran.
+                    # Re-establishing the window is what a full Render does too
+                    # (signals.py's _complete_rendering), and is cheap insurance
+                    # against segsrv's cached window state going stale.
+                    try:
+                        self.ss.window(self.last_x1, self.last_x2)
+                    except Exception:
+                        pass
+
         except Exception:
             self._last_tb = traceback.format_exc().strip()
             _diag_log("_eval_done_ok: unhandled exception\n" + self._last_tb)

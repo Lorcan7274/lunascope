@@ -34,9 +34,9 @@ from PySide6.QtCore import QMetaObject, Qt, Slot
 import pyqtgraph as pg
 from PySide6.QtWidgets import (
     QProgressBar, QMessageBox, QDoubleSpinBox, QLabel, QHBoxLayout, QWidget,
-    QVBoxLayout, QGridLayout, QFrame, QSizePolicy,
+    QVBoxLayout, QFrame, QSizePolicy,
 )
-from PySide6.QtCore import QSignalBlocker, QEvent, QObject
+from PySide6.QtCore import QEvent, QObject
 from ..helpers import current_font_scale
 
 
@@ -194,13 +194,11 @@ class SignalsMixin:
         self.ui.spin_spacing.valueChanged.connect( self._update_scaling )
         self.ui.spin_scale.valueChanged.connect( self._update_scaling )
 
-        self.ui.spin_fixed_max.valueChanged.connect( self._update_scaling )
-        self.ui.spin_fixed_min.valueChanged.connect( self._update_scaling )
-
-        self.ui.radio_fixedscale.clicked.connect( self._update_scaling )
         self.ui.radio_clip.clicked.connect( self._update_scaling )
         self.ui.radio_empiric.clicked.connect( self._update_scaling )
-        self.ui.check_labels.clicked.connect( self._update_labels )
+        self.ui.check_labels.stateChanged.connect( self._update_labels )
+        self.ui.radio_clip.setEnabled(False)
+        self.ui.radio_empiric.setEnabled(False)
         
         self.last_x1 = 0
         self.last_x2 = 30
@@ -265,6 +263,7 @@ class SignalsMixin:
         spin.setValue(float(getattr(self, "cfg_line_weight", 1.0)))
         spin.setToolTip("Trace line width")
         spin.setFixedWidth(34)
+        holder.setFixedWidth(76)
 
         hlay.addWidget(lab)
         hlay.addWidget(spin)
@@ -349,16 +348,16 @@ class SignalsMixin:
                 self.ui.lbl_ewin,
                 self.ui.label_jump_width,
                 self.ui.spin_jump_width,
-                self.ui.label_spacing,
-                self.ui.spin_spacing,
-                self.ui.label_scale,
-                self.ui.spin_scale,
+                getattr(self.ui, "label_spacing", None),
+                getattr(self.ui, "spin_spacing", None),
+                getattr(self.ui, "label_scale", None),
+                getattr(self.ui, "spin_scale", None),
                 getattr(self.ui, "label_11", None),
                 getattr(self.ui, "label_12", None),
-                self.ui.spin_fixed_max,
-                self.ui.spin_fixed_min,
+                getattr(self.ui, "spin_fixed_max", None),
+                getattr(self.ui, "spin_fixed_min", None),
                 self.ui.check_labels,
-                self.ui.radio_fixedscale,
+                getattr(self.ui, "radio_fixedscale", None),
                 self.ui.radio_empiric,
                 self.ui.radio_clip,
                 self.ui.butt_render,
@@ -376,14 +375,6 @@ class SignalsMixin:
                     self.ui.lbl_ewin,
                     self.ui.label_jump_width,
                     self.ui.spin_jump_width,
-                    self.ui.label_spacing,
-                    self.ui.spin_spacing,
-                    self.ui.label_scale,
-                    self.ui.spin_scale,
-                    self.ui.spin_fixed_max,
-                    self.ui.spin_fixed_min,
-                    self.ui.check_labels,
-                    self.ui.radio_fixedscale,
                     self.ui.radio_empiric,
                     self.ui.radio_clip,
                     self.ui.butt_render,
@@ -407,52 +398,27 @@ class SignalsMixin:
             status_lay.addWidget(self.ui.lbl_ewin)
             status_lay.addWidget(self._banner_field_row(self.ui.label_jump_width, self.ui.spin_jump_width))
 
-            scaling_card, scaling_lay = self._banner_section("Y SCALE", "banner_scaling")
-            self.ui.spin_spacing.setFixedWidth(52)
-            self.ui.spin_scale.setFixedWidth(52)
-            self.ui.spin_fixed_max.setFixedWidth(84)
-            self.ui.spin_fixed_min.setFixedWidth(84)
-            merged_grid = QGridLayout()
-            merged_grid.setContentsMargins(0, 0, 0, 0)
-            merged_grid.setHorizontalSpacing(3)
-            merged_grid.setVerticalSpacing(2)
-            max_lab = QLabel("Max", scaling_card)
-            min_lab = QLabel("Min", scaling_card)
-            merged_grid.addWidget(self.ui.label_spacing, 0, 0)
-            merged_grid.addWidget(self.ui.spin_spacing, 0, 1)
-            merged_grid.addWidget(max_lab, 0, 2)
-            merged_grid.addWidget(self.ui.spin_fixed_max, 0, 3)
-            merged_grid.addWidget(self.ui.label_scale, 1, 0)
-            merged_grid.addWidget(self.ui.spin_scale, 1, 1)
-            merged_grid.addWidget(min_lab, 1, 2)
-            merged_grid.addWidget(self.ui.spin_fixed_min, 1, 3)
-            scaling_lay.addLayout(merged_grid)
-            toggles = QHBoxLayout()
-            toggles.setContentsMargins(0, 0, 0, 0)
-            toggles.setSpacing(8)
-            toggles.addWidget(self.ui.check_labels)
-            toggles.addWidget(self.ui.radio_clip)
-            toggles.addWidget(self.ui.radio_empiric)
-            toggles.addWidget(self.ui.radio_fixedscale)
-            toggles.addStretch(1)
-            scaling_lay.addLayout(toggles)
-
             action_card, action_lay = self._banner_section("TRACE VIEW", "banner_actions")
             action_lay.setSpacing(6)
             self.ui.butt_render.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Preferred)
             action_lay.addWidget(self.ui.butt_render)
+            toggles = QHBoxLayout()
+            toggles.setContentsMargins(0, 0, 0, 0)
+            toggles.setSpacing(8)
+            toggles.addWidget(self.ui.radio_clip)
+            toggles.addWidget(self.ui.radio_empiric)
             if getattr(self, "_line_weight_widget", None) is not None:
-                action_lay.addWidget(self._line_weight_widget)
+                toggles.addWidget(self._line_weight_widget)
+            toggles.addStretch(1)
+            action_lay.addLayout(toggles)
 
-            # WINDOW left-anchored; stretch pushes the rest (PSD, Y SCALE, TRACE VIEW) right.
-            # PSD is inserted between stretch and Y SCALE when available.
+            # WINDOW left-anchored; stretch pushes the remaining cards right.
             top.addWidget(status_card)
             top.addStretch(1)
-            top.addWidget(scaling_card)
             top.addWidget(action_card)
 
             self._banner_status_card = status_card
-            self._banner_scaling_card = scaling_card
+            self._banner_scaling_card = None
             self._banner_action_card = action_card
 
             # Always-visible cards keep a hard minimum so the banner never
@@ -461,15 +427,8 @@ class SignalsMixin:
             status_card.setMaximumWidth(158)
             status_card.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
             action_card.setMinimumWidth(100)
-            action_card.setMaximumWidth(100)
+            action_card.setMaximumWidth(250)
             action_card.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
-            # Optional cards: minimum = 0 so they never prevent the window from
-            # shrinking.  The threshold logic in _apply_banner_mode_inner hides
-            # them before the layout would compress them, so they appear either
-            # at full width or not at all.
-            scaling_card.setMinimumWidth(0)
-            scaling_card.setMaximumWidth(286)
-            scaling_card.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
 
             host.setStyleSheet(
                 """
@@ -482,7 +441,6 @@ class SignalsMixin:
                     background: transparent;
                 }
                 QFrame#banner_status,
-                QFrame#banner_scaling,
                 QFrame#banner_actions,
                 QFrame#banner_psd {
                     background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
@@ -504,7 +462,6 @@ class SignalsMixin:
                     font-size: 10px;
                 }
                 QFrame#banner_status QLabel,
-                QFrame#banner_scaling QLabel,
                 QFrame#banner_actions QLabel,
                 QFrame#banner_psd QLabel {
                     font-size: 10px;
@@ -515,10 +472,8 @@ class SignalsMixin:
                     font-size: 11px;
                     font-weight: 600;
                 }
-                QCheckBox#check_labels,
                 QCheckBox#radio_clip,
-                QCheckBox#radio_empiric,
-                QCheckBox#radio_fixedscale {
+                QCheckBox#radio_empiric {
                     font-size: 9px;
                 }
                 """
@@ -582,7 +537,6 @@ class SignalsMixin:
 
         self._banner_top_row.show()
         status  = getattr(self, "_banner_status_card",  None)
-        scaling = getattr(self, "_banner_scaling_card", None)
         action  = getattr(self, "_banner_action_card",  None)
         psd     = getattr(self, "_banner_psd_card",     None)
 
@@ -590,7 +544,7 @@ class SignalsMixin:
         if width <= 0:
             # Window not yet shown/sized — start with everything visible so
             # the layout reports a sensible initial minimum size.
-            for w in (status, scaling, action, psd):
+            for w in (status, action, psd):
                 if w is not None:
                     w.show()
             return
@@ -607,35 +561,23 @@ class SignalsMixin:
         # Use maximumWidth for optional cards (their minimumWidth is 0 so the
         # layout can shrink freely; maximumWidth holds the intended display width).
         w_status  = status.minimumWidth()  if status  else 0
-        w_scaling = scaling.maximumWidth() if scaling else 0
         w_psd     = psd.maximumWidth()     if psd     else 0
         w_action  = action.minimumWidth()  if action  else 0
 
-        thresh_scaling = w_status + w_scaling + w_action + OVERHEAD
-        thresh_psd     = thresh_scaling + w_psd
-
-        was_scaling = bool(getattr(self, "_banner_scaling_visible", True))
         was_psd     = bool(getattr(self, "_banner_psd_visible",     True))
 
-        if was_scaling:
-            show_scaling = width >= thresh_scaling - BAND
-        else:
-            show_scaling = width >= thresh_scaling + BAND
-
+        thresh_psd = w_status + w_psd + w_action + OVERHEAD
         if was_psd:
             show_psd = width >= thresh_psd - BAND
         else:
             show_psd = width >= thresh_psd + BAND
-        show_psd = show_psd and show_scaling and (psd is not None)
+        show_psd = show_psd and (psd is not None)
 
-        self._banner_scaling_visible = show_scaling
         self._banner_psd_visible     = show_psd
 
         for w in (status, action):
             if w is not None:
                 w.show()
-        if scaling is not None:
-            scaling.setVisible(show_scaling)
         if psd is not None:
             psd.setVisible(show_psd)
 
@@ -659,10 +601,10 @@ class SignalsMixin:
     def _render_hypnogram(self):
 
         # ------------------------------------------------------------
-        # initiate segsrv 
+        # initiate segsrv
         if hasattr(self, "_profile_attach_mark"):
             self._profile_attach_mark("_render_hypnogram begin")
-        
+
         self.ss = lp.segsrv( self.p )
         if hasattr(self, "_profile_attach_mark"):
             self._profile_attach_mark("_render_hypnogram lp.segsrv")
@@ -1069,7 +1011,7 @@ class SignalsMixin:
     def _populate_segsrv(self):
         # compute on separate thread
         # --> do not touch the GUI here
-        
+
         # segsrv options
         throttle1_sr = 100
         self._segsrv_input_throttle_sr = throttle1_sr
@@ -1136,6 +1078,8 @@ class SignalsMixin:
 
         # set palette
         self.set_palette()
+        if hasattr(self, "_refresh_dock_property_colors"):
+            self._refresh_dock_property_colors()
         
         # for a given EDF instance, take selected channels 
         if len( self.ss_chs ) + len( self.ss_anns ) == 0:
@@ -1148,6 +1092,10 @@ class SignalsMixin:
         # we're now going to have something to plot
         #   rendered and current
         self._set_render_status( True , True)
+        if hasattr(self, "_refresh_dock_property_colors"):
+            # _set_render_status changes the traversal direction used by the
+            # plot; refresh after it so table icons use rendered curve slots.
+            self._refresh_dock_property_colors()
 
         # Reinitialize segsrv for each Render so that accumulated C++ state
         # (particularly sigmods registered via make_sigmod) does not grow
@@ -1227,7 +1175,7 @@ class SignalsMixin:
         # we can now touch the GUI
         
         # update segment plot
-        self._initiate_curves()        
+        self._initiate_curves()
         
         # plot segments
 #        num_epochs = self.ss.num_epochs()
@@ -1397,6 +1345,8 @@ class SignalsMixin:
 
         # set palette
         self.set_palette()
+        if hasattr(self, "_refresh_dock_property_colors"):
+            self._refresh_dock_property_colors()
         if hasattr(self, "_profile_attach_mark"):
             self._profile_attach_mark("_render_signals_simple set_palette")
         
@@ -1409,6 +1359,8 @@ class SignalsMixin:
         self.ssa.window(self.last_x1, self.last_x2)
         self._update_scaling()
         self._update_pg1_simple()
+        if hasattr(self, "_refresh_dock_property_colors"):
+            self._refresh_dock_property_colors()
         if hasattr(self, "_profile_attach_mark"):
             self._profile_attach_mark("_render_signals_simple scaling/update_pg1_simple")
         if hasattr(self, "_psd_overlay_on_new_data"):
@@ -1561,8 +1513,24 @@ class SignalsMixin:
 
         # re-order channels, annots?
         if self.cmap_list:
-            self.ss_chs = sorted( self.ss_chs, key=lambda x: (self.cmap_rlist.index(x) if x in self.cmap_rlist else len(self.cmap_rlist) + self.ss_chs.index(x)))
-            self.ss_anns = sorted( self.ss_anns, key=lambda x: (self.cmap_list.index(x) if x in self.cmap_list else len(self.cmap_list) + self.ss_anns.index(x)))
+            ch_pos = {label: idx for idx, label in enumerate(self.ss_chs)}
+            ann_pos = {label: idx for idx, label in enumerate(self.ss_anns)}
+            self.ss_chs = sorted(
+                self.ss_chs,
+                key=lambda x: (
+                    self.cmap_rlist.index(x)
+                    if x in self.cmap_rlist
+                    else len(self.cmap_rlist) + ch_pos[x]
+                ),
+            )
+            self.ss_anns = sorted(
+                self.ss_anns,
+                key=lambda x: (
+                    self.cmap_list.index(x)
+                    if x in self.cmap_list
+                    else len(self.cmap_list) + ann_pos[x]
+                ),
+            )
         else:
             self.ss_chs = self._order_pp_channels( self.ss_chs )
 
@@ -1801,20 +1769,6 @@ class SignalsMixin:
                     if ch not in ch_set:
                         self.ss.empirical_physical_scale( ch )
 
-                # & turn off other fixed scale , if set
-                if self.ui.radio_fixedscale.isChecked() :
-                    with QSignalBlocker(self.ui.radio_fixedscale):
-                        self.ui.radio_fixedscale.setChecked(False)
-
-            elif self.ui.radio_fixedscale.isChecked():
-                lwr = self.ui.spin_fixed_min.value()
-                upr = self.ui.spin_fixed_max.value()
-                if lwr >= upr:   # degenerate range: fall back to unit defaults
-                    lwr = -1
-                    upr = +1
-                for ch in self.ss_chs:
-                    if ch not in ch_set:
-                        self.ss.fix_physical_scale( ch , lwr, upr )
             else:
                 for ch in self.ss_chs:
                     if ch not in ch_set:
@@ -1953,8 +1907,24 @@ class SignalsMixin:
 
         # ch-ordering? (based on index
         if self.cmap_list:
-            chs = sorted( chs, key=lambda x: (self.cmap_list.index(x) if x in self.cmap_list else len(self.cmap_list) + chs.index(x)))
-            anns = sorted( anns, key=lambda x: (self.cmap_list.index(x) if x in self.cmap_list else len(self.cmap_list) + anns.index(x)))
+            ch_pos = {label: idx for idx, label in enumerate(chs)}
+            ann_pos = {label: idx for idx, label in enumerate(anns)}
+            chs = sorted(
+                chs,
+                key=lambda x: (
+                    self.cmap_list.index(x)
+                    if x in self.cmap_list
+                    else len(self.cmap_list) + ch_pos[x]
+                ),
+            )
+            anns = sorted(
+                anns,
+                key=lambda x: (
+                    self.cmap_list.index(x)
+                    if x in self.cmap_list
+                    else len(self.cmap_list) + ann_pos[x]
+                ),
+            )
         else:
             chs = self._order_pp_channels( chs )
 
@@ -2130,6 +2100,8 @@ class SignalsMixin:
             self._annot_queue_overlay_on_trace_redraw()
         if hasattr(self, "_chep_overlay_on_trace_redraw"):
             self._chep_overlay_on_trace_redraw()
+        if hasattr(self, "_refresh_dock_property_colors"):
+            self._refresh_dock_property_colors()
 
 
     def _durstr( self , x , y ):
@@ -2241,8 +2213,24 @@ class SignalsMixin:
 
         # re-order channels, annots?
         if self.cmap_list:
-            chs = sorted( chs, key=lambda x: (self.cmap_list.index(x) if x in self.cmap_list else len(self.cmap_list) + chs.index(x)))
-            anns = sorted( anns, key=lambda x: (self.cmap_list.index(x) if x in self.cmap_list else len(self.cmap_list) + anns.index(x)))
+            ch_pos = {label: idx for idx, label in enumerate(chs)}
+            ann_pos = {label: idx for idx, label in enumerate(anns)}
+            chs = sorted(
+                chs,
+                key=lambda x: (
+                    self.cmap_list.index(x)
+                    if x in self.cmap_list
+                    else len(self.cmap_list) + ch_pos[x]
+                ),
+            )
+            anns = sorted(
+                anns,
+                key=lambda x: (
+                    self.cmap_list.index(x)
+                    if x in self.cmap_list
+                    else len(self.cmap_list) + ann_pos[x]
+                ),
+            )
             chs.reverse()
         else:
             chs = self._order_pp_channels( chs )
@@ -2404,6 +2392,8 @@ class SignalsMixin:
             self._annot_queue_overlay_on_trace_redraw()
         if hasattr(self, "_chep_overlay_on_trace_redraw"):
             self._chep_overlay_on_trace_redraw()
+        if hasattr(self, "_refresh_dock_property_colors"):
+            self._refresh_dock_property_colors()
 
     def _init_pg1_probe_items(self):
         pi = self.ui.pg1.getPlotItem()

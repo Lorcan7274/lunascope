@@ -5,7 +5,13 @@ from lunascope.components.annot_explorer_funcs import (
     save_annex_cache,
 )
 from lunascope.components.explorer_hypnoscope import save_hypnoscope_cache
-from lunascope.components.moonbeam_dock import MoonbeamMixin, _load_cdir, _save_cdir
+from lunascope.components.moonbeam_dock import (
+    MoonbeamMixin,
+    _load_bdc_token,
+    _load_cdir,
+    _save_bdc_token,
+    _save_cdir,
+)
 
 
 def test_annotation_explorer_cache_writes_utf8_chinese(tmp_path):
@@ -64,3 +70,14 @@ def test_moonbeam_cdir_and_manifest_read_utf8_chinese(tmp_path, monkeypatch):
     parsed = MoonbeamMixin._mb_parse_manifest(manifest)
     assert parsed["cohort"]["subcohort"]["样本一"]["edf"] == "数据/受试者一.edf"
     assert parsed["cohort"]["subcohort"]["样本一"]["annots"] == ["标注/睡眠.annot"]
+
+
+def test_moonbeam_bdc_token_cache(tmp_path, monkeypatch):
+    token_path = tmp_path / ".bdc_token"
+    monkeypatch.setattr("lunascope.components.moonbeam_dock._BDC_TOKEN_PATH", token_path)
+
+    _save_bdc_token("bdc-secret-token")
+
+    assert _load_bdc_token() == "bdc-secret-token"
+    assert token_path.read_text(encoding="utf-8") != "bdc-secret-token"
+    assert oct(token_path.stat().st_mode & 0o777) == "0o600"

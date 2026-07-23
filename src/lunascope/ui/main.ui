@@ -1016,11 +1016,53 @@
       <number>0</number>
      </property>
      <item>
-      <widget class="QPushButton" name="butt_sig">
-       <property name="text">
-        <string>Select all / none</string>
+      <layout class="QHBoxLayout" name="horizontalLayout_sig_buttons" stretch="1,1">
+       <property name="spacing">
+        <number>6</number>
        </property>
-      </widget>
+       <item>
+        <widget class="QPushButton" name="butt_sig">
+         <property name="sizePolicy">
+          <sizepolicy hsizetype="Expanding" vsizetype="Fixed">
+           <horstretch>0</horstretch>
+           <verstretch>0</verstretch>
+          </sizepolicy>
+         </property>
+         <property name="styleSheet">
+          <string notr="true">QPushButton { border: 1px solid #30363d; border-radius: 4px; padding: 4px 10px; font-size: 13px; }
+QPushButton:hover { border-color: #4c5561; }
+QPushButton:pressed { background: #21262d; }</string>
+         </property>
+         <property name="text">
+          <string>All/None</string>
+         </property>
+         <property name="autoDefault">
+          <bool>false</bool>
+         </property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QPushButton" name="butt_sig_props">
+         <property name="sizePolicy">
+          <sizepolicy hsizetype="Expanding" vsizetype="Fixed">
+           <horstretch>0</horstretch>
+           <verstretch>0</verstretch>
+          </sizepolicy>
+         </property>
+         <property name="styleSheet">
+          <string notr="true">QPushButton { border: 1px solid #30363d; border-radius: 4px; padding: 4px 10px; font-size: 13px; }
+QPushButton:hover { border-color: #4c5561; }
+QPushButton:pressed { background: #21262d; }</string>
+         </property>
+         <property name="text">
+          <string>Properties</string>
+         </property>
+         <property name="autoDefault">
+          <bool>false</bool>
+         </property>
+        </widget>
+       </item>
+      </layout>
      </item>
      <item>
       <widget class="QLineEdit" name="txt_signals">
@@ -1076,11 +1118,53 @@
       <number>0</number>
      </property>
      <item>
-      <widget class="QPushButton" name="butt_annot">
-       <property name="text">
-        <string>Select all / none</string>
+      <layout class="QHBoxLayout" name="horizontalLayout_annot_buttons" stretch="1,1">
+       <property name="spacing">
+        <number>6</number>
        </property>
-      </widget>
+       <item>
+        <widget class="QPushButton" name="butt_annot">
+         <property name="sizePolicy">
+          <sizepolicy hsizetype="Expanding" vsizetype="Fixed">
+           <horstretch>0</horstretch>
+           <verstretch>0</verstretch>
+          </sizepolicy>
+         </property>
+         <property name="styleSheet">
+          <string notr="true">QPushButton { border: 1px solid #30363d; border-radius: 4px; padding: 4px 10px; font-size: 13px; }
+QPushButton:hover { border-color: #4c5561; }
+QPushButton:pressed { background: #21262d; }</string>
+         </property>
+         <property name="text">
+          <string>All/None</string>
+         </property>
+         <property name="autoDefault">
+          <bool>false</bool>
+         </property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QPushButton" name="butt_annot_props">
+         <property name="sizePolicy">
+          <sizepolicy hsizetype="Expanding" vsizetype="Fixed">
+           <horstretch>0</horstretch>
+           <verstretch>0</verstretch>
+          </sizepolicy>
+         </property>
+         <property name="styleSheet">
+          <string notr="true">QPushButton { border: 1px solid #30363d; border-radius: 4px; padding: 4px 10px; font-size: 13px; }
+QPushButton:hover { border-color: #4c5561; }
+QPushButton:pressed { background: #21262d; }</string>
+         </property>
+         <property name="text">
+          <string>Properties</string>
+         </property>
+         <property name="autoDefault">
+          <bool>false</bool>
+         </property>
+        </widget>
+       </item>
+      </layout>
      </item>
      <item>
       <widget class="QLineEdit" name="txt_annots">

@@ -457,9 +457,21 @@ class CMapsMixin:
         # reverse order (for plotting goes y 0 - 1 is bottom - top currently
         # and can't be bothered to fix
         self.cmap_rlist = list(reversed(self.cmap_list))
+
+        # The config order is the canonical dock order. Keep both selector
+        # docks synchronized immediately when Config is applied or loaded;
+        # the subsequent simple/render rebuild then consumes this same order.
+        reorder_view = getattr(self, "_reorder_dock_property_view", None)
+        if callable(reorder_view):
+            reorder_view("signal", list(self.cfg.get("sig_order", [])))
+            reorder_view("annotation", list(self.cfg.get("ann_order", [])))
                 
-        # and flag that we'll have bespoke as the default
+        # Keep the user's active palette as the base when explicit colours are
+        # present.  Bespoke colours are an overlay; they must not turn every
+        # non-explicit channel white/black when a single dock property changes.
         if len(self.cmap) != 0:
+            if getattr(self, "palset", None) != "bespoke":
+                self._palette_before_bespoke = getattr(self, "palset", "spectrum")
             self.palset = 'bespoke'
 
         # --- metadata file ---
@@ -486,6 +498,14 @@ class CMapsMixin:
                 current_file = getattr(self, '_meta_file', '')
                 if current_file:
                     self._load_meta_file(current_file)
+
+        # Keep the picker/table indicators in sync when a study or config is
+        # loaded.  This is intentionally here as well as after palette setup:
+        # explicit colors are already known at this point, while the fallback
+        # palette may be initialized a few steps later during attach.
+        refresh_colors = getattr(self, "_refresh_dock_property_colors", None)
+        if callable(refresh_colors):
+            refresh_colors()
 
         return True
 
@@ -815,24 +835,60 @@ class CMapsMixin:
         self._update_cols()
         
     def _set_bespoke_palette(self):        
-        # back default black (i.e. for things not seen)
-        self._set_black_palette()
+        if getattr(self, "palset", None) != "bespoke":
+            self._palette_before_bespoke = getattr(self, "palset", "spectrum")
+        base = getattr(self, "_palette_before_bespoke", "spectrum")
+        base_setters = {
+            "spectrum": self._set_spectrum_palette,
+            "white": self._set_white_palette,
+            "black": self._set_black_palette,
+            "muted": self._set_muted_palette,
+            "random": self._set_random_palette,
+            "user": self._set_user_palette,
+        }
+        base_setters.get(base, self._set_spectrum_palette)()
         self.palset = 'bespoke'
-        chs = _checked_names_from_view(self.ui.tbl_desc_signals, ["CH"])
+        base_signal_names = _checked_names_from_view(self.ui.tbl_desc_signals, ["CH"])
+        base_signal_colors = list(self.colors)
+        chs = list(base_signal_names)
         # re-order list
         if self.cmap_list:
-            chs = sorted( chs, key=lambda x: (self.cmap_list.index(x) if x in self.cmap_list else len(self.cmap_list) + chs.index(x)))
+            ch_pos = {label: idx for idx, label in enumerate(chs)}
+            chs = sorted(
+                chs,
+                key=lambda x: (
+                    self.cmap_list.index(x)
+                    if x in self.cmap_list
+                    else len(self.cmap_list) + ch_pos[x]
+                ),
+            )
             chs.reverse()
         else:
             chs = self._order_pp_channels( chs )
         nchan = len( chs )
         # set signal colors
+        base_by_signal = dict(zip(base_signal_names, base_signal_colors))
+        self.colors = [base_by_signal.get(ch, base_signal_colors[i] if i < len(base_signal_colors) else "#777777")
+                       for i, ch in enumerate(chs)]
         self.colors = override_colors(self.colors, chs, self.cmap)
         self.colors = self._update_pp_signal_cols(self.colors, chs)
         # and annots
-        anns = _checked_names_from_view(self.ui.tbl_desc_annots, ["ANNOT", "CLASS"])
+        base_ann_names = _checked_names_from_view(self.ui.tbl_desc_annots, ["ANNOT", "CLASS"])
+        base_ann_colors = list(self.acolors)
+        anns = list(base_ann_names)
         if self.cmap_rlist:
-            anns = sorted( anns, key=lambda x: (self.cmap_list.index(x) if x in self.cmap_list else len(self.cmap_list) + anns.index(x)))
+            ann_pos = {label: idx for idx, label in enumerate(anns)}
+            anns = sorted(
+                anns,
+                key=lambda x: (
+                    self.cmap_list.index(x)
+                    if x in self.cmap_list
+                    else len(self.cmap_list) + ann_pos[x]
+                ),
+            )
+        base_by_ann = dict(zip(base_ann_names, base_ann_colors))
+        self.acolors = [base_by_ann.get(ann, base_ann_colors[i] if i < len(base_ann_colors) else "#777777")
+                        for i, ann in enumerate(anns)]
         self.acolors = override_colors(self.acolors, anns, self.cmap)
         self.acolors = self._update_stage_cols( self.acolors , anns )
         self._update_cols()

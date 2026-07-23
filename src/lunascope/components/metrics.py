@@ -29,7 +29,7 @@ from scipy.signal import butter, sosfilt
 
 from PySide6.QtWidgets import QHeaderView, QAbstractItemView, QTableView, QMessageBox
 from PySide6.QtGui import QBrush, QStandardItemModel, QStandardItem, QColor
-from PySide6.QtCore import Qt, QSortFilterProxyModel, QRegularExpression, QModelIndex, QSignalBlocker
+from PySide6.QtCore import Qt, QSortFilterProxyModel, QRegularExpression, QModelIndex, QSignalBlocker, QEvent
 from PySide6.QtCore import QTimer
         
 from ..helpers import sort_df_by_list
@@ -64,13 +64,50 @@ def _restore_signal_filter_defaults(channels, fmap, fmap_frqs, user_fmap_frqs):
 
     return restored
 
+class _NoScrollComboBox(QComboBox):
+    """Keep wheel scrolling on the channel table, not the Filter combo."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self._table_view = None
+
+    def _find_table_view(self):
+        widget = self.parentWidget()
+        while widget is not None:
+            if isinstance(widget, QAbstractItemView):
+                return widget
+            widget = widget.parentWidget()
+        return None
+
+    def _forward_wheel(self, event):
+        if self._table_view is None:
+            self._table_view = self._find_table_view()
+        if self._table_view is not None:
+            self._table_view.wheelEvent(event)
+        else:
+            event.ignore()
+
+    def wheelEvent(self, event):
+        # Filter changes must happen through the dropdown popup only.
+        self._forward_wheel(event)
+
+    def eventFilter(self, watched, event):
+        # Editable combos send wheel events over their text area to the
+        # internal QLineEdit, bypassing QComboBox.wheelEvent().
+        if watched is self.lineEdit() and event.type() == QEvent.Wheel:
+            self._forward_wheel(event)
+            return True
+        return super().eventFilter(watched, event)
+
+
 class _ComboDelegate(QStyledItemDelegate):
     def __init__(self, items, parent=None):
         super().__init__(parent)
         self.items = items
 
     def createEditor(self, parent, option, index):
-        cb = QComboBox(parent)
+        cb = _NoScrollComboBox(parent)
         cb.addItems(self.items)
         cb.setEditable(True)
         cb.setFrame(False)
@@ -79,6 +116,7 @@ class _ComboDelegate(QStyledItemDelegate):
         if le is not None:
             le.setReadOnly(True)
             le.setFrame(False)
+            le.installEventFilter(cb)
         cb.setStyleSheet(
             "QComboBox{padding:0 12px 0 1px;margin:0;border:0;background:transparent;}"
             "QComboBox::drop-down{subcontrol-origin:padding;subcontrol-position:top right;width:11px;border:0;}"
@@ -184,12 +222,17 @@ class MetricsMixin:
             label = str(src.index(r, label_col).data(Qt.DisplayRole) or "")
             included = included_labels is None or label in included_labels
             brush = self._rendered_membership_foreground(included)
+            label_brush = QBrush(QColor("#E7EAEE"))
             for c in range(src.columnCount()):
                 item = src.item(r, c) if hasattr(src, "item") else None
                 if item is not None:
-                    item.setForeground(brush)
+                    item.setForeground(label_brush if c == label_col else brush)
                 elif hasattr(src, "setData"):
-                    src.setData(src.index(r, c), brush, Qt.ForegroundRole)
+                    src.setData(
+                        src.index(r, c),
+                        label_brush if c == label_col else brush,
+                        Qt.ForegroundRole,
+                    )
 
         if src.rowCount() and src.columnCount():
             src.dataChanged.emit(
@@ -594,6 +637,17 @@ class MetricsMixin:
 
         def on_sig_changed(top_left, bottom_right, roles, *,
                            src=src_sig, target_col=target_src_col, ch_col=CH_SRC_COL):
+            # An empty roles list is Qt's convention for "value(s) may have
+            # changed" (e.g. plain setData/dataChanged without an explicit
+            # roles arg) and must be treated as a real edit. But a non-empty
+            # roles list naming only cosmetic roles (Qt.ForegroundRole from
+            # _apply_rendered_membership_colors_to_view's whole-table repaint,
+            # metrics.py:237-248) is a color-only refresh, not a filter edit,
+            # and must never trigger clear_filter()/apply_filter()/
+            # _update_scaling() — doing so was wiping segsrv's empirical Y
+            # cache on every post-eval repaint.
+            if roles and not ({Qt.EditRole, Qt.DisplayRole} & set(roles)):
+                return
             if not (top_left.column() <= target_col <= bottom_right.column()):
                 return
             can_update_backend = (
@@ -645,7 +699,7 @@ class MetricsMixin:
             if hasattr(self, "_signal_plot_ready") and not self._signal_plot_ready():
                 return
             self._clear_pg1()
-            self._update_scaling() # calls _update_pg1() 
+            self._update_scaling() # calls _update_pg1()
 
 
         # add wiring
@@ -747,6 +801,8 @@ class MetricsMixin:
 
         # update palette
         self.set_palette()
+        if hasattr(self, "_refresh_dock_property_colors"):
+            self._refresh_dock_property_colors()
         if hasattr(self, "_annotator_refresh_classes"):
             self._annotator_refresh_classes()
         self._apply_rendered_membership_colors()

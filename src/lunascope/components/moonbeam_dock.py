@@ -38,7 +38,12 @@ configure_tls()
 import lunapi as lp
 import pandas as pd
 from ..file_dialogs import existing_directory
-from lunapi.moonbeam import _load_token as _mb_load_tok, _save_token as _mb_save_tok
+from lunapi.moonbeam import (
+    _deobfuscate as _mb_deobfuscate,
+    _load_token as _mb_load_tok,
+    _obfuscate as _mb_obfuscate,
+    _save_token as _mb_save_tok,
+)
 
 from ..helpers import screen_clamp, is_dark_palette, AuxiliaryWindow
 
@@ -47,6 +52,7 @@ from PySide6.QtGui import QColor, QFont, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
+    QComboBox,
     QFrame,
     QHBoxLayout,
     QHeaderView,
@@ -64,12 +70,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from lunapi.bdc import BDCClient
+
 
 # ---------------------------------------------------------------------------
 # Cache-dir persistence  (~/.config/lunapi/.cdir)
 # ---------------------------------------------------------------------------
 
 _CDIR_PATH = pathlib.Path.home() / '.config' / 'lunapi' / '.cdir'
+_BDC_TOKEN_PATH = pathlib.Path.home() / '.config' / 'lunapi' / '.bdc_token'
 
 
 def _save_cdir(path: str) -> None:
@@ -93,6 +102,28 @@ def _clear_cdir() -> None:
         _CDIR_PATH.unlink(missing_ok=True)
     except Exception:
         pass
+
+
+def _save_bdc_token(token: str) -> None:
+    """Persist the BDC token for the Moonbeam dock (owner-readable only)."""
+    token = str(token or "").strip()
+    if not token:
+        return
+    _BDC_TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _BDC_TOKEN_PATH.write_text(_mb_obfuscate(token), encoding="utf-8")
+    try:
+        _BDC_TOKEN_PATH.chmod(0o600)
+    except OSError:
+        pass
+
+
+def _load_bdc_token() -> str | None:
+    """Return the saved BDC token, or None when no token is cached."""
+    try:
+        encoded = _BDC_TOKEN_PATH.read_text(encoding="utf-8").strip()
+        return _mb_deobfuscate(encoded) if encoded else None
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -417,6 +448,95 @@ class _MbCopyWorker(QObject):
             self.finished.emit()
 
 
+class _BdcConnectWorker(QObject):
+    """Authenticate to BDC and fetch the projects visible to the token."""
+
+    success = Signal(object, object)  # (client, project IDs)
+    failure = Signal(str)
+
+    def __init__(self, endpoint, token):
+        super().__init__()
+        self._args = (endpoint, token)
+
+    @Slot()
+    def run(self):
+        try:
+            endpoint, token = self._args
+            client = BDCClient(endpoint, token=token)
+            client.authenticate()
+            self.success.emit(client, client.projects())
+        except Exception as exc:
+            self.failure.emit(str(exc))
+
+
+class _BdcProjectWorker(QObject):
+    """Fetch the recording metadata for one selected BDC project."""
+
+    success = Signal(object)
+    failure = Signal(str)
+
+    def __init__(self, client, project):
+        super().__init__()
+        self._client = client
+        self._project = project
+
+    @Slot()
+    def run(self):
+        try:
+            self._client.project = self._project
+            self.success.emit(self._client.recording_groups())
+        except Exception as exc:
+            self.failure.emit(str(exc))
+
+
+class _BdcDownloadWorker(QObject):
+    """Download selected BDC recordings and their matched sidecars."""
+
+    progress = Signal(int, int)
+    item_done = Signal(str, bool)
+    log_msg = Signal(str)
+    error = Signal(str)
+    finished = Signal()
+
+    def __init__(self, client, groups, destination, force=False):
+        super().__init__()
+        self._client = client
+        self._groups = list(groups)
+        self._destination = pathlib.Path(destination)
+        self._force = bool(force)
+        self._stop = False
+
+    def stop(self):
+        self._stop = True
+
+    @Slot()
+    def run(self):
+        total = len(self._groups)
+        try:
+            for index, group in enumerate(self._groups):
+                if self._stop:
+                    break
+                recording = group["recording"]
+                iid = str(recording.get("path") or recording["name"])
+                try:
+                    self._client.download(
+                        recording, self._destination, force=self._force,
+                        progress=lambda done, size: self.log_msg.emit(
+                            f"  {iid}: {done:,} / {size:,} bytes"
+                        ),
+                    )
+                    for sidecar in group.get("sidecars", []):
+                        self._client.download(sidecar, self._destination, force=self._force)
+                    self.item_done.emit(iid, True)
+                except Exception as exc:
+                    self.log_msg.emit(f"  ✗ {iid}: {exc}")
+                    self.error.emit(f"{iid}: {exc}")
+                    self.item_done.emit(iid, False)
+                self.progress.emit(index + 1, total)
+        finally:
+            self.finished.emit()
+
+
 def _fmt_size(nbytes: int) -> str:
     nbytes = int(nbytes or 0)
     for unit in ('B', 'KB', 'MB', 'GB', 'TB'):
@@ -441,6 +561,11 @@ class MoonbeamMixin:
 
     def _init_moonbeam(self):
         self._mb              = None   # live moonbeam instance
+        self._bdc             = None   # live BDC client
+        self._mb_source       = "NSRR"
+        self._bdc_groups      = []
+        self._bdc_project     = None
+        self._bdc_projects    = []
         self._mb_mf           = None   # manifest dict (offline or live)
         self._mb_curr_cohort  = None
         self._mb_curr_subcohort = None
@@ -470,6 +595,14 @@ class MoonbeamMixin:
         tok_layout = QHBoxLayout(tok_frame)
         tok_layout.setContentsMargins(0, 0, 0, 0)
         tok_layout.setSpacing(6)
+
+        source_lbl = QLabel("Source:")
+        source_combo = QComboBox()
+        source_combo.addItems(["NSRR", "BDC"])
+        source_combo.setObjectName("mb_source_combo")
+        source_combo.setFixedWidth(90)
+        tok_layout.addWidget(source_lbl)
+        tok_layout.addWidget(source_combo)
 
         tok_lbl  = QLabel("NSRR Token:")
         tok_edit = QLineEdit()
@@ -508,6 +641,35 @@ class MoonbeamMixin:
         tok_layout.addWidget(status_lbl, 1)
         tok_layout.addWidget(update_btn)
         outer.addWidget(tok_frame)
+
+        bdc_frame = QFrame(root)
+        bdc_layout = QHBoxLayout(bdc_frame)
+        bdc_layout.setContentsMargins(0, 0, 0, 0)
+        bdc_layout.setSpacing(6)
+        bdc_endpoint = QLineEdit("https://api.sb.biodatacatalyst.nhlbi.nih.gov/v2")
+        bdc_endpoint.setPlaceholderText("BDC API endpoint")
+        bdc_project_combo = QComboBox()
+        bdc_project_combo.setPlaceholderText("Select BDC project")
+        bdc_project_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        bdc_load_btn = QPushButton("Load Project")
+        bdc_load_btn.setEnabled(False)
+        cached_bdc_token = _load_bdc_token()
+        bdc_token = QLineEdit(cached_bdc_token or "")
+        bdc_token.setPlaceholderText(
+            "Cached BDC token found" if cached_bdc_token else "BDC API token"
+        )
+        bdc_token.setEchoMode(QLineEdit.Password)
+        bdc_connect_btn = QPushButton("Connect BDC")
+        bdc_connect_btn.setObjectName("mb_bdc_connect_btn")
+        for widget in (bdc_endpoint, bdc_token):
+            widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            bdc_layout.addWidget(widget)
+        bdc_layout.addWidget(bdc_connect_btn)
+        bdc_layout.addSpacing(18)
+        bdc_layout.addWidget(bdc_project_combo)
+        bdc_layout.addWidget(bdc_load_btn)
+        bdc_frame.setVisible(False)
+        outer.addWidget(bdc_frame)
 
         # ---- Cache dir row ----------------------------------------------
         cdir_frame = QFrame(root)
@@ -728,8 +890,16 @@ class MoonbeamMixin:
         # ---- Store references on ui object (actigraphy-style) -----------
         self.ui.dock_moonbeam    = dock
         self.ui.mb_token_edit    = tok_edit
+        self.ui.mb_token_label   = tok_lbl
+        self.ui.mb_source_combo  = source_combo
         self.ui.mb_connect_btn   = connect_btn
         self.ui.mb_update_btn    = update_btn
+        self.ui.mb_bdc_frame     = bdc_frame
+        self.ui.mb_bdc_endpoint  = bdc_endpoint
+        self.ui.mb_bdc_project_combo = bdc_project_combo
+        self.ui.mb_bdc_token     = bdc_token
+        self.ui.mb_bdc_connect_btn = bdc_connect_btn
+        self.ui.mb_bdc_load_btn = bdc_load_btn
         self.ui.mb_status_lbl    = status_lbl
         self.ui.mb_tree          = tree
         self.ui.mb_table         = table
@@ -756,6 +926,9 @@ class MoonbeamMixin:
 
         # ---- Wire signals -----------------------------------------------
         connect_btn.clicked.connect(self._mb_connect)
+        bdc_connect_btn.clicked.connect(self._bdc_connect)
+        bdc_load_btn.clicked.connect(self._bdc_load_project)
+        source_combo.currentTextChanged.connect(self._mb_set_source)
         update_btn.clicked.connect(self._mb_update)
         cdir_browse_btn.clicked.connect(self._mb_browse_cache)
         cdir_temp_btn.clicked.connect(self._mb_use_temp_cache)
@@ -791,7 +964,9 @@ class MoonbeamMixin:
         self._mb_thread    = None
         self._mb_update_worker = None
         self._mb_dl_worker = None
-        self._mb_set_action_enabled(self._mb is not None)
+        self._mb_set_action_enabled(
+            self._mb is not None if self._mb_source == "NSRR" else bool(self._bdc_groups)
+        )
 
     def _mb_thread_running(self) -> bool:
         return self._mb_thread is not None and self._mb_thread.isRunning()
@@ -808,13 +983,35 @@ class MoonbeamMixin:
                 w.setEnabled(enabled)
         w = getattr(self.ui, "mb_update_btn", None)
         if w:
-            w.setEnabled(enabled and not self._mb_thread_running())
-        has_data = self._mb_mf is not None
+            w.setEnabled(enabled and self._mb_source == "NSRR" and not self._mb_thread_running())
+        has_data = self._mb_mf is not None if self._mb_source == "NSRR" else bool(self._bdc_groups)
         for name in ("mb_pop_slist_btn", "mb_pop_sel_slist_btn",
                      "mb_clear_sel_btn", "mb_cdir_clear_btn"):
             w = getattr(self.ui, name, None)
             if w:
                 w.setEnabled(has_data)
+
+    def _mb_set_source(self, source):
+        self._mb_source = str(source)
+        is_bdc = self._mb_source == "BDC"
+        for widget in (self.ui.mb_token_label, self.ui.mb_token_edit,
+                       self.ui.mb_connect_btn, self.ui.mb_update_btn):
+            widget.setVisible(not is_bdc)
+        self.ui.mb_bdc_frame.setVisible(is_bdc)
+        self.ui.mb_tree.setVisible(not is_bdc)
+        self.ui.mb_lbl_ncohorts.setVisible(not is_bdc)
+        self.ui.mb_status_lbl.setText(
+            "Enter BDC settings and connect" if is_bdc else
+            ("Connected" if self._mb is not None else "Not connected")
+        )
+        if is_bdc:
+            self._mb_populate_bdc_table()
+        else:
+            if self._mb_mf:
+                self._mb_populate_tree()
+                if self._mb_curr_cohort:
+                    self._mb_populate_table(self._mb_curr_cohort, self._mb_curr_subcohort)
+        self._mb_set_action_enabled(self._bdc is not None if is_bdc else self._mb is not None)
 
     # -----------------------------------------------------------------------
     # Offline manifest helpers
@@ -925,6 +1122,173 @@ class MoonbeamMixin:
         self.ui.mb_status_lbl.setText(f"Error: {msg[:100]}")
         QMessageBox.critical(self.ui, "Moonbeam – Connection Error", msg)
 
+    def _bdc_connect(self):
+        if self._mb_thread_running():
+            return
+        values = [self.ui.mb_bdc_endpoint.text().strip(),
+                  self.ui.mb_bdc_token.text().strip()]
+        if not all(values):
+            QMessageBox.information(
+                self.ui, "Moonbeam – BDC", "Endpoint, project, and BDC API token are required."
+            )
+            return
+        self.ui.mb_bdc_connect_btn.setEnabled(False)
+        self.ui.mb_status_lbl.setText("Connecting to BDC…")
+        thread = QThread(self)
+        worker = _BdcConnectWorker(*values)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.success.connect(self._bdc_on_connect_success)
+        worker.failure.connect(self._bdc_on_connect_failure)
+        worker.success.connect(thread.quit)
+        worker.failure.connect(thread.quit)
+        worker.success.connect(worker.deleteLater)
+        worker.failure.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._mb_clear_thread)
+        self._mb_thread = thread
+        self._mb_update_worker = worker
+        thread.start()
+
+    def _bdc_on_connect_success(self, client, projects):
+        self._bdc = client
+        _save_bdc_token(client.token)
+        self._bdc_projects = list(projects or [])
+        self._bdc_groups = []
+        self._bdc_project = None
+        combo = self.ui.mb_bdc_project_combo
+        combo.clear()
+        combo.addItems(self._bdc_projects)
+        combo.setEnabled(bool(self._bdc_projects))
+        self.ui.mb_bdc_load_btn.setEnabled(bool(self._bdc_projects))
+        self.ui.mb_bdc_connect_btn.setEnabled(True)
+        self.ui.mb_status_lbl.setText(f"BDC connected — {len(self._bdc_projects):,} project(s)")
+        self._mb_populate_bdc_table()
+        self._mb_set_action_enabled(False)
+
+    def _bdc_on_connect_failure(self, msg):
+        self._bdc = None
+        self._bdc_projects = []
+        self._bdc_groups = []
+        self.ui.mb_bdc_connect_btn.setEnabled(True)
+        self._mb_set_action_enabled(False)
+        self.ui.mb_status_lbl.setText(f"BDC error: {msg[:100]}")
+        QMessageBox.critical(self.ui, "Moonbeam – BDC Connection Error", msg)
+
+    def _bdc_load_project(self):
+        if self._bdc is None or self._mb_thread_running():
+            return
+        project = self.ui.mb_bdc_project_combo.currentText().strip()
+        if not project:
+            return
+        self._bdc_project = project
+        self.ui.mb_bdc_load_btn.setEnabled(False)
+        self.ui.mb_bdc_connect_btn.setEnabled(False)
+        self.ui.mb_status_lbl.setText(f"Loading BDC project {project}…")
+        thread = QThread(self)
+        worker = _BdcProjectWorker(self._bdc, project)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.success.connect(self._bdc_on_project_success)
+        worker.failure.connect(self._bdc_on_project_failure)
+        worker.success.connect(thread.quit)
+        worker.failure.connect(thread.quit)
+        worker.success.connect(worker.deleteLater)
+        worker.failure.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._mb_clear_thread)
+        self._mb_thread = thread
+        self._mb_update_worker = worker
+        thread.start()
+
+    def _bdc_on_project_success(self, groups):
+        self._bdc_groups = list(groups or [])
+        self.ui.mb_bdc_load_btn.setEnabled(True)
+        self.ui.mb_bdc_connect_btn.setEnabled(True)
+        self.ui.mb_status_lbl.setText(
+            f"BDC project loaded — {len(self._bdc_groups):,} EDF(s)"
+        )
+        self._mb_populate_bdc_table()
+        self._mb_set_action_enabled(bool(self._bdc_groups))
+
+    def _bdc_on_project_failure(self, msg):
+        self.ui.mb_bdc_load_btn.setEnabled(True)
+        self.ui.mb_bdc_connect_btn.setEnabled(True)
+        self.ui.mb_status_lbl.setText(f"BDC project error: {msg[:100]}")
+        QMessageBox.critical(self.ui, "Moonbeam – BDC Project Error", msg)
+
+    def _bdc_cache_dir(self):
+        project = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(self._bdc_project or "project"))
+        return pathlib.Path(self._mb_cdir) / "bdc" / project
+
+    def _bdc_group_cached(self, group):
+        recording = group["recording"]
+        target = self._bdc_local_path(recording)
+        return target.exists() and (recording.get("size") is None or target.stat().st_size == recording["size"])
+
+    def _bdc_local_path(self, record):
+        relative = str(record.get("path") or record.get("name") or "").replace("\\", "/").lstrip("/")
+        relative = "/".join(part for part in relative.split("/") if part not in ("", ".", ".."))
+        return self._bdc_cache_dir() / relative
+
+    def _mb_populate_bdc_table(self):
+        model = QStandardItemModel()
+        model.setHorizontalHeaderLabels(["", "ID", "File", "Annotations", "Cached"])
+        for row, group in enumerate(self._bdc_groups):
+            recording = group["recording"]
+            name = str(recording.get("path") or recording["name"])
+            annotations = [
+                str(sidecar.get("path") or sidecar.get("name") or "")
+                for sidecar in group.get("sidecars", [])
+                if str(sidecar.get("path") or sidecar.get("name") or "").lower().endswith(
+                    (".annot", ".eannot", ".xml")
+                )
+            ]
+            annotation_text = ", ".join(x for x in annotations if x) or "-"
+            annotation_item = _plain_item(annotation_text)
+            annotation_item.setToolTip(annotation_text)
+            chk = QStandardItem()
+            chk.setCheckable(True)
+            chk.setCheckState(Qt.Unchecked)
+            chk.setEditable(False)
+            model.appendRow([
+                chk, _plain_item(self._bdc_id(group)), _plain_item(name),
+                annotation_item, _cached_item(self._bdc_group_cached(group)),
+            ])
+        self._mb_proxy.setSourceModel(model)
+        header = self.ui.mb_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.Fixed)
+        for column in (1, 2, 3):
+            header.setSectionResizeMode(column, QHeaderView.Stretch)
+        header.setSectionResizeMode(4, QHeaderView.Fixed)
+        self.ui.mb_table.setColumnWidth(0, 28)
+        self.ui.mb_table.setColumnWidth(4, 70)
+        self.ui.mb_lbl_n.setText(f"Individuals: {len(self._bdc_groups):,}")
+        self.ui.mb_lbl_ncached.setText(
+            f"Downloaded: {sum(self._bdc_group_cached(g) for g in self._bdc_groups):,}"
+        )
+        self.ui.mb_lbl_cdir.setText(f"Cache Folder: {self._bdc_cache_dir()}")
+
+    @staticmethod
+    def _bdc_id(group):
+        name = str(group["recording"].get("path") or group["recording"]["name"])
+        lower = name.lower()
+        for suffix in (".edf.gz", ".edfz", ".edf"):
+            if lower.endswith(suffix):
+                name = name[:-len(suffix)]
+                break
+        else:
+            name = pathlib.PurePosixPath(name).stem
+        return name.replace("/", "__").replace("\\", "__")
+
+    def _bdc_checked_groups(self):
+        src = self._mb_src_model()
+        if src is None:
+            return []
+        ids = {src.item(r, 1).text() for r in range(src.rowCount())
+               if src.item(r, 0) and src.item(r, 0).checkState() == Qt.Checked}
+        return [g for g in self._bdc_groups if self._bdc_id(g) in ids]
+
     def _mb_start_update(self):
         if self._mb is None or self._mb_thread_running():
             return
@@ -1026,6 +1390,24 @@ class MoonbeamMixin:
                 self.ui, "Moonbeam",
                 "A download or copy is in progress — please wait."
             )
+            return
+        if self._mb_source == "BDC":
+            groups = self._bdc_checked_groups()
+            if not groups:
+                QMessageBox.information(self.ui, "Moonbeam – BDC", "No recordings selected.")
+                return
+            removed = 0
+            for group in groups:
+                for item in [group["recording"], *group.get("sidecars", [])]:
+                    path = self._bdc_local_path(item)
+                    if path.exists():
+                        try:
+                            path.unlink()
+                            removed += 1
+                        except OSError:
+                            pass
+            self.ui.mb_log.append(f"Cleared {removed:,} BDC cached file(s).")
+            self._mb_populate_bdc_table()
             return
         if self._mb_mf is None or self._mb_curr_cohort is None:
             QMessageBox.information(self.ui, "Moonbeam", "No cohort selected.")
@@ -1459,6 +1841,25 @@ class MoonbeamMixin:
     # -----------------------------------------------------------------------
 
     def _mb_download_selected(self):
+        if self._mb_source == "BDC":
+            groups = self._bdc_checked_groups()
+            if not groups:
+                QMessageBox.information(self.ui, "Moonbeam – BDC", "No EDF recordings selected.")
+                return
+            if len(groups) > 1:
+                reply = QMessageBox.warning(
+                    self.ui,
+                    "BDC Download Costs",
+                    f"You are about to download {len(groups):,} files from BDC.\n\n"
+                    "Downloading files may incur data-transfer costs charged to "
+                    "the associated BDC billing account. Continue?",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No,
+                )
+                if reply != QMessageBox.Yes:
+                    return
+            self._bdc_start_download(groups)
+            return
         iids = self._mb_get_checked_iids()
         if not iids:
             QMessageBox.information(
@@ -1468,6 +1869,55 @@ class MoonbeamMixin:
             )
             return
         self._mb_start_download(iids)
+
+    def _bdc_start_download(self, groups):
+        if self._bdc is None or self._mb_thread_running():
+            return
+        force = bool(self.ui.mb_force_redownload_chk.isChecked())
+        total = len(groups)
+        self.ui.mb_progress.setRange(0, total)
+        self.ui.mb_progress.setValue(0)
+        self.ui.mb_progress.setVisible(True)
+        self.ui.mb_progress_lbl.setText(f"0 / {total}")
+        self.ui.mb_cancel_btn.setVisible(True)
+        self.ui.mb_log.clear()
+        self._mb_set_action_enabled(False)
+        self.ui.mb_bdc_connect_btn.setEnabled(False)
+        self.ui.mb_status_lbl.setText(f"Downloading BDC 0 / {total}…")
+        thread = QThread(self)
+        worker = _BdcDownloadWorker(self._bdc, groups, self._bdc_cache_dir(), force=force)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progress.connect(self._bdc_on_download_progress)
+        worker.item_done.connect(self._bdc_on_item_done)
+        worker.log_msg.connect(self._mb_on_log_msg)
+        worker.error.connect(self._mb_on_dl_error)
+        worker.finished.connect(self._bdc_on_download_finished)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._mb_clear_thread)
+        self._mb_thread = thread
+        self._mb_dl_worker = worker
+        thread.start()
+
+    def _bdc_on_download_progress(self, current, total):
+        self.ui.mb_progress.setValue(current)
+        self.ui.mb_progress_lbl.setText(f"{current} / {total}")
+        self.ui.mb_status_lbl.setText(f"Downloading BDC {current} / {total}…")
+
+    def _bdc_on_item_done(self, iid, success):
+        if success:
+            self._mb_populate_bdc_table()
+
+    def _bdc_on_download_finished(self):
+        self.ui.mb_progress.setVisible(False)
+        self.ui.mb_cancel_btn.setVisible(False)
+        self.ui.mb_progress_lbl.setText("")
+        self.ui.mb_bdc_connect_btn.setEnabled(True)
+        self.ui.mb_status_lbl.setText("BDC connected")
+        self._mb_populate_bdc_table()
+        self._mb_set_action_enabled(self._bdc is not None)
 
     # -----------------------------------------------------------------------
     # Download: all in current view
@@ -1618,6 +2068,8 @@ class MoonbeamMixin:
         self.ui.mb_status_lbl.setText(f"Warning: {msg[:100]}")
 
     def _mb_build_slist_rows(self, df):
+        if self._mb_source == "BDC":
+            return self._bdc_build_slist_rows(self._bdc_checked_groups())
         if self._mb_mf is None or self._mb_curr_cohort is None:
             QMessageBox.information(
                 self.ui, "Moonbeam", "No cohort selected."
@@ -1651,6 +2103,23 @@ class MoonbeamMixin:
 
             rows.append([iid, local_edf, local_annot])
 
+        return rows
+
+    def _bdc_build_slist_rows(self, groups):
+        rows = []
+        cache = self._bdc_cache_dir()
+        for group in groups:
+            recording = group["recording"]
+            edf = self._bdc_local_path(recording)
+            if not edf.exists():
+                continue
+            annot = "."
+            for sidecar in group.get("sidecars", []):
+                candidate = self._bdc_local_path(sidecar)
+                if candidate.exists() and candidate.suffix.lower() in {".annot", ".eannot", ".xml"}:
+                    annot = str(candidate)
+                    break
+            rows.append([self._bdc_id(group), str(edf), annot])
         return rows
 
     def _mb_load_rows_into_slist(self, rows, label, origin_desc):
@@ -1702,6 +2171,10 @@ class MoonbeamMixin:
     # -----------------------------------------------------------------------
 
     def _mb_populate_slist(self):
+        if self._mb_source == "BDC":
+            rows = self._bdc_build_slist_rows(self._bdc_groups)
+            self._mb_load_rows_into_slist(rows, self._bdc_project or "BDC", "the BDC project")
+            return
         rows = self._mb_build_slist_rows(self._mb_df2)
         if rows is None:
             return
@@ -1709,6 +2182,10 @@ class MoonbeamMixin:
         self._mb_load_rows_into_slist(rows, label, f"the current view '{label}'")
 
     def _mb_populate_slist_selected(self):
+        if self._mb_source == "BDC":
+            rows = self._bdc_build_slist_rows(self._bdc_checked_groups())
+            self._mb_load_rows_into_slist(rows, self._bdc_project or "BDC", "the checked BDC recordings")
+            return
         if self._mb_df2 is None or self._mb_df2.empty:
             QMessageBox.information(
                 self.ui, "Moonbeam",

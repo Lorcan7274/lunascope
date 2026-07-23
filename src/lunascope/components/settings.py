@@ -72,6 +72,7 @@ class SettingsMixin:
         self.ui.butt_reset_param.setText("Apply" if is_cmap else "Reset")
 
     def _apply_current_cmap(self):
+        old_cfg = getattr(self, "cfg", {})
         okay = self._apply_cmaps()
         if not okay:
             return
@@ -79,7 +80,23 @@ class SettingsMixin:
         if not hasattr(self, "p"):
             return
 
-        if getattr(self, "rendered", False):
+        new_cfg = getattr(self, "cfg", {})
+        order_only = (
+            isinstance(old_cfg, dict)
+            and isinstance(new_cfg, dict)
+            and all(
+                old_cfg.get(key) == new_cfg.get(key)
+                for key in ("par", "mod", "pal", "sig", "ann")
+            )
+            and (
+                old_cfg.get("sig_order") != new_cfg.get("sig_order")
+                or old_cfg.get("ann_order") != new_cfg.get("ann_order")
+            )
+        )
+        if order_only and getattr(self, "rendered", False):
+            self._initiate_curves()
+            self._update_pg1()
+        elif getattr(self, "rendered", False):
             self._render_signals()
         else:
             self._render_signals_simple()

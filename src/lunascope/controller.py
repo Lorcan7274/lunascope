@@ -71,6 +71,7 @@ from .components.annotator import AnnotatorMixin
 from .components.predict_dock import PredictMixin
 from .components.new_edf import NewEDFMixin
 from .components.snapshot import SnapshotMixin
+from .components.dock_properties import DockPropertiesMixin
 from .gui_help import apply_gui_help, set_render_button_help
 from .session_state import save_session_file, load_session_file, save_geometry_file, load_geometry_file
 from .runtime_paths import app_state_file
@@ -90,7 +91,8 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
                   SpecMixin , ActigraphyMixin, MasksMixin,
                   MoonbeamMixin, ExplorerMixin, AnnotatorMixin, TutorialMixin,
                   SaveEDFMixin, DropSignalsMixin,
-                  PSDOverlayMixin, PredictMixin, NewEDFMixin, SnapshotMixin ):
+                  PSDOverlayMixin, PredictMixin, NewEDFMixin, SnapshotMixin,
+                  DockPropertiesMixin ):
 
     sig_results_changed = Signal()   # emitted whenever self.results is repopulated
     sig_window_range_changed = Signal(float, float)
@@ -171,6 +173,7 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         self._init_cmaps()
         self._init_slist()
         self._init_metrics()
+        self._init_dock_properties()
         self._init_hypno()
         self._init_anal()
         self._init_signals()
@@ -272,6 +275,13 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         self.ui.menuView.addAction(self.ui.dock_sig.toggleViewAction())
         self.ui.menuView.addAction(self.ui.dock_annot.toggleViewAction())
         self.ui.menuView.addAction(self.ui.dock_annots.toggleViewAction())
+        dock_property_actions = getattr(self, "_dock_property_actions", {})
+        if dock_property_actions:
+            self.ui.menuView.addSeparator()
+            for kind in ("signal", "annotation"):
+                action = dock_property_actions.get(kind)
+                if action is not None:
+                    self.ui.menuView.addAction(action)
         self.ui.menuView.addSeparator()
         self.ui.menuView.addAction(self.ui.dock_spectrogram.toggleViewAction())
         act_hypno      = self.ui.dock_hypno.toggleViewAction()
@@ -303,13 +313,17 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         self.ui.addAction(act_annex)
         self.ui.menuView.addAction(act_annex)
         act_annotator = self.annotator.toggleViewAction()
-        act_annotator.setShortcuts([QKeySequence("Ctrl+A"), QKeySequence("Ctrl+Shift+A")])
+        # Ctrl+A alone now opens Annotation-dock Properties (dock_properties.py);
+        # Annotator keeps only the Shift-prefixed form to avoid the clash.
+        act_annotator.setShortcut(QKeySequence("Ctrl+Shift+A"))
         act_annotator.setShortcutContext(Qt.ApplicationShortcut)
         act_annotator.setText("Annotator")
         self.ui.addAction(act_annotator)
         self.ui.menuView.addAction(act_annotator)
         act_predict = self.ui.dock_predict.toggleViewAction()
-        act_predict.setShortcuts([QKeySequence("Ctrl+P"), QKeySequence("Ctrl+Shift+P")])
+        # Ctrl+P alone now opens Signal-dock Properties (dock_properties.py);
+        # Predict keeps only the Shift-prefixed form to avoid the clash.
+        act_predict.setShortcut(QKeySequence("Ctrl+Shift+P"))
         act_predict.setShortcutContext(Qt.ApplicationShortcut)
         act_predict.setText("Predict")
         self.ui.addAction(act_predict)
@@ -1061,7 +1075,6 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         self.ui.spin_spacing.setEnabled( self.rendered )
         self.ui.label_spacing.setEnabled( self.rendered )
         self.ui.label_scale.setEnabled( self.rendered )
-        self.ui.radio_fixedscale.setEnabled( self.rendered )
 
         # In non-render (epoch) mode the view is fixed at 30 s, so a larger
         # jump window would just snap back.  Cap the spinbox and clamp value.

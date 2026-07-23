@@ -42,8 +42,8 @@ def test_rendered_membership_colors_gray_unrendered_signal_rows(qapp):
 
     included = src.item(0, 1).foreground().color().name().lower()
     excluded = src.item(1, 1).foreground().color().name().lower()
-    assert included == "#d7dce2"
-    assert excluded == "#777777"
+    assert included == "#e7eaee"
+    assert excluded == "#e7eaee"
 
 
 def test_rendered_membership_colors_gray_unrendered_annotation_rows(qapp):
@@ -53,8 +53,8 @@ def test_rendered_membership_colors_gray_unrendered_annotation_rows(qapp):
 
     obj._apply_rendered_membership_colors()
 
-    assert src.item(0, 1).foreground().color().name().lower() == "#d7dce2"
-    assert src.item(1, 1).foreground().color().name().lower() == "#777777"
+    assert src.item(0, 1).foreground().color().name().lower() == "#e7eaee"
+    assert src.item(1, 1).foreground().color().name().lower() == "#e7eaee"
 
 
 def test_rendered_membership_colors_clear_when_not_rendered(qapp):
@@ -66,4 +66,16 @@ def test_rendered_membership_colors_clear_when_not_rendered(qapp):
     obj._apply_rendered_membership_colors()
 
     for row in range(src.rowCount()):
-        assert src.item(row, 1).foreground().color().name().lower() == "#d7dce2"
+        assert src.item(row, 1).foreground().color().name().lower() == "#e7eaee"
+
+
+def test_explicit_dock_colors_survive_membership_styling(qapp):
+    obj = _Dummy()
+    obj.cfg = {"sig": {"C3": {"col": "#ff00aa"}}, "ann": {}}
+    src = _model(["Sel", "CH"], [["", "C3"], ["", "O1"]])
+    obj.ui.tbl_desc_signals.setModel(_proxy_for(src))
+
+    obj._apply_rendered_membership_colors()
+
+    assert src.item(0, 1).foreground().color().name().lower() == "#e7eaee"
+    assert src.item(1, 1).foreground().color().name().lower() == "#e7eaee"
