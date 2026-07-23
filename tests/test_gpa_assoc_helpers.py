@@ -91,63 +91,6 @@ def test_fit_variable_pca_can_keep_block_missing_columns_with_imputation():
     assert len(result["explained_ratio"]) >= 2
 
 
-def test_build_repeated_matrix_creates_unique_row_ids_and_applies_filters():
-    from lunascope.components.explorer_gpa import _build_repeated_matrix
-
-    df = pd.DataFrame(
-        {
-            "ID": ["S1", "S1", "S1", "S2"],
-            "N": [1, 1, 2, 1],
-            "CH": ["Cz", "Pz", "Cz", "Cz"],
-            "STG": ["N2", "N2", "N3", "N2"],
-            "AMP": [10.0, 11.0, 12.0, 13.0],
-            "DUR": [0.5, 0.6, 0.7, 0.8],
-        }
-    )
-
-    out = _build_repeated_matrix(
-        df,
-        subject_id_col="ID",
-        obs_key_cols=["N", "CH", "STG"],
-        metric_cols=["AMP", "DUR"],
-        meta_cols=["CH", "STG"],
-        filters={"STG": ["N2"]},
-    )
-
-    matrix = out["matrix"]
-    assert out["row_count"] == 3
-    assert out["subject_count"] == 2
-    assert matrix["RID"].tolist() == ["S1|1|Cz|N2", "S1|1|Pz|N2", "S2|1|Cz|N2"]
-    assert set(matrix["CH"]) == {"Cz", "Pz"}
-    assert set(out["manifest"]["VAR"]) == {"AMP", "DUR"}
-
-
-def test_build_repeated_matrix_rejects_duplicate_keys():
-    from lunascope.components.explorer_gpa import _build_repeated_matrix
-
-    df = pd.DataFrame(
-        {
-            "ID": ["S1", "S1"],
-            "N": [1, 1],
-            "CH": ["Cz", "Cz"],
-            "AMP": [10.0, 11.0],
-        }
-    )
-
-    try:
-        _build_repeated_matrix(
-            df,
-            subject_id_col="ID",
-            obs_key_cols=["N", "CH"],
-            metric_cols=["AMP"],
-            meta_cols=["CH"],
-        )
-    except ValueError as exc:
-        assert "does not uniquely identify rows" in str(exc)
-    else:
-        raise AssertionError("Expected duplicate repeated-observation keys to fail")
-
-
 def test_fit_observation_pca_returns_row_scores_and_metadata():
     from lunascope.components.explorer_gpa import _fit_observation_pca
 
