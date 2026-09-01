@@ -80,7 +80,10 @@ WIDGET_HELP: dict[str, str] = {
     "butt_reset_param": "Reset Param/Config text and reinitialize corresponding runtime state.",
 
     # Time/Frequency dock
-    "tab_timefreq": "Choose Welch, Hjorth, multitaper, or IRASA mode.",
+    "tab_timefreq": "Choose Welch, Hjorth, multitaper, IRASA, or epoch-wise Means mode.",
+    "combo_mean_channels": "Select one or more channels for epoch-wise means; all sampling rates are available.",
+    "check_mean_relative": "Normalize each selected channel independently to a 0–1 relative Y scale.",
+    "check_mean_log": "Use a logarithmic Y-axis; non-positive means are omitted.",
     "combo_spectrogram": "Primary signal to analyze; labels include sample rate.",
     "butt_spectrogram": "Run the active Time/Frequency mode.",
     "butt_hjorth": "Legacy Hjorth button; hidden by the Time/Frequency dock.",

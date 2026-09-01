@@ -959,6 +959,15 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
 
     def _clear_all(self):
 
+        # Dock3/4/5 search-filter text is per-individual; a leftover filter
+        # string would otherwise silently keep filtering the next individual's
+        # signal/annotation/event lists (this must apply to every attach path,
+        # not just the explicit Refresh action).
+        for _name in ("txt_signals", "txt_annots", "txt_events"):
+            w = getattr(self.ui, _name, None)
+            if w is not None:
+                w.clear()
+
         self.ns = 0
         self.ne = 0
         self.ss = None

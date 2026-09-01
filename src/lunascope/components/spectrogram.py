@@ -27,6 +27,7 @@ from lunascope.helpers import winsorize_array
 from PySide6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
+    QCheckBox,
     QLabel,
     QMessageBox,
     QSizePolicy,
@@ -36,6 +37,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6 import QtCore, QtWidgets, QtGui
 from ..file_dialogs import save_file_name
+from .soappops import MultiSelectComboBox
 
 from PySide6.QtCore import QMetaObject, Qt, Slot
 
@@ -71,6 +73,7 @@ class SpecMixin:
         self._spec_cache = {}
         self._spec_data_version = 0
         self._spec_job_token = 0
+        self._spec_nonmeans_winsor = None
         self._spec_zoom_timer = QtCore.QTimer(self.ui)
         self._spec_zoom_timer.setSingleShot(True)
         self._spec_zoom_timer.setInterval(400)
@@ -82,6 +85,10 @@ class SpecMixin:
         self._spec_rebuild_controls()
         self.ui.butt_spectrogram.clicked.connect(self._run_timefreq_active)
         self.ui.combo_spectrogram.currentIndexChanged.connect(self._on_spec_channel_changed)
+        self.ui.combo_mean_channels.selectionChanged.connect(self._on_mean_channels_changed)
+        self.ui.combo_mean_band.currentIndexChanged.connect(self._invalidate_spec_cache)
+        self.ui.check_mean_relative.stateChanged.connect(self._on_means_display_changed)
+        self.ui.check_mean_log.stateChanged.connect(self._on_means_display_changed)
         if hasattr(self.ui, "check_spec_legend"):
             self.ui.check_spec_legend.stateChanged.connect(self._on_spec_legend_changed)
         if hasattr(self, "sig_window_range_changed"):
@@ -119,6 +126,7 @@ class SpecMixin:
         tabs.addTab(QtWidgets.QWidget(), "Hjorth")
         tabs.addTab(QtWidgets.QWidget(), "Multitaper")
         tabs.addTab(QtWidgets.QWidget(), "IRASA")
+        tabs.addTab(QtWidgets.QWidget(), "Means")
         tabs.currentChanged.connect(self._on_timefreq_tab_changed)
         self.ui.tab_timefreq = tabs
 
@@ -162,6 +170,32 @@ class SpecMixin:
         self.ui.combo_irasa_component.addItem("Periodic", "PER")
         self.ui.combo_irasa_component.setFixedWidth(110)
 
+        self.ui.combo_mean_channels = MultiSelectComboBox(self.ui.frame_3)
+        self.ui.combo_mean_channels.setObjectName("combo_mean_channels")
+        self.ui.combo_mean_channels.setFixedWidth(210)
+        self.ui.combo_mean_channels._popup_max_rows = 18
+        self.ui.combo_mean_channels.setToolTip(
+            "Select one or more channels for epoch-wise mean traces. "
+            "All EDF channels are available here, including low-rate signals."
+        )
+        self.ui.combo_mean_band = QComboBox(self.ui.frame_3)
+        self.ui.combo_mean_band.setObjectName("combo_mean_band")
+        self.ui.combo_mean_band.addItem("Mean only", "mean")
+        self.ui.combo_mean_band.addItem("Mean ± SE", "se")
+        self.ui.combo_mean_band.addItem("Mean ± 95% CI", "ci")
+        self.ui.combo_mean_band.addItem("Mean + IQR", "iqr")
+        self.ui.combo_mean_band.addItem("Mean + min/max", "minmax")
+        self.ui.combo_mean_band.setFixedWidth(125)
+        self.ui.check_mean_relative = QCheckBox("Relative Y", self.ui.frame_3)
+        self.ui.check_mean_relative.setObjectName("check_mean_relative")
+        self.ui.check_mean_relative.setToolTip(
+            "Use a separate 0–1 relative amplitude scale for each channel; "
+            "otherwise all channels share their original Y-axis units."
+        )
+        self.ui.check_mean_log = QCheckBox("Log Y", self.ui.frame_3)
+        self.ui.check_mean_log.setObjectName("check_mean_log")
+        self.ui.check_mean_log.setToolTip("Use a logarithmic Y-axis (requires positive values).")
+
         self.ui.label_timefreq_status = QLabel("", self.ui.frame_3)
         self.ui.label_timefreq_status.setObjectName("label_timefreq_status")
         self.ui.label_timefreq_status.setMinimumWidth(0)
@@ -185,13 +219,31 @@ class SpecMixin:
         layout.addWidget(self.ui.butt_spectrogram, 0, 10)
         layout.addWidget(self.ui.check_spec_legend, 0, 11)
 
-        layout.addWidget(label("Lower Hz"), 1, 0)
+        self.ui.label_spec_lower = label("Lower Hz")
+        self.ui.label_spec_upper = label("Upper Hz")
+        self.ui.label_spec_winsor = label("Winsor")
+        layout.addWidget(self.ui.label_spec_lower, 1, 0)
         layout.addWidget(self.ui.spin_lwrfrq, 1, 1)
-        layout.addWidget(label("Upper Hz"), 1, 2)
+        layout.addWidget(self.ui.label_spec_upper, 1, 2)
         layout.addWidget(self.ui.spin_uprfrq, 1, 3)
-        layout.addWidget(label("Winsor"), 1, 4)
+        layout.addWidget(self.ui.label_spec_winsor, 1, 4)
         layout.addWidget(self.ui.spin_win, 1, 5)
         layout.addWidget(self.ui.label_timefreq_status, 1, 6, 1, 6)
+
+        self.ui.label_mean_channels = label("Channels")
+        self.ui.label_mean_band = label("Band")
+        self.ui.panel_mean_controls = QtWidgets.QWidget(self.ui.frame_3)
+        mean_layout = QtWidgets.QHBoxLayout(self.ui.panel_mean_controls)
+        mean_layout.setContentsMargins(0, 0, 0, 0)
+        mean_layout.setSpacing(4)
+        mean_layout.addWidget(self.ui.label_mean_channels)
+        mean_layout.addWidget(self.ui.combo_mean_channels)
+        mean_layout.addWidget(self.ui.label_mean_band)
+        mean_layout.addWidget(self.ui.combo_mean_band)
+        mean_layout.addWidget(self.ui.check_mean_relative)
+        mean_layout.addWidget(self.ui.check_mean_log)
+        mean_layout.addStretch(1)
+        layout.addWidget(self.ui.panel_mean_controls, 2, 0, 1, 12)
 
         self.ui.label_mtm_mode = label("MTM Mode")
         self.ui.label_mtm_nw = label("NW")
@@ -233,7 +285,10 @@ class SpecMixin:
             except AttributeError:
                 w.valueChanged.connect(self._invalidate_spec_cache)
         for w in (self.ui.spin_lwrfrq, self.ui.spin_uprfrq, self.ui.spin_win):
-            w.valueChanged.connect(self._invalidate_spec_cache)
+            if w is self.ui.spin_win:
+                w.valueChanged.connect(self._on_spec_winsor_changed)
+            else:
+                w.valueChanged.connect(self._invalidate_spec_cache)
         self.ui.combo_irasa_component.currentIndexChanged.connect(self._on_irasa_component_changed)
         self.ui.combo_mtm_mode.currentIndexChanged.connect(self._on_mtm_mode_changed)
         self._last_mtm_mode = None
@@ -243,7 +298,7 @@ class SpecMixin:
 
     def _timefreq_mode(self):
         idx = self.ui.tab_timefreq.currentIndex()
-        return ["welch", "hjorth", "mtm", "irasa"][max(0, min(idx, 3))]
+        return ["welch", "hjorth", "mtm", "irasa", "means"][max(0, min(idx, 4))]
 
     def _spec_record_ready(self):
         return (
@@ -287,9 +342,32 @@ class SpecMixin:
         mode = self._timefreq_mode()
         is_mtm = mode == "mtm"
         is_irasa = mode == "irasa"
+        is_means = mode == "means"
         current_kind = getattr(self, "_spec_plot_kind", None)
+        if is_means and self._spec_nonmeans_winsor is None:
+            self._spec_nonmeans_winsor = float(self.ui.spin_win.value())
+            self.ui.spin_win.blockSignals(True)
+            self.ui.spin_win.setValue(0.0)
+            self.ui.spin_win.blockSignals(False)
+        elif not is_means and self._spec_nonmeans_winsor is not None:
+            self.ui.spin_win.blockSignals(True)
+            self.ui.spin_win.setValue(self._spec_nonmeans_winsor)
+            self.ui.spin_win.blockSignals(False)
+            self._spec_nonmeans_winsor = None
         self.ui.panel_mtm_controls.setVisible(is_mtm)
         self.ui.panel_irasa_controls.setVisible(is_irasa)
+        for widget in (
+            self.ui.label_spec_channel, self.ui.combo_spectrogram,
+        ):
+            widget.setVisible(not is_means)
+        for widget in (
+            self.ui.label_spec_lower, self.ui.spin_lwrfrq,
+            self.ui.label_spec_upper, self.ui.spin_uprfrq,
+        ):
+            widget.setVisible(not is_means)
+        self.ui.label_spec_winsor.setVisible(True)
+        self.ui.spin_win.setVisible(True)
+        self.ui.panel_mean_controls.setVisible(is_means)
         self._set_timefreq_status("")
         self.ui.butt_spectrogram.setText("Run Hjorth" if mode == "hjorth" else "Run")
 
@@ -304,6 +382,17 @@ class SpecMixin:
     def _restore_cached_timefreq_plot(self, mode):
         if not hasattr(self, "p"):
             return False
+        if mode == "means":
+            channels = self._mean_channels()
+            if not channels:
+                return False
+            params = self._means_params(channels)
+            key = self._spec_cache_key(mode, params)
+            result = self._spec_cache.get(key)
+            if result is None:
+                return False
+            self._complete_timefreq(mode, result, cache_key=key)
+            return True
         if self.ui.combo_spectrogram.model().rowCount() == 0:
             return False
         ch = self._current_channel()
@@ -418,7 +507,9 @@ class SpecMixin:
         if getattr(self, "spectrogramcanvas", None) is None:
             return
         kind = getattr(self, "_spec_plot_kind", None)
-        if kind in ("spectrogram", "welch", "mtm", "irasa") and getattr(self, "_spec_plot_cache", None):
+        if kind == "means" and getattr(self, "_spec_plot_cache", None):
+            self._draw_means_plot(self._spec_plot_cache)
+        elif kind in ("spectrogram", "welch", "mtm", "irasa") and getattr(self, "_spec_plot_cache", None):
             cache = self._spec_plot_cache
             self._draw_heatmap_cache(self._irasa_component_result(cache) if kind == "irasa" else cache)
         elif kind == "hjorth":
@@ -457,8 +548,11 @@ class SpecMixin:
             df = self.p.headers()
 
             if df is not None:
+                all_chs = df['CH'].tolist()
+                labels = [self._format_channel_label(ch) for ch in all_chs]
+                self.ui.combo_mean_channels.set_items(labels, labels[:1])
                 if getattr(self, 'multiday_mode', False):
-                    chs = df['CH'].tolist()
+                    chs = all_chs
                 else:
                     chs = df.loc[df['SR'] >= 32, 'CH'].tolist()
             else:
@@ -470,6 +564,22 @@ class SpecMixin:
         finally:
             self.ui.combo_spectrogram.blockSignals(False)
         self._on_spec_channel_changed()
+
+    def _mean_channels(self):
+        return [str(label).split(" (", 1)[0] for label in self.ui.combo_mean_channels.checked_items()]
+
+    def _on_mean_channels_changed(self):
+        self._invalidate_spec_cache()
+
+    def _on_means_display_changed(self, *_):
+        if getattr(self, "_spec_plot_kind", None) == "means" and getattr(self, "_spec_plot_cache", None):
+            self._draw_means_plot(self._spec_plot_cache)
+
+    def _on_spec_winsor_changed(self, *_):
+        if getattr(self, "_spec_plot_kind", None) == "means":
+            self._on_means_display_changed()
+        else:
+            self._invalidate_spec_cache()
         
     def _format_channel_label(self, ch):
         sr = self._channel_sr(ch)
@@ -503,6 +613,9 @@ class SpecMixin:
         mode = self._timefreq_mode()
         if mode == "hjorth":
             self._calc_hjorth()
+            return
+        if mode == "means":
+            self._calc_means()
             return
         self._calc_timefreq(mode)
 
@@ -558,6 +671,41 @@ class SpecMixin:
 
         fut.add_done_callback(_done)
 
+    def _calc_means(self):
+        self._ensure_spectrogram_canvas()
+        if not hasattr(self, "p"):
+            QMessageBox.critical(self.ui, "Error", "No instance attached")
+            return
+        channels = self._mean_channels()
+        if not channels:
+            QMessageBox.critical(self.ui, "Error", "Select at least one channel")
+            return
+        channels = [ch for ch in channels if ch in self.p.edf.channels()]
+        if not channels:
+            QMessageBox.critical(self.ui, "Error", "No selected channels are available")
+            return
+        params = self._means_params(channels)
+        key = self._spec_cache_key("means", params)
+        if key in self._spec_cache:
+            self._complete_timefreq("means", self._spec_cache[key], cache_key=key)
+            return
+
+        self._begin_spec_job()
+        self._spec_job_token += 1
+        token = self._spec_job_token
+        fut = self._exec.submit(self._derive_timefreq, self.p, "means", params)
+
+        def _done(_f=fut):
+            try:
+                self._last_result = (token, "means", key, _f.result())
+                QMetaObject.invokeMethod(self, "_timefreq_done_ok", Qt.QueuedConnection)
+            except Exception as e:
+                self._last_exc = e
+                self._last_tb = f"{type(e).__name__}: {e}"
+                QMetaObject.invokeMethod(self, "_spectrogram_done_err", Qt.QueuedConnection)
+
+        fut.add_done_callback(_done)
+
     def _spec_params(self, mode, ch):
         minf = float(self.ui.spin_lwrfrq.value())
         maxf = float(self.ui.spin_uprfrq.value())
@@ -600,6 +748,16 @@ class SpecMixin:
                     return None
         return params
 
+    def _means_params(self, channels):
+        return {
+            "channels": tuple(channels),
+            "epoch_dur": float(self._get_epoch_dur()),
+            "band": str(self.ui.combo_mean_band.currentData() or "mean"),
+            "relative": bool(self.ui.check_mean_relative.isChecked()),
+            "winsor": float(self.ui.spin_win.value()),
+            "ns": float(getattr(self, "ns", 0.0) or 0.0),
+        }
+
     def _estimate_mtm_cells(self, span, minf, maxf, segment, inc):
         if span <= 0 or segment <= 0 or inc <= 0 or maxf <= minf:
             return 0
@@ -616,6 +774,12 @@ class SpecMixin:
             params.get("maxf"),
             params.get("winsor"),
         ]
+        if mode == "means":
+            pieces.extend([
+                params.get("channels"), params.get("band"), params.get("epoch_dur"),
+                params.get("relative"),
+            ])
+            return tuple(pieces)
         if mode == "mtm":
             pieces.extend([
                 params.get("mtm_mode"), params.get("nw"), params.get("t"),
@@ -640,6 +804,8 @@ class SpecMixin:
         }
 
     def _derive_timefreq(self, p, mode, params):
+        if mode == "means":
+            return self._derive_means(p, params)
         if mode == "welch":
             xi, yi, zi = self._derive_spectrogram(
                 p, params["ch"], params["minf"], params["maxf"], params["winsor"],
@@ -668,6 +834,11 @@ class SpecMixin:
     def _complete_timefreq(self, mode, result, cache_key=None):
         self._spec_plot_kind = mode
         self._spec_plot_cache = result
+        if mode == "means":
+            self._draw_means_plot(result)
+            if result.get("status"):
+                self._set_timefreq_status(result["status"])
+            return
         draw_result = self._irasa_component_result(result) if mode == "irasa" else result
         self._draw_heatmap_cache(draw_result)
         if draw_result.get("status"):
@@ -710,6 +881,202 @@ class SpecMixin:
             ns = getattr(self, "ns", None)
             if ns is not None and ns > 0:
                 self.spectrogramcanvas.ax.set_xlim(0, float(ns))
+        self.spectrogramcanvas.draw_idle()
+
+    def _derive_means(self, p, params):
+        """Calculate raw-sample summaries for each fixed-length epoch."""
+        # STATS is Luna's canonical implementation for epoch-wise mean and
+        # min/max.  It also respects Luna's epoch/mask model.  Use the raw
+        # path below for bands (SE/CI/IQR), which STATS does not provide.
+        if params.get("band", "mean") in ("mean", "minmax"):
+            luna_result = self._derive_means_from_luna(p, params)
+            if luna_result is not None:
+                return luna_result
+
+        epoch_dur = float(params["epoch_dur"])
+        total_seconds = float(params.get("ns", 0.0) or 0.0)
+        if epoch_dur <= 0 or total_seconds <= 0:
+            return {"x": np.array([]), "series": [], "epoch_dur": epoch_dur}
+
+        n_epochs = max(1, int(np.ceil(total_seconds / epoch_dur)))
+        x = np.arange(n_epochs, dtype=float) * epoch_dur
+        series = []
+        idx = p.s2i([(0.0, total_seconds)])
+        for ch in params["channels"]:
+            raw = p.slice(idx, chs=ch, time=True)
+            arr = raw[1] if isinstance(raw, (tuple, list)) and len(raw) > 1 else raw
+            arr = np.asarray(arr) if arr is not None else np.empty((0, 2))
+            if arr.ndim != 2 or arr.shape[1] < 2 or arr.shape[0] == 0:
+                values = np.full(n_epochs, np.nan)
+                lower = np.full(n_epochs, np.nan)
+                upper = np.full(n_epochs, np.nan)
+            else:
+                times = np.asarray(arr[:, 0], dtype=float)
+                samples = np.asarray(arr[:, 1], dtype=float)
+                values = np.full(n_epochs, np.nan)
+                lower = np.full(n_epochs, np.nan)
+                upper = np.full(n_epochs, np.nan)
+                for epoch in range(n_epochs):
+                    mask = (
+                        (times >= epoch * epoch_dur)
+                        & (times < min(total_seconds, (epoch + 1) * epoch_dur))
+                        & np.isfinite(samples)
+                    )
+                    vals = samples[mask]
+                    if vals.size == 0:
+                        continue
+                    values[epoch] = np.mean(vals)
+                    band = params.get("band", "mean")
+                    if band == "se":
+                        lower[epoch] = upper[epoch] = np.std(vals, ddof=1) / np.sqrt(vals.size) if vals.size > 1 else 0.0
+                    elif band == "ci":
+                        se = np.std(vals, ddof=1) / np.sqrt(vals.size) if vals.size > 1 else 0.0
+                        lower[epoch] = upper[epoch] = 1.96 * se
+                    elif band == "iqr":
+                        lower[epoch], upper[epoch] = np.percentile(vals, [25, 75])
+                    elif band == "minmax":
+                        lower[epoch], upper[epoch] = np.min(vals), np.max(vals)
+            series.append({"channel": ch, "mean": values, "lower": lower, "upper": upper})
+        return {
+            "x": x, "series": series, "epoch_dur": epoch_dur,
+            "band": params.get("band", "mean"), "relative": bool(params.get("relative")),
+        }
+
+    def _derive_means_from_luna(self, p, params):
+        """Return STATS epoch output for mean/min-max plots, if available."""
+        epoch_dur = float(params["epoch_dur"])
+        total_seconds = float(params.get("ns", 0.0) or 0.0)
+        channels = list(params.get("channels", ()))
+        if epoch_dur <= 0 or total_seconds <= 0 or not channels:
+            return None
+        try:
+            cmd = (
+                f"EPOCH dur={epoch_dur:g} verbose & "
+                f"STATS epoch pct=F sig={','.join(channels)}"
+            )
+            res = p.silent_proc_lunascope(cmd)
+            df = res.get("STATS: CH_E")
+            dt = res.get("EPOCH: E")
+            if df is None or dt is None or df.empty or dt.empty:
+                return None
+            required = {"E", "MEAN"}
+            if not required.issubset(df.columns) or "START" not in dt.columns or "E" not in dt.columns:
+                return None
+
+            timeline = dt.sort_values("E").reset_index(drop=True)
+            x = timeline["START"].to_numpy(dtype=float)
+            epoch_index = {value: i for i, value in enumerate(timeline["E"].tolist())}
+            has_channel = "CH" in df.columns
+            if len(channels) > 1 and not has_channel:
+                return None
+            series = []
+            for ch in channels:
+                rows = df[df["CH"] == ch] if has_channel else df
+                if rows.empty:
+                    return None
+                mean = np.full(len(x), np.nan)
+                lower = np.full(len(x), np.nan)
+                upper = np.full(len(x), np.nan)
+                for row in rows.itertuples(index=False):
+                    pos = epoch_index.get(getattr(row, "E", None))
+                    if pos is None:
+                        continue
+                    mean[pos] = float(getattr(row, "MEAN"))
+                    if params.get("band") == "minmax":
+                        if "MIN" not in df.columns or "MAX" not in df.columns:
+                            return None
+                        lower[pos] = float(getattr(row, "MIN"))
+                        upper[pos] = float(getattr(row, "MAX"))
+                series.append({"channel": ch, "mean": mean, "lower": lower, "upper": upper})
+            return {
+                "x": x, "series": series, "epoch_dur": epoch_dur,
+                "band": params.get("band", "mean"), "relative": bool(params.get("relative")),
+            }
+        except Exception:
+            # Keep the Means tab usable across Luna versions/output schemas.
+            return None
+
+    def _draw_means_plot(self, result):
+        self._ensure_spectrogram_canvas()
+        ax = self.spectrogramcanvas.ax
+        fig = ax.figure
+        for extra_ax in list(fig.axes):
+            if extra_ax is not ax:
+                extra_ax.remove()
+        ax.clear()
+        show_legend = self._show_spec_legend()
+        bg = "white" if show_legend else "black"
+        fig.patch.set_facecolor(bg)
+        ax.set_facecolor(bg)
+        from matplotlib import colormaps
+        colors = list(colormaps["tab10"].colors)
+        band = result.get("band", "mean")
+        band_label = {
+            "se": "± SE", "ci": "± 95% CI", "iqr": "IQR", "minmax": "min/max"
+        }.get(band, "")
+        for i, item in enumerate(result.get("series", [])):
+            color = colors[i % len(colors)]
+            mean = np.asarray(item["mean"], dtype=float)
+            lower = np.asarray(item["lower"], dtype=float)
+            upper = np.asarray(item["upper"], dtype=float)
+            winsor = float(self.ui.spin_win.value())
+            mean = winsorize_array(mean, winsor)
+            lower = winsorize_array(lower, winsor)
+            upper = winsorize_array(upper, winsor)
+            if result.get("relative"):
+                good = np.isfinite(mean)
+                if np.any(good):
+                    base_lo = float(np.nanmin(mean[good]))
+                    base_hi = float(np.nanmax(mean[good]))
+                    scale = base_hi - base_lo
+                    if not np.isfinite(scale) or scale <= 1e-12:
+                        scale = 1.0
+                    mean = (mean - base_lo) / scale
+                    if band in ("se", "ci"):
+                        lower = lower / scale
+                        upper = upper / scale
+                    else:
+                        lower = (lower - base_lo) / scale
+                        upper = (upper - base_lo) / scale
+            line, = ax.plot(result["x"], mean, color=color, linewidth=1.0,
+                            label=item["channel"])
+            if band != "mean":
+                ax.fill_between(result["x"], mean - lower if band in ("se", "ci") else lower,
+                                mean + upper if band in ("se", "ci") else upper,
+                                color=color, alpha=0.18, linewidth=0)
+        ax.set_title(f"Epoch-wise means{(' ' + band_label) if band_label else ''}")
+        ax.set_xlabel("Time (s)")
+        ax.set_ylabel("Mean amplitude")
+        if result.get("relative"):
+            ax.set_ylabel("Relative mean amplitude (per channel)")
+            ax.set_ylim(-0.05, 1.05)
+        ax.set_axis_on()
+        ax.margins(x=0.01, y=0.05)
+        log_y = bool(self.ui.check_mean_log.isChecked())
+        if log_y:
+            ax.set_yscale("log")
+            if result.get("relative"):
+                ax.set_ylim(0.001, 1.05)
+            if any(np.any(np.asarray(item["mean"], dtype=float) <= 0) for item in result.get("series", [])):
+                self._set_timefreq_status("Log Y hides non-positive epoch means")
+        else:
+            ax.set_yscale("linear")
+        ax.grid(True, alpha=0.2)
+        if bg == "black":
+            ax.tick_params(colors="#d7e3f4")
+            ax.xaxis.label.set_color("#d7e3f4")
+            ax.yaxis.label.set_color("#d7e3f4")
+            ax.title.set_color("#d7e3f4")
+            for spine in ax.spines.values():
+                spine.set_color("#666666")
+        if show_legend and result.get("series"):
+            legend = ax.legend(loc="upper right", framealpha=0.75)
+            if bg == "black":
+                for text in legend.get_texts():
+                    text.set_color("white")
+        ns = getattr(self, "ns", None)
+        if ns is not None and ns > 0:
+            ax.set_xlim(0, float(ns))
         self.spectrogramcanvas.draw_idle()
 
     def _set_timefreq_status(self, text):

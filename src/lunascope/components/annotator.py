@@ -1301,13 +1301,14 @@ class AnnotatorMixin:
 
         # Ensure dock5 is visible and its table is populated before searching.
         # _update_instances defers the rebuild when dock5 is hidden, so we must
-        # show the dock and flush the pending update first.
+        # show the dock and force a rebuild from the current Dock4 selection.
         dock5 = getattr(self.ui, "dock_annots", None)
         if dock5 is not None and not dock5.isVisible():
             dock5.show()
             dock5.raise_()
-            if hasattr(self, "_flush_instances_update"):
-                self._flush_instances_update()
+            if hasattr(self, "_rebuild_instances_table"):
+                anns = self.ui.tbl_desc_annots.checked() if hasattr(self.ui.tbl_desc_annots, "checked") else []
+                self._rebuild_instances_table(list(anns))
 
         model = getattr(self, "events_model", None)
         if model is None:

@@ -284,6 +284,12 @@ class SnapshotMixin:
         bl.setSpacing(6)
         jump_btn = QPushButton("Jump to Live Data")
         jump_btn.setObjectName("snapshot_jump_btn")
+        jump_btn.setStyleSheet(
+            "QPushButton { background: #2F6DB2; color: #FFFFFF; "
+            "border: 1px solid #4C8DD2; font-weight: 600; } "
+            "QPushButton:hover { background: #3D82C5; }"
+            "QPushButton:pressed { background: #25598F; }"
+        )
         jump_btn.setToolTip(
             "Load the selected row's actual view (subject, window, channels,\n"
             "filters, scaling) — selecting a row only shows its cached image;\n"
@@ -302,8 +308,14 @@ class SnapshotMixin:
         save_btn.setObjectName("snapshot_save_btn")
         load_btn = QPushButton("Load Table…")
         load_btn.setObjectName("snapshot_load_btn")
-        for b in (jump_btn, delete_btn, delete_all_btn, save_btn, load_btn):
-            bl.addWidget(b)
+        # Keep the destructive actions together at the far right, with a
+        # visual gap from navigation and table-management actions.
+        bl.addWidget(jump_btn)
+        bl.addWidget(save_btn)
+        bl.addWidget(load_btn)
+        bl.addStretch(1)
+        bl.addWidget(delete_btn)
+        bl.addWidget(delete_all_btn)
         outer.addWidget(btn_frame)
 
         # ---- attach dock ----------------------------------------------

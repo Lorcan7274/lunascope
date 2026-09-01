@@ -1038,10 +1038,8 @@ class SListMixin:
 
     def _refresh(self):
 
-        for _name in ("txt_signals", "txt_annots", "txt_events"):
-            w = getattr(self.ui, _name, None)
-            if w is not None:
-                w.clear()
+        # Dock3/4/5 filter text is now cleared uniformly in _clear_all(),
+        # which _attach_inst() (called below) always runs.
 
         view = self.ui.tbl_slist
         model = view.model()

@@ -325,8 +325,6 @@ class _MbDownloadWorker(QObject):
         """Delete local cached files so moonbeam.pull() re-downloads them."""
         sc, _, info = self._mb._resolve_iid(iid, self._subcohort)
         rel_paths = [info['edf'], *info['annots']]
-        if re.search(r'\.(edf\.gz|edfz)$', info['edf'], re.IGNORECASE):
-            rel_paths.append(info['edf'] + '.idx')
 
         removed_any = False
         for rel_path in rel_paths:
@@ -364,8 +362,6 @@ class _MbDownloadWorker(QObject):
             # HTML confirmed — delete all files for this iid so they aren't
             # treated as cached and re-checked.
             rel_paths = [info['edf']] + list(info.get('annots', []))
-            if re.search(r'\.(edf\.gz|edfz)$', info['edf'], re.IGNORECASE):
-                rel_paths.append(info['edf'] + '.idx')
             for rel_path in rel_paths:
                 local = pathlib.Path(
                     self._mb._local_path(self._cohort, rel_path.lstrip('/'))
@@ -580,7 +576,7 @@ class MoonbeamMixin:
         # ----------------------------------------------------------------
         # Build the dock widget
         # ----------------------------------------------------------------
-        dock = AuxiliaryWindow("Moonbeam (NSRR)", self.ui)
+        dock = AuxiliaryWindow("Moonbeam", self.ui)
         dock.setObjectName("dock_moonbeam")
         dock.setWindowFlag(Qt.WindowMinimizeButtonHint, True)
         dock.setWindowFlag(Qt.WindowMaximizeButtonHint, True)

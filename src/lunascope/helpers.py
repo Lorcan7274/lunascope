@@ -505,6 +505,7 @@ def add_dock_shortcuts(win, view_menu, toggle_zero=None, reset_layout=None):
 
     act_show_all = QAction("Show/Hide All Docks", win, checkable=False)
     act_show_all.setShortcut("Ctrl+0")
+    act_show_all.setShortcutContext(Qt.ApplicationShortcut)
 
     if toggle_zero is None:
         def toggle_all():
@@ -521,6 +522,7 @@ def add_dock_shortcuts(win, view_menu, toggle_zero=None, reset_layout=None):
     if reset_layout is not None:
         act_reset = QAction("Reset to Default Layout", win, checkable=False)
         act_reset.setShortcut(QKeySequence("Ctrl+R"))
+        act_reset.setShortcutContext(Qt.ApplicationShortcut)
         act_reset.triggered.connect(reset_layout)
         view_menu.addAction(act_reset)
 
@@ -549,6 +551,15 @@ def add_dock_shortcuts(win, view_menu, toggle_zero=None, reset_layout=None):
             act.setShortcut("Ctrl+-")
         elif act.text() == "(/) Commands":
             act.setShortcut("Ctrl+/")
+        else:
+            continue
+        # Without this, these shortcuts use Qt's default WindowShortcut
+        # context and go dead whenever a floating tool window (Annotator,
+        # Predict, Explorer, Moonbeam, Snapshot — all AuxiliaryWindow, which
+        # calls activateWindow() on show) has OS focus instead of the main
+        # window. Matches the ApplicationShortcut context already used for
+        # those tool windows' own toggle actions in controller.py.
+        act.setShortcutContext(Qt.ApplicationShortcut)
 
     return act_show_all
 

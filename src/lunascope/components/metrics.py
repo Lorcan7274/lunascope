@@ -716,7 +716,8 @@ class MetricsMixin:
         if hasattr(self, "_profile_attach_mark"):
             self._profile_attach_mark("_update_metrics p.annots table")
         if not df.empty:
-            df = df[df["Annotations"] != "SleepStage"]
+            labels = df["Annotations"]
+            df = df[labels.notna() & (labels.astype(str).str.strip() != "") & (labels != "SleepStage")]
         
         # re-order channels based on a cmap?                                                                                             
         if self.cmap_list:
@@ -1060,7 +1061,7 @@ class MetricsMixin:
         left , right = expand_interval( left, right, fixed_width=fixed_w )
 
         # set range and this should(?) update the plot
-        if not getattr(self, "_annot_select_no_zoom", False):
+        if not getattr(self, "_annot_select_no_zoom", False) and getattr(self, "sel", None) is not None:
             self.sel.setRange( left , right )
 
             # update plot

@@ -721,6 +721,7 @@ class SignalsMixin:
         pi.setYRange(0, 1, padding=0)
         vb.setLimits(xMin=0, xMax=self.ns, yMin=0, yMax=1)  # prevent programmatic drift
 
+
         h.setXRange(0,self.ns)
         h.setYRange(0,1)
         if hasattr(self, "_profile_attach_mark"):
@@ -750,8 +751,11 @@ class SignalsMixin:
             cols = [self.stgcols_hex.get(c, self.stgcols_hex['?']) for c in stg_evts['Class'].tolist()]
             ys = [stgns.get(c, stgns['?']) for c in stg_evts['Class'].tolist()]
 
-            # ensure we'll see
-            starts, stops = _ensure_min_px_width( vb, starts, stops, px=1)  # 1-px minimum
+            # Do not let the hidden 100x30 startup placeholder determine the
+            # geometry of full-record stage bars.  Keep exact intervals until
+            # the hypnogram is visible; this avoids re-entering Luna/segsrv.
+            if h.isVisible():
+                starts, stops = _ensure_min_px_width( vb, starts, stops, px=1)  # 1-px minimum
 
             # keep in seconds
             x = ( ( starts + stops ) / 2.0 ) 
@@ -952,8 +956,10 @@ class SignalsMixin:
             stops = df[ 'STOP' ].to_numpy()
             cols = [self.stgcols_hex.get(c, self.stgcols_hex['?']) for c in df['OSTAGE'].tolist()]
 
-            # ensure we'll see
-            starts, stops = _ensure_min_px_width( vb, starts, stops, px=1)  # 1-px minimum
+            # Match _render_hypnogram: preserve exact stage intervals while
+            # the hypnogram is hidden during initial attachment.
+            if h.isVisible():
+                starts, stops = _ensure_min_px_width( vb, starts, stops, px=1)  # 1-px minimum
             
             # keep in seconds
             x = ( ( starts + stops ) / 2.0 ) 
@@ -985,6 +991,7 @@ class SignalsMixin:
                 bg.setAcceptHoverEvents(False)
                 pi.addItem(bg)
                 self.updated_hypno.append(bg)
+
             if hasattr(self, "_profile_attach_mark"):
                 self._profile_attach_mark(f"_update_hypnogram drew overlay groups={len(bins)} items={len(self.updated_hypno)}")
 

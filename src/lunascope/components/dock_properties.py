@@ -1082,6 +1082,18 @@ class DockPropertiesMixin:
                 model.insertRow(target_row, items)
         finally:
             model.blockSignals(False)
+            # The row moves above run with the source model's signals
+            # blocked (avoids a spurious itemChanged/re-filter pass per row
+            # moved). Any QSortFilterProxyModel sitting on top (dock3/4's
+            # search-filter proxy) never saw those structural changes, so
+            # its cached row mapping can be left stale -- confirmed to
+            # desync when a filter is active (e.g. text typed into the
+            # dock's search box) at reorder time, showing/mismatching rows
+            # that shouldn't pass the filter. Invalidate it once, explicitly,
+            # so the view is guaranteed to repaint from the corrected model.
+            proxy = view.model() if view is not None else None
+            if proxy is not None and proxy is not model and hasattr(proxy, "invalidate"):
+                proxy.invalidate()
 
 
 def _entry_fields(record, section):

@@ -255,7 +255,7 @@ class MultiSelectComboBox(QComboBox):
         if row_h <= 0:
             row_h = self.fontMetrics().height() + 10
         frame = self._popup.frameWidth() * 2
-        visible_rows = min(max(row_count, 1), 10)
+        visible_rows = min(max(row_count, 1), getattr(self, "_popup_max_rows", 10))
         popup_h = visible_rows * row_h + frame
         if row_count > visible_rows:
             popup_h += self._list.horizontalScrollBar().sizeHint().height()

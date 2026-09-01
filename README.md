@@ -76,6 +76,20 @@ point is equivalent:
 - `python3 -m lunascope` is often the right choice on macOS/Linux when the Python 3 executable is named `python3`
 - `py -m lunascope` is the usual Windows launcher form when using Python from python.org
 
+### Pre-populating a session from the command line
+
+The optional positional `FILE` loads a sample list, EDF, annotation file,
+folder, or `.lss` session. `--param/-p` fills the Parameters dock, while
+`--script/-s` fills the Console dock. `--cmap/-c` can likewise pre-populate a
+channel map:
+
+```bash
+lunascope cohort.lst --param defaults.param --script analysis.lua --cmap channels.txt
+```
+
+These files are loaded into the editors; the script is not evaluated until
+you click Evaluate.
+
 **Using a virtual environment (recommended)**
 
 ```bash

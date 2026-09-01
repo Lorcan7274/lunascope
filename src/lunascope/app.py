@@ -351,6 +351,8 @@ def _parse_args(argv):
                     help="a sample list, EDF, .annot, or .lss session file (optional)")
     ap.add_argument("--param", "-p", dest="param_file", metavar="FILE",
                     help="parameter file")
+    ap.add_argument("--script", "-s", dest="script_file", metavar="FILE",
+                    help="Luna script file to pre-populate in the Console")
     ap.add_argument("--cmap", "-c", dest="cmap_file", metavar="FILE",
                     help="channel map file")
 
@@ -466,7 +468,7 @@ def main(argv=None) -> int:
     if not explicit_session:
         controller.load_geometry_cache_silently()
 
-    # optionally, attach a file list (or .edf or .annot):
+    # optionally, attach a file list (or EDF/EDFZ or .annot):
     # Do this BEFORE ui.show() so that if loading fails we can exit cleanly
     # without Qt trying to tear down a partially-visible window.
     if args.slist_file:
@@ -476,8 +478,8 @@ def main(argv=None) -> int:
             # Lunascope session?
             if input_path.lower().endswith(".lss"):
                 controller.load_session_state_file(input_path)
-            # EDF?
-            elif input_path.lower().endswith(".edf"):
+            # EDF, gzip-compressed EDF, or Luna EDFZ?
+            elif input_path.lower().endswith((".edf", ".edf.gz", ".edfz")):
                 controller.open_edf(input_path)
             # .annot file?
             elif input_path.lower().endswith(".annot"):
@@ -505,6 +507,14 @@ def main(argv=None) -> int:
             controller.ui.txt_param.setPlainText(text)
         except (UnicodeDecodeError, OSError) as e:
             print(f"[Error] Could not load {args.param_file}: {type(e).__name__}: {e}", file=sys.stderr)
+
+    # optionally, pre-load a Luna script into the Console
+    if args.script_file:
+        try:
+            text = open(args.script_file, "r", encoding="utf-8").read()
+            controller.ui.txt_inp.setPlainText(text)
+        except (UnicodeDecodeError, OSError) as e:
+            print(f"[Error] Could not load {args.script_file}: {type(e).__name__}: {e}", file=sys.stderr)
 
     # optionally, pre-load a parameter file?
     if args.cmap_file:
