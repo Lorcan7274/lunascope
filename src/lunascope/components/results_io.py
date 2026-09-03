@@ -132,6 +132,7 @@ class ResultsIOMixin:
 
     def _init_results_io(self):
         self._loaded_tsv_csv = False
+        self._results_native = False
         self.ui.butt_out_save.clicked.connect(self._save_results)
         self.ui.butt_out_load.clicked.connect(self._load_results)
         self.ui.butt_out_clear.clicked.connect(self._clear_results)
@@ -200,6 +201,7 @@ class ResultsIOMixin:
 
     def _render_tables(self, tbls):
         self._set_tsv_csv_mode(False)
+        self._results_native = True
         super()._render_tables(tbls)
 
     def _set_tsv_csv_mode(self, enabled: bool):
@@ -218,17 +220,19 @@ class ResultsIOMixin:
             self.ui,
             "Save Results",
             "",
-            "Pickle (*.pkl);;Zip of TSVs (*.zip);;All Files (*)",
+            "Pickle (*.pkl);;Zip of TSVs (*.zip);;Luna DB (*.db);;All Files (*)",
         )
         if not filename:
             return
 
         lower = filename.lower()
-        if not (lower.endswith(".pkl") or lower.endswith(".zip")):
+        if not (lower.endswith(".pkl") or lower.endswith(".zip") or lower.endswith(".db")):
             if "pkl" in selected_filter.lower():
                 filename += ".pkl"
             elif "zip" in selected_filter.lower():
                 filename += ".zip"
+            elif "db" in selected_filter.lower():
+                filename += ".db"
             else:
                 filename += ".pkl"
 
@@ -237,6 +241,8 @@ class ResultsIOMixin:
         try:
             if filename.lower().endswith(".pkl"):
                 self._save_results_pkl(filename, pairs)
+            elif filename.lower().endswith(".db"):
+                self._save_results_db(filename, pairs)
             else:
                 self._save_results_zip(filename, pairs)
         except Exception as e:
@@ -284,6 +290,47 @@ class ResultsIOMixin:
                     df.to_csv(buf, sep="\t", index=False, na_rep="NA")
                     zf.writestr(f"{folder}/{key}.tsv", buf.getvalue())
 
+    def _save_results_db(self, path, pairs):
+        """Write the currently displayed result tables as a Luna DB."""
+        ident = ""
+        source = ""
+        inst = getattr(self, "p", None)
+
+        tables = {}
+        for cmd, strata in pairs:
+            key = f"{cmd}_{strata}"
+            df = self.results.get(key)
+            if df is None:
+                continue
+            cols = [str(c) for c in df.columns]
+            data = []
+            for col in cols:
+                values = []
+                for value in df[col].tolist():
+                    if pd.isna(value):
+                        values.append(None)
+                    elif hasattr(value, "item"):
+                        values.append(value.item())
+                    else:
+                        values.append(value)
+                data.append(values)
+            tables.setdefault(str(cmd), {})[str(strata)] = (cols, data)
+
+        if not tables:
+            raise ValueError("No result tables to save.")
+
+        if inst is not None:
+            try:
+                ident = str(inst.id())
+            except Exception:
+                pass
+            try:
+                source = str(inst.edf.get_edf_file())
+            except Exception:
+                pass
+
+        self.proj.eng.write_db(path, ident, source, tables)
+
     # ------------------------------------------------------------------
     # Load
 
@@ -323,6 +370,7 @@ class ResultsIOMixin:
             return
 
         self._set_tsv_csv_mode(False)
+        self._results_native = False
         self.project_mode = project_mode
         self.results = dict(results)
         tree_df = pd.DataFrame(pairs, columns=["Command", "Strata"])
@@ -343,6 +391,7 @@ class ResultsIOMixin:
         basename = os.path.basename(filename)
         key = f"{basename}_{file_type}"
         self.results = {key: df}
+        self._results_native = False
         self._project_results_mode = True  # suppresses ID-column drop in _update_table
         self.project_mode = False
         tree_df = pd.DataFrame([{"Command": basename, "Strata": file_type}])
@@ -454,6 +503,7 @@ class ResultsIOMixin:
         from PySide6.QtGui import QStandardItemModel
         self.proj.reinit()
         self.results = {}
+        self._results_native = False
         self.project_mode = False
         self.set_tree_from_df(None)
         self.ui.anal_table.setModel(QStandardItemModel(self))
