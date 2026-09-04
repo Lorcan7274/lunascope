@@ -1,4 +1,7 @@
+import sys
+
 import pandas as pd
+import pytest
 
 from lunascope.components.annot_explorer_funcs import (
     ANNEX_CACHE_HEADER,
@@ -80,4 +83,6 @@ def test_moonbeam_bdc_token_cache(tmp_path, monkeypatch):
 
     assert _load_bdc_token() == "bdc-secret-token"
     assert token_path.read_text(encoding="utf-8") != "bdc-secret-token"
+    if sys.platform == "win32":
+        pytest.skip("POSIX-only file mode assertion")
     assert oct(token_path.stat().st_mode & 0o777) == "0o600"
