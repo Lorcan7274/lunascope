@@ -132,7 +132,7 @@ imports NSRR data directly into the environment used for
 visualization, review, and downstream analysis.
 
 
-# Relationship to existing tools
+# State of the field
 
 Existing software relevant to PSG analysis reflects different design
 goals and usage contexts. EDFbrowser [@edfbrowser] is a mature and
@@ -166,36 +166,25 @@ exploration tools, and direct workflows for NSRR-hosted data.
 
 Many existing tools also concentrate on narrower task domains such as
 staging, visualization, or selected spindle, spectral, or
-preprocessing pipelines, whereas Luna spans a broader analytical
-range, including dataset manipulation with full support for gapped 
-recordings; interval-level annotation handling; multi-day and
-actigraphy-based analyses; linear modeling; multivariate statistical
-approaches; neurobiological age prediction; high-density EEG support,
-including interpolation, connectivity, and EEG microstate analysis;
-and multiple spectral methods, including Welch, multitaper, wavelet,
-Hilbert, and IRASA-based analyses.
+preprocessing pipelines. Luna instead provides a shared analytical
+engine spanning dataset manipulation, interval-level annotations,
+multi-day and actigraphy-based analyses, statistical modeling,
+high-density EEG, and multiple spectral methods. This build-versus-
+contribute decision reflects the central contribution of the ecosystem:
+integrating scalable analysis, Python workflows, and interactive review
+around a common data model and command language.
 
 # Software design
 
-The software stack is organized in three layers. Luna,
-implemented in C/C++, provides the analysis engine and command set for
-sleep signal processing. It supports European Data Format (EDF/EDF+) inputs [@kemp1992edf;
-@kemp2003edfplus; @edfplus_site] together with XML and Luna annotation
-formats; the latter uses a simple tab-delimited format supporting
-clock-time or elapsed-time encodings, interval durations, and metadata. It also includes EDF manipulation and restructuring
-workflows, including support for generating EDF/EDF+ from ASCII TSV
-input. The native API exposes recordings and derived data as `Eigen`
-[@eigenweb] arrays and matrices, evaluates the same domain-specific
-Luna scripting language used at the command line, and includes
-embedded command metadata that can be queried programmatically. Some
-time/frequency analyses and modeling components, including automated
-staging and related prediction workflows, build on external numerical
-libraries such as FFTW3 [@frigo2005fftw3] and LightGBM
-[@ke2017lightgbm]. Luna also supports association modeling, including
-linear-model and permutation-based inference implemented with
-efficient `Eigen`-based matrix algebra.  \autoref{fig:overview} gives an overview
-of the core Luna tools, the scope of primary functions, and examples
-of the visual Lunascope interface.
+The software stack is organized in three layers. Luna, implemented in
+C/C++, provides the analysis engine and command set for sleep signal
+processing, including EDF/EDF+ inputs [@kemp1992edf; @kemp2003edfplus;
+@edfplus_site], XML and Luna annotation formats, spectral analyses,
+automated staging, and statistical modeling. Its native API exposes
+recordings and derived data to higher-level interfaces, while the same
+Luna command language is available at the command line and in the
+application. \autoref{fig:overview} gives an overview of the core Luna
+tools, primary functionality, and the visual Lunascope interface.
 
 ![Figure 1. Overview of the Luna & Lunascope. A. The family of Luna tools. B. Schematic
 of core domains of functionality in Luna. C. Visualization in Lunascope.
@@ -207,14 +196,10 @@ applications. It supports single-recording and project-level workflows,
 including sample-list construction, command execution across cohorts,
 and structured retrieval of Luna result tables as Python objects.
 
-Luna's output system is designed to separate computation from
-presentation. The same command outputs can be emitted to standard
-output, written to SQLite-backed [@sqlite] result stores queryable as
-virtual TSV-like tables, returned to Python as structured objects,
-displayed in Qt tables within Lunascope, or written as compressed
-text tables. Luna also retains a legacy R interface for direct
-integration with R workflows. This output model helps preserve comparable results across
-command-line, scripted, and interactive settings.
+Luna separates computation from presentation: command outputs can be
+written to result stores, returned to Python as structured objects, or
+displayed in Lunascope, preserving comparable results across command-
+line, scripted, and interactive settings.
 
 Lunascope is implemented in Python (3.9--3.14) using PySide6 (Qt 6)
 and pyqtgraph as the graphical layer on top of `lunapi`, meaning every
@@ -226,22 +211,12 @@ hours of data. `lunapi` provides a lighter-weight embedded viewer
 (`scope`) for JupyterLab; Lunascope is the more full-featured desktop
 environment within the same ecosystem.
 
-The Lunascope interface is organized as synchronized docks around a central
-signal viewer. Docks can be shown, hidden, detached, repositioned, or
-tabbed, and the layout persists across launches. Several modules ---
-including Moonbeam, the Explorer, and the Annotator --- operate as
-floating windows. Full application state can be saved and restored via
-session files.
-
-Within Lunascope, the viewer is tightly coupled to the Luna data model
-rather than operating as a passive display layer. Signals and
-annotations are attached through `lunapi`, can be inspected at multiple
-timescales, and can be queried or modified in the same session that
-executes Luna commands. Changes made in the visual annotation editor, for
-example, are immediately propagated back to the underlying Luna data
-model. Conversely, signals or annotations created or modified through
-Luna commands executed in the Lunascope console are immediately reflected
-in the viewer.
+The Lunascope interface is organized around a synchronized signal
+viewer with docks for annotation, analysis, and cohort exploration.
+Its key design choice is tight coupling to the Luna data model rather
+than treating visualization as a passive display layer. Signals and
+annotations can be inspected or modified in the viewer and are
+immediately synchronized with commands executed through the console.
 
 More generally, interval-level annotations are
 treated as first-class objects within Luna, and arbitrary expressions
@@ -253,25 +228,12 @@ underlying sample-level data. This supports interactive measurement,
 annotation-aware review, and direct visual inspection of outputs from
 Luna analyses.
 
-Several interface elements are particularly important within the wider
-ecosystem. The embedded console executes native Luna command strings and
-returns structured result tables, so graphical and scripted analyses
-share one command language. The command browser and output tables use
-Luna's embedded documentation metadata to expose parameter and variable
-descriptions inside the application. Moonbeam provides direct access to
-NSRR studies and imports recordings into the analytic context used
-for interactive review. The Explorer extends the single-recording
-viewer to cohort-level displays, including hypnogram alignment
-(`Hypnoscope`), annotation summaries, waveform displays, and table-based
-plots. Lunascope also exposes stack-specific methods such as POPS and
-SOAP, multiday actigraphy views for EDF+D-style recordings, and
-rendered trace modulation by derived signal properties, allowing Luna
-outputs to be inspected as part of the visual workflow rather than only
-as exported tables.
-
-The command-line Luna tool supports embarrassingly parallel
-high-performance computing workflows, with per-job outputs combined
-using `destrat`, which compiles result tables across distributed runs.
+The embedded console uses native Luna commands, while Moonbeam and the
+Explorer connect NSRR data and cohort-level displays to the same analytic
+context. This design allows outputs to be inspected as part of the
+visual workflow rather than only as exported tables, while the command-
+line tool supports parallel workflows whose results can be combined with
+`destrat`.
 
 
 
