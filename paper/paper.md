@@ -240,18 +240,18 @@ line tool supports parallel workflows whose results can be combined with
 # Research impact statement
 
 The Luna/`lunapi`/Lunascope stack supports a shared workflow spanning
-batch analysis, scripted exploration, and interactive review. Within
-the Purcell laboratory, Lunascope is used for PSG review, quality
-assessment, and exploratory analysis in projects that also rely on
-Luna's analytical pipeline, including work on sleep EEG spectral
-variation [@kozhemiako2022slope], neurodevelopmental sleep architecture
+batch analysis, scripted exploration, and interactive
+review. Lunascope is used for PSG review, quality assessment, and
+exploratory analysis in projects that also rely on Luna's analytical
+pipeline, including work on sleep EEG spectral variation
+[@kozhemiako2022slope], neurodevelopmental sleep architecture
 [@kozhemiako2024], and the GRINS schizophrenia neurophysiology
 consortium [@Wang:2024; @murphy2024; @kozhemiako2022].
 
 
 # Availability
 
-The primary entry point for the Luna ecosystem is https://zzz.nyspi.org/luna/.
+The primary entry point for the Luna ecosystem is https://zzz-luna.org/luna/.
 Lunascope is distributed via PyPI [@lunascope_pypi] and as standalone macOS and Windows
 binaries built via GitHub Actions.  The software is available at the
 Lunascope source repository [@lunascope_repo], with user documentation
