@@ -55,7 +55,8 @@ from ..runtime_paths import app_cache_root, app_state_file
 from ..file_dialogs import existing_directory, save_file_name
 
 
-POPS_DOWNLOAD_URL = "https://zzz.nyspi.org/dist/luna/pops.zip"
+# GitHub redirects this to the named asset in the latest published release.
+POPS_DOWNLOAD_URL = "https://github.com/remnrem/luna-resources/releases/latest/download/luna-resources-pops.zip"
 POPS_STATE_FILE = "pops_location.json"
 
 
@@ -435,7 +436,7 @@ class SoapPopsMixin:
 
     def _download_pops_resources(self) -> None:
         bundle_dir = self._default_pops_bundle_dir()
-        archive_path = bundle_dir / "pops.zip"
+        archive_path = bundle_dir / "luna-resources-pops.zip"
         extract_dir = bundle_dir / "resources"
         staging_dir = Path(tempfile.mkdtemp(prefix="pops-", dir=str(bundle_dir.parent)))
 

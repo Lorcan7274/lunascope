@@ -22,6 +22,7 @@
 import os
 import shutil
 import socket
+import tempfile
 import threading
 import urllib.error
 import urllib.request
@@ -33,7 +34,8 @@ from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QProgressD
 from ..file_dialogs import existing_directory
 
 
-TUTORIAL_DOWNLOAD_URL = "https://zzz.nyspi.org/dist/luna/tutorial.zip"
+# GitHub redirects this to the named asset in the latest published release.
+TUTORIAL_DOWNLOAD_URL = "https://github.com/remnrem/luna-resources/releases/latest/download/luna-resources-tutorial.zip"
 TUTORIAL_TIMEOUT_SECS = 180   # 3 minutes before giving up
 
 
@@ -50,7 +52,7 @@ class TutorialMixin:
             return
 
         dest_path = Path(dest_dir)
-        archive_path = dest_path / "tutorial.zip"
+        archive_path = dest_path / "luna-resources-tutorial.zip"
         tutorial_subdir = dest_path / "tutorial"
 
         # ── 2. Warn if archive or extracted folder already exist ──────
@@ -74,7 +76,7 @@ class TutorialMixin:
 
         # ── 3. Download with a cancellable progress dialog ───────────
         progress = QProgressDialog(
-            "Downloading tutorial.zip …\n(this may take a minute on slow connections)",
+            "Downloading luna-resources-tutorial.zip …\n(this may take a minute on slow connections)",
             "Cancel",
             0,
             0,          # indeterminate bar
@@ -135,10 +137,19 @@ class TutorialMixin:
 
         # ── 4. Extract ────────────────────────────────────────────────
         try:
-            if tutorial_subdir.exists():
-                shutil.rmtree(tutorial_subdir)
-            with zipfile.ZipFile(archive_path, "r") as zf:
-                zf.extractall(dest_path)
+            with tempfile.TemporaryDirectory(prefix="tutorial-", dir=dest_path) as staging:
+                with zipfile.ZipFile(archive_path, "r") as zf:
+                    zf.extractall(staging)
+                # Releases wrap tutorial/ in a versioned resource directory.
+                extracted = next(
+                    (p for p in Path(staging).rglob("tutorial") if p.is_dir()),
+                    None,
+                )
+                if extracted is None:
+                    raise FileNotFoundError("No tutorial folder was found in the archive.")
+                if tutorial_subdir.exists():
+                    shutil.rmtree(tutorial_subdir)
+                shutil.move(str(extracted), str(tutorial_subdir))
         except Exception as exc:
             QMessageBox.critical(
                 self.ui,

@@ -58,6 +58,7 @@ from .components.masks import MasksMixin
 from .components.ctree import CTreeMixin
 from .components.spectrogram import SpecMixin
 from .components.actigraphy import ActigraphyMixin
+from .components.hypnodensity_viewer import HypnodensityViewerMixin
 from .components.soappops import SoapPopsMixin
 from .components.tutorial import TutorialMixin
 from .components.save_edf import SaveEDFMixin
@@ -88,7 +89,7 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
                   HypnoMixin , SoapPopsMixin,
                   AnalMixin , SignalsMixin,
                   SettingsMixin, CTreeMixin ,
-                  SpecMixin , ActigraphyMixin, MasksMixin,
+                  SpecMixin , ActigraphyMixin, HypnodensityViewerMixin, MasksMixin,
                   MoonbeamMixin, ExplorerMixin, AnnotatorMixin, TutorialMixin,
                   SaveEDFMixin, DropSignalsMixin,
                   PSDOverlayMixin, PredictMixin, NewEDFMixin, SnapshotMixin,
@@ -181,6 +182,7 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         self._init_ctree()
         self._init_spec()
         self._init_actigraphy()
+        self._init_hypnodensity_viewer()
         self._init_soap_pops()
         self._init_masks()
         self._init_results_io()
@@ -215,6 +217,7 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         act_load_session = QAction("Load Session...", self)
         act_download_pops = QAction("Download POPS Resources...", self)
         act_download_tutorial = QAction("Download Tutorial...", self)
+        act_download_hdpc = QAction("Download HDPC...", self)
 
         # connect to same slots as buttons
         act_load_slist.triggered.connect(self.open_file)
@@ -244,6 +247,7 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         act_load_session.triggered.connect(self._load_session_state)
         act_download_pops.triggered.connect(self._download_pops_resources)
         act_download_tutorial.triggered.connect(self._download_tutorial)
+        act_download_hdpc.triggered.connect(self._download_hdpc_resources)
         self._act_proj_eval = act_proj_eval
 
         self.ui.menuProject.addAction(act_load_slist)
@@ -267,6 +271,7 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         self.ui.menuProject.addSeparator()
         self.ui.menuProject.addAction(act_download_pops)
         self.ui.menuProject.addAction(act_download_tutorial)
+        self.ui.menuProject.addAction(act_download_hdpc)
 
         # set up menu items: viewing
         self.ui.menuView.addAction(self.ui.dock_slist.toggleViewAction())
@@ -305,13 +310,11 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         act_moonbeam.setShortcut(QKeySequence("Ctrl+M"))
         act_moonbeam.setShortcutContext(Qt.ApplicationShortcut)
         self.ui.addAction(act_moonbeam)
-        self.ui.menuView.addAction(act_moonbeam)
         act_annex = self.ui.dock_explorer.toggleViewAction()
         act_annex.setShortcut(QKeySequence("Ctrl+E"))
         act_annex.setShortcutContext(Qt.ApplicationShortcut)
         act_annex.setText("Explorer")
         self.ui.addAction(act_annex)
-        self.ui.menuView.addAction(act_annex)
         act_annotator = self.annotator.toggleViewAction()
         # Ctrl+A alone now opens Annotation-dock Properties (dock_properties.py);
         # Annotator keeps only the Shift-prefixed form to avoid the clash.
@@ -319,7 +322,6 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         act_annotator.setShortcutContext(Qt.ApplicationShortcut)
         act_annotator.setText("Annotator")
         self.ui.addAction(act_annotator)
-        self.ui.menuView.addAction(act_annotator)
         act_predict = self.ui.dock_predict.toggleViewAction()
         # Ctrl+P alone now opens Signal-dock Properties (dock_properties.py);
         # Predict keeps only the Shift-prefixed form to avoid the clash.
@@ -327,7 +329,6 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         act_predict.setShortcutContext(Qt.ApplicationShortcut)
         act_predict.setText("Predict")
         self.ui.addAction(act_predict)
-        self.ui.menuView.addAction(act_predict)
         # Use the dock's own toggle action (not a separate QAction) so it
         # stays in sync when the window is closed via its native close
         # button — AuxiliaryWindow's showEvent/hideEvent keep this action's
@@ -341,6 +342,24 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
         act_snapshot.setShortcut(QKeySequence("Ctrl+Shift+C"))
         act_snapshot.setShortcutContext(Qt.ApplicationShortcut)
         self.ui.addAction(act_snapshot)
+        act_hypnodensity = QAction("Hypnodensity viewer", self)
+        # Ctrl+H can be intercepted by desktop/window-manager hide bindings,
+        # notably on macOS.  Keep it where available, with a dependable
+        # Shift-modified alternative advertised by Qt in the menu.
+        # Qt shows only the primary sequence in a menu.  Put the dependable
+        # alternative first so it is visibly discoverable there.
+        act_hypnodensity.setShortcuts([
+            QKeySequence("Ctrl+Shift+H"),
+            QKeySequence("Ctrl+H"),
+        ])
+        act_hypnodensity.setShortcutContext(Qt.ApplicationShortcut)
+        act_hypnodensity.triggered.connect(self.show_hypnodensity_viewer)
+        self.ui.addAction(act_hypnodensity)
+        self.ui.menuView.addAction(act_hypnodensity)
+        self.ui.menuView.addAction(act_annex)
+        self.ui.menuView.addAction(act_moonbeam)
+        self.ui.menuView.addAction(act_annotator)
+        self.ui.menuView.addAction(act_predict)
         self.ui.menuView.addAction(act_snapshot)
         self.ui.menuView.addSeparator()
         for act in self._font_controller.create_actions(self.ui):
@@ -401,6 +420,7 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
             "project_load_session": act_load_session,
             "project_download_pops": act_download_pops,
             "project_download_tutorial": act_download_tutorial,
+            "project_download_hdpc": act_download_hdpc,
             "about_help": act_about,
             "palette_spectrum": act_pal_spectrum,
             "palette_white": act_pal_white,

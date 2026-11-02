@@ -129,13 +129,14 @@ class NumericSortFilterProxy(QSortFilterProxyModel):
 
     def filterAcceptsRow(self, source_row, source_parent):
         rx = self.filterRegularExpression()
-        if not rx.pattern():
-            return True
         src = self.sourceModel()
         if isinstance(src, DataFrameModel):
             mask = src.filter_mask()
             if mask is not None and source_row < len(mask):
                 return bool(mask[source_row])
+        if not rx.pattern():
+            return True
+        if isinstance(src, DataFrameModel):
             row_text = src.row_text()
             if source_row < len(row_text):
                 return bool(rx.match(row_text[source_row]).hasMatch())

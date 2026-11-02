@@ -371,11 +371,13 @@ def plot_tf_heatmap(xi, yi, zi, title, ax, *, y_label="Frequency (Hz)",
 
 
 @staticmethod
-def hypno_density( probs , ax ):
+def hypno_density(probs, ax, *, colors=None):
    ax.clear()
    if len(probs) == 0: return
    pp_cols = ["PP_N1", "PP_N2", "PP_N3", "PP_R", "PP_W"]
-   res = probs.reindex(columns=pp_cols, fill_value=0.0).copy()
+   # The standard call keeps its historical five PP-channel order.  A caller
+   # passing colours has already supplied a grouped frame (e.g. NREM/REM/W).
+   res = probs.reindex(columns=pp_cols, fill_value=0.0).copy() if colors is None else probs.copy()
    ne = len(res)
    x = np.arange(1, ne+1, 1)
    y = res.to_numpy(dtype=float)
@@ -383,7 +385,9 @@ def hypno_density( probs , ax ):
    ysize=2.5
    ax.set_xlabel('Epoch')
    ax.set_ylabel('Prob(stage)')
-   ax.stackplot(x, y.T , colors = lp.stgcol([ 'N1','N2','N3','R','W']) )
+   if colors is None:
+       colors = lp.stgcol(['N1', 'N2', 'N3', 'R', 'W']) if len(res.columns) == 5 else None
+   ax.stackplot(x, y.T, colors=colors)
    ax.set(xlim=(1, ne), xticks=[ 1 , ne ] , 
           ylim=(0, 1), yticks=np.arange(0, 1))                                                                                             
    return ax
