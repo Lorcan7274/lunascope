@@ -1411,6 +1411,82 @@ class SignalsMixin:
             return True
         return ch not in sigmods
 
+    def _edge_extension_margin(self, ch, left, right, width_px, rendered=False):
+        """Pad only when adjacent samples can be separated by visible pixels."""
+        rates = getattr(self, "srs", None)
+        if not rates or ch not in rates or right <= left:
+            return 0.0
+        rate = float(rates[ch])
+        if not np.isfinite(rate) or rate <= 0:
+            return 0.0
+        if rendered:
+            # Match segsrv_t::add_channel's input decimation rule.
+            throttle = float(getattr(self, "_segsrv_input_throttle_sr", 100))
+            if throttle > 0 and rate > throttle:
+                rate /= max(1, int(rate / throttle))
+        if width_px / (rate * (right - left)) < 2.0:
+            return 0.0
+        # p.slice() can omit the last in-range sample at low SR, so give its
+        # simple-mode fetch extra room. The rendered backend needs less.
+        return (1.5 if rendered else 3.0) / rate
+
+    @staticmethod
+    def _curve_with_edge_samples(x, y, extra_x, extra_y, left, right, scale_y,
+                                 include_inside=False):
+        """Add real samples for the curve while preserving narrow x/y values."""
+        x = np.asarray(x)
+        y = np.asarray(y)
+        extra_x = np.asarray(extra_x)
+        extra_y = np.asarray(extra_y)
+        if not x.size or x.size != y.size or extra_x.size != extra_y.size:
+            return x, y
+
+        before = np.flatnonzero(np.isfinite(extra_x) & (extra_x < left))
+        after = np.flatnonzero(np.isfinite(extra_x) & (extra_x >= right))
+        x_parts, y_parts = [], []
+        if before.size:
+            i = int(before[-1])
+            if np.isfinite(extra_y[i]):
+                value = float(scale_y(extra_y[i]))
+                if not np.isfinite(value):
+                    finite_y = y[np.isfinite(y)]
+                    value = float(finite_y[0]) if finite_y.size else np.nan
+                if np.isfinite(value):
+                    x_parts.append(extra_x[i:i + 1])
+                    y_parts.append(np.array([value]))
+        x_parts.append(x)
+        y_parts.append(y)
+        if include_inside:
+            # Simple-mode p.slice() can omit samples inside the requested
+            # interval. Add them to the curve; narrow values win on duplicates.
+            inside = np.flatnonzero(np.isfinite(extra_x) &
+                                    (extra_x >= left) & (extra_x < right) &
+                                    np.isfinite(extra_y))
+            if inside.size:
+                values = np.asarray([scale_y(extra_y[i]) for i in inside], dtype=float)
+                finite = np.isfinite(values)
+                if np.any(finite):
+                    x_parts.append(extra_x[inside[finite]])
+                    y_parts.append(values[finite])
+        if after.size:
+            i = int(after[0])
+            if np.isfinite(extra_y[i]):
+                value = float(scale_y(extra_y[i]))
+                if not np.isfinite(value):
+                    finite_y = y[np.isfinite(y)]
+                    value = float(finite_y[-1]) if finite_y.size else np.nan
+                if np.isfinite(value):
+                    x_parts.append(extra_x[i:i + 1])
+                    y_parts.append(np.array([value]))
+        if len(x_parts) == 1:
+            return x, y
+        joined_x = np.concatenate(x_parts)
+        joined_y = np.concatenate(y_parts)
+        order = np.argsort(joined_x, kind="stable")
+        joined_x, joined_y = joined_x[order], joined_y[order]
+        keep = np.r_[True, np.diff(joined_x) != 0]
+        return joined_x[keep], joined_y[keep]
+
     def _resolve_channel_phys_range(self, ch, values=None):
         if ch in self.cmap_fixed_min:
             return float(self.cmap_fixed_min[ch]), float(self.cmap_fixed_max[ch])
@@ -1941,12 +2017,15 @@ class SignalsMixin:
         idx = 0
         self._pg1_channel_cache = []
         sigmod_idx = 0 # n(ch) x 18
+        widened_window = False
         tv = [ '' ] * ( len(chs) + len(anns) )
         yv = [ 0.5 ] * ( len(chs) + len(anns) )
         xv = [  x1 + ( x2 - x1 ) * 0.02 ] * ( len(chs) + len(anns) )
         for ch in chs:
             x = None
             y = None
+            plot_x = None
+            plot_y = None
 
             # y0 lines
             curve_slot = nchan - idx - 1
@@ -1987,21 +2066,33 @@ class SignalsMixin:
                     self.sigmod_curves[sigmod_idx].setData(tx1, ty1)
                     sigmod_idx = sigmod_idx + 1
             else: # regular channel
-                # signals
+                # Keep the requested window authoritative for scaling and probes.
                 x = self.ss.get_timetrack( ch )
                 y = self.ss.get_scaled_signal( ch , idx )
-                # note: if filters set, these will have been passed to segsrv, which will
-                #       take care of filtering in the above call
-                # draw
-                self.curves[nchan-idx-1].setData(x, y)
+                plot_x, plot_y = x, y
+                margin = self._edge_extension_margin(ch, x1, x2, width_px, rendered=True)
+                if margin and len(x) and len(x) == len(y):
+                    widened_window = True
+                    try:
+                        self.ss.window(x1 - margin, x2 + margin)
+                        extra_x = self.ss.get_timetrack(ch)
+                        extra_y = self.ss.get_signal(ch)
+                    finally:
+                        self.ss.window(x1, x2)
+                    plot_x, plot_y = self._curve_with_edge_samples(
+                        x, y, extra_x, extra_y, x1, x2,
+                        lambda value: self.ss.get_scaled_y(ch, float(value)),
+                    )
+                # Filters are already applied by segsrv to both fetches.
+                self.curves[nchan-idx-1].setData(plot_x, plot_y)
 
             ylim = self.ss.get_window_phys_range( ch )
             band0 = self.ss.get_scaled_y(ch, ylim[0])
             band1 = self.ss.get_scaled_y(ch, ylim[1])
             self._set_pp_fill_curve(
                 curve_slot,
-                x,
-                y,
+                plot_x,
+                plot_y,
                 min(band0, band1),
                 enabled=self._channel_uses_pp_fill(ch, sigmods),
             )
@@ -2033,6 +2124,13 @@ class SignalsMixin:
             yv[idx] = self.ss.get_ylabel( idx )
             # next
             idx = idx + 1
+
+        # A temporary display window clears segsrv's PSD cache. Rebuild it on
+        # the requested window so later PSD reads see the original selection.
+        if widened_window and self.ss.get_psd_mode():
+            for channel_idx, channel in enumerate(chs):
+                if channel in rendered_chs:
+                    self.ss.get_scaled_signal(channel, channel_idx)
 
         # Clear curve slots for channels that were rendered but are now deselected.
         # Without this, deselected channels leave ghost traces on screen.
@@ -2210,6 +2308,7 @@ class SignalsMixin:
         pw = self.ui.pg1
         vb = pw.getPlotItem().getViewBox()
         vb.setRange(xRange=(x1,x2), padding=0, update=False)  # no immediate paint
+        width_px = max(16, int(round(float(vb.width() or 1.0))))
 
         # scaling
         h = 1 - self.pg1_header_height - self.pg1_footer_height - self.pg1_annot_height
@@ -2260,6 +2359,8 @@ class SignalsMixin:
             self._set_pp_fill_curve(idx, None, None, 0.0, enabled=False)
             # no data, e.g. in gap?
             if len(d) == 0:
+                self.curves[idx].setData([], [])
+                self.fill_curves[idx].setData([], [])
                 if idx < len(self.y0_curves):
                     self.y0_curves[idx].setData([], [])
                 idx = idx + 1
@@ -2276,13 +2377,33 @@ class SignalsMixin:
             else: y = y - y
             # --> to grid value
             ybase = idx * h + self.pg1_footer_height
-            y = ybase + y * h 
-            # plot
-            self.curves[idx].setData(x, y)
+            y = ybase + y * h
+            plot_x, plot_y = x, y
+            margin = self._edge_extension_margin(ch, x1, x2, width_px)
+            if margin:
+                extra = self.p.slice(
+                    self.p.s2i([(max(0.0, x1 - margin), min(float(self.ns), x2 + margin))]),
+                    chs=ch, time=True,
+                )[1]
+                if len(extra):
+                    extra_y = extra[:, 1]
+                    if ch in self.fmap:
+                        extra_y = self.filter_signal(extra_y, ch, (self.fmap[ch], self.srs[ch]))
+                    def scale_extra(value):
+                        if mx > mn:
+                            return ybase + (float(value) - mn) / (mx - mn) * h
+                        return ybase
+                    plot_x, plot_y = self._curve_with_edge_samples(
+                        x, y, extra[:, 0], extra_y, x1, x2, scale_extra,
+                        include_inside=True,
+                    )
+            # Only the curve and its fill use the extra points. The cache below
+            # keeps the requested window for probes and the simple-mode PSD.
+            self.curves[idx].setData(plot_x, plot_y)
             self._set_pp_fill_curve(
                 idx,
-                x,
-                y,
+                plot_x,
+                plot_y,
                 ybase,
                 enabled=self._channel_uses_pp_fill(ch),
             )
