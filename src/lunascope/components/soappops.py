@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QMenu,
     QToolButton,
+    QPushButton,
     QVBoxLayout,
     QMessageBox,
     QComboBox,
@@ -972,45 +973,110 @@ class SoapPopsMixin:
                 self.ui.butt_pops_browse = butt_pops_browse
                 self.ui.butt_pops_resource = butt_pops_resource
 
-            if getattr(self.ui, "label_pops_model", None) is None:
-                label_pops_model = QLabel("Model", self.ui.butt_pops.parentWidget())
+            if getattr(self.ui, "pops_model_header", None) is None:
+                model_header = QWidget(self.ui.butt_pops.parentWidget())
+                model_header.setObjectName("pops_model_header")
+                model_header_layout = QVBoxLayout(model_header)
+                model_header_layout.setContentsMargins(0, 0, 0, 0)
+                model_header_layout.setSpacing(2)
+
+                label_pops_model = QLabel("Model", model_header)
                 label_pops_model.setObjectName("label_pops_model")
-                pops_layout.addWidget(label_pops_model, 0, 2)
+                model_header_layout.addWidget(label_pops_model)
+
+                pops_layout.removeWidget(self.ui.txt_pops_model)
+                model_header_layout.addWidget(self.ui.txt_pops_model)
+
+                pops_layout.addWidget(model_header, 0, 2, 2, 1)
+                self.ui.pops_model_header = model_header
                 self.ui.label_pops_model = label_pops_model
 
+            if getattr(self.ui, "pops_run_header", None) is None:
+                run_header = QWidget(self.ui.butt_pops.parentWidget())
+                run_header.setObjectName("pops_run_header")
+                run_header_layout = QHBoxLayout(run_header)
+                run_header_layout.setContentsMargins(0, 0, 0, 0)
+                run_header_layout.setSpacing(8)
+
+                pops_layout.removeWidget(self.ui.butt_pops)
+                run_header_layout.addWidget(self.ui.butt_pops)
+
+                butt_pops_hypno = QPushButton("Hypno\n(5s)", run_header)
+                butt_pops_hypno.setObjectName("butt_pops_hypno")
+                butt_pops_hypno.setMinimumSize(90, 56)
+                run_header_layout.addWidget(butt_pops_hypno)
+
+                pops_layout.addWidget(run_header, 0, 5, 2, 1)
+                self.ui.pops_run_header = run_header
+                self.ui.butt_pops_hypno = butt_pops_hypno
+
             pops_layout.removeWidget(self.ui.check_pops_ignore_obs)
-            pops_layout.removeWidget(self.ui.check_pops_emit_pp)
-            pops_layout.removeWidget(self.ui.radio_pops_hypnodens)
-            pops_layout.removeWidget(self.ui.txt_pops_model)
-            pops_layout.addWidget(self.ui.txt_pops_model, 1, 2)
+            pops_layout.removeWidget(self.ui.check_pops_coda)
             pops_layout.addWidget(self.ui.check_pops_ignore_obs, 0, 3)
-            pops_layout.addWidget(self.ui.check_pops_emit_pp, 0, 4)
-            pops_layout.addWidget(self.ui.radio_pops_hypnodens, 1, 3, 1, 2)
+            pops_layout.addWidget(self.ui.check_pops_coda, 1, 3)
+
+            if getattr(self.ui, "pops_posteriors_header", None) is None:
+                posteriors_header = QWidget(self.ui.butt_pops.parentWidget())
+                posteriors_header.setObjectName("pops_posteriors_header")
+                posteriors_header_layout = QHBoxLayout(posteriors_header)
+                # Deliberate left margin so this post-run view toggle reads as
+                # its own group, independent of how wide column 3 happens to be.
+                posteriors_header_layout.setContentsMargins(18, 0, 0, 0)
+                posteriors_header_layout.setSpacing(0)
+
+                pops_layout.removeWidget(self.ui.radio_pops_hypnodens)
+                posteriors_header_layout.addWidget(self.ui.radio_pops_hypnodens)
+
+                pops_layout.addWidget(posteriors_header, 1, 4)
+                self.ui.pops_posteriors_header = posteriors_header
+
             pops_layout.setColumnStretch(0, 0)
             pops_layout.setColumnStretch(1, 0)
             pops_layout.setColumnStretch(2, 0)
-            pops_layout.setColumnStretch(3, 1)
+            pops_layout.setColumnStretch(3, 0)
             pops_layout.setColumnStretch(4, 0)
             pops_layout.setColumnStretch(5, 0)
-            pops_layout.setHorizontalSpacing(10)
+            pops_layout.setColumnStretch(6, 1)
+            pops_layout.setHorizontalSpacing(8)
 
         self.ui.combo_pops.setMinimumWidth(120)
         self.ui.combo_pops.setMaximumWidth(150)
         self.ui.txt_pops_path.setMinimumWidth(220)
         self.ui.txt_pops_path.setMaximumWidth(420)
-        self.ui.txt_pops_model.setMinimumWidth(70)
-        self.ui.txt_pops_model.setMaximumWidth(90)
+        self.ui.txt_pops_model.setMinimumWidth(50)
+        self.ui.txt_pops_model.setMaximumWidth(68)
         self.ui.butt_pops.setMinimumHeight(56)
 
         cached_pops_path = self._load_cached_pops_path()
         if cached_pops_path:
             self._set_pops_path(cached_pops_path, persist=False)
-        
+
         # wiring
         self.ui.butt_soap.clicked.connect( self._calc_soap )
-        self.ui.butt_pops.clicked.connect( self._calc_pops )
+        self.ui.butt_pops.clicked.connect( lambda: self._calc_pops(mode="stage") )
+        self.ui.butt_pops_hypno.clicked.connect( lambda: self._calc_pops(mode="hypno") )
         self.ui.txt_pops_path.editingFinished.connect(self._cache_current_pops_path)
         self.ui.radio_pops_hypnodens.toggled.connect( self._render_pops_hypno )
+        self.ui.txt_pops_path.textChanged.connect(self._update_pops_coda_availability)
+        self.ui.txt_pops_model.textChanged.connect(self._update_pops_coda_availability)
+        self._update_pops_coda_availability()
+
+    def _update_pops_coda_availability(self):
+        # CODA is a model-specific sidecar file (<model>.coda30.mod); grey out
+        # the toggle whenever the currently selected model doesn't ship one.
+        pops_path = self.ui.txt_pops_path.text()
+        pops_model = self.ui.txt_pops_model.text().strip()
+        available = False
+        if pops_path and pops_model:
+            try:
+                base = Path(pops_path).expanduser()
+                base = Path(os.path.expandvars(str(base))).resolve()
+                available = (base / f"{pops_model}.coda30.mod").is_file()
+            except Exception:
+                available = False
+        if not available and self.ui.check_pops_coda.isChecked():
+            self.ui.check_pops_coda.setChecked(False)
+        self.ui.check_pops_coda.setEnabled(available)
 
     def _parse_pops_channels(self):
         if hasattr(self.ui.combo_pops, "checked_items"):
@@ -1156,12 +1222,12 @@ class SoapPopsMixin:
     # ------------------------------------------------------------
     # Run POPS
 
-    def _calc_pops(self):
-      
+    def _calc_pops(self, mode="stage"):
+
         if not hasattr(self, "p"):
             QMessageBox.critical( self.ui , "Error", "No instance attached" )
             return
-        
+
         # requires 1+ channel
         count = self.ui.combo_pops.model().rowCount()
         if count == 0:
@@ -1208,11 +1274,14 @@ class SoapPopsMixin:
 
         pops_chs = ",".join(pops_chs_list)
 
+        # remembered so a failed run can clean up its own {sig}_F/{sig}_F_N
+        # working channels in _pops_done_err — see that method
+        self._pops_last_chs = pops_chs_list
+
         pops_path = self.ui.txt_pops_path.text()
         pops_model = self.ui.txt_pops_model.text()
         ignore_obs = self.ui.check_pops_ignore_obs.checkState() == Qt.Checked
-        emit_pp = self.ui.check_pops_emit_pp.checkState() == Qt.Checked
-        
+
         diag = self._stage_validation_diagnostics()
         has_staging = diag["ok"]
         # requires staging
@@ -1225,11 +1294,12 @@ class SoapPopsMixin:
             opts += " ignore-obs=T"
             has_staging = False
 
-        if emit_pp:
-            opts += " emit-pp=T"
+        # hypnodensity mode always emits the 5s-resolution PP_* channels
+        if mode == "hypno":
+            opts += " emit-pp=T resolution=5"
 
-        # coda
-        if self.cfg_pops_coda:
+        # coda — only ever applied if a coda30.mod sidecar exists for this model
+        if self.ui.check_pops_coda.isChecked() and self.ui.check_pops_coda.isEnabled():
             opts += " coda"
 
         # test if resource file exists
@@ -1244,10 +1314,22 @@ class SoapPopsMixin:
             )
             return None
 
+        if mode == "hypno" and not getattr(self, "_pops_5s_warning_shown", False):
+            resp = QMessageBox.question(
+                self.ui,
+                "Restructure EDF to 5s blocks?",
+                "Computing POPS hypnodensities restructures the in-memory EDF "
+                "to 5-second data records (needed to emit the PP_* posterior "
+                "channels at 5s resolution).\n\nOkay to continue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if resp != QMessageBox.StandardButton.Yes:
+                return
+            self._pops_5s_warning_shown = True
 
         # save currents channels/annots selections
         # (needed by _render_tables() used below)
-        self.curr_chs = self.ui.tbl_desc_signals.checked()                   
+        self.curr_chs = self.ui.tbl_desc_signals.checked()
         self.curr_anns = self.ui.tbl_desc_annots.checked()
 
         self._busy = True
@@ -1264,10 +1346,11 @@ class SoapPopsMixin:
                 pops_model,
                 opts,
                 has_staging,
+                mode,
             ),
         )
 
-    def _start_pops_worker(self, pops_chs, pops_path, pops_model, opts, has_staging):
+    def _start_pops_worker(self, pops_chs, pops_path, pops_model, opts, has_staging, mode="stage"):
         if not getattr(self, "_busy", False):
             return
 
@@ -1288,6 +1371,7 @@ class SoapPopsMixin:
             pops_model,
             opts,
             has_staging,
+            mode,
         )
 
         def _done(_f=fut):
@@ -1301,14 +1385,19 @@ class SoapPopsMixin:
 
         fut.add_done_callback(_done)
 
-    def _derive_pops(self, p, pops_chs, pops_path, pops_model, opts, has_staging):
+    def _derive_pops(self, p, pops_chs, pops_path, pops_model, opts, has_staging, mode="stage"):
         # Luna's command parser splits on whitespace with no quoting support.
         # Bind path (and model) to Luna variables using ${var="value"} so that
         # spaces in the path are handled correctly.
         cmd_str  = f'${{_pops_path="{pops_path}"}} & ${{_pops_model="{pops_model}"}}'
+        if mode == "hypno":
+            # RECORD-SIZE restructures the in-memory EDF and clears any epoch
+            # structure, so it must precede EPOCH align (which RUN-POPS itself
+            # never performs internally).
+            cmd_str += ' & RECORD-SIZE dur=5 continue'
         cmd_str += ' & EPOCH align & RUN-POPS sig=' + pops_chs
         cmd_str += ' path=${_pops_path}'
-        cmd_str += ' model=${_pops_model}'
+        cmd_str += ' lib=${_pops_model}'
         cmd_str += opts
 
         p.eval_lunascope(cmd_str)
@@ -1344,6 +1433,7 @@ class SoapPopsMixin:
                 self._render_hypnogram()
                 self._update_hypnogram()
         finally:
+            self._update_pops_coda_availability()
             self.unlock_ui()
             self._busy = False
             self._buttons(True)
@@ -1351,11 +1441,42 @@ class SoapPopsMixin:
             self.sb_progress.setValue(0)
             self.sb_progress.setVisible(False)
 
+    def _cleanup_pops_temp_channels(self):
+        # RUN-POPS creates {sig}_F / {sig}_F_N working channels and drops
+        # them itself once it finishes; if it halted partway through (e.g.
+        # a bad/incompatible model file), those can be left behind in the
+        # EDF. Best-effort: drop any that still exist for the channels this
+        # run touched, so a retry isn't blocked by our own pre-flight
+        # conflict check in _calc_pops finding stale leftovers.
+        chs = getattr(self, "_pops_last_chs", None)
+        if not chs or not hasattr(self, "p"):
+            return
+        try:
+            valid_chs = set(self.p.edf.channels())
+            leftovers = [
+                ch for sig in chs
+                for ch in (f"{sig}_F", f"{sig}_F_N")
+                if ch in valid_chs
+            ]
+            if leftovers:
+                self.p.eval_lunascope("SIGNALS drop=" + ",".join(leftovers))
+        except Exception:
+            pass
+
     @Slot()
     def _pops_done_err(self):
         try:
             QMessageBox.critical(self.ui, "Error running POPS", self._last_tb)
         finally:
+            self._cleanup_pops_temp_channels()
+            # Refresh the signals table (and rebuild self.ssa, nulled before
+            # the run) so the EDF's actual current state is visible even if
+            # cleanup above couldn't remove everything.
+            try:
+                self._update_metrics()
+            except Exception:
+                pass
+            self._update_pops_coda_availability()
             self.unlock_ui()
             self._busy = False
             self._buttons(True)

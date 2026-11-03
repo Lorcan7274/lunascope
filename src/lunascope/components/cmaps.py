@@ -109,7 +109,8 @@ _CMAP_DEFAULT_TEXT = """\
 %  table-allow-empty = N
 %  day-anchor  = 12     (0-23)
 %  pops-path   = ~/pops/
-%  pops-model  = s2
+%  pops-model  = s2a
+%  pops-coda   = Y      (Y/N)
 %  meta-data   = cohort.meta   (TSV, col1=ID)
 %  meta-data-vars = Age,Sex,Dx (select/order cols)
 %  Docks (Y/N):
@@ -206,11 +207,12 @@ class CMapsMixin:
             cached_pops_path = self._load_cached_pops_path()
 
         self.cfg_pops_path = cached_pops_path or '~/dropbox/pops/'
-        self.cfg_pops_model = 's2'
-        self.cfg_pops_coda = False
-        
+        self.cfg_pops_model = 's2a'
+        self.cfg_pops_coda = True
+
         self.ui.txt_pops_path.setText( self.cfg_pops_path )
         self.ui.txt_pops_model.setText( self.cfg_pops_model )
+        self.ui.check_pops_coda.setChecked( self.cfg_pops_coda )
 
         self.cmap_use_na_for_empty = True
         self.cmap_na_token = "NA"
@@ -330,6 +332,7 @@ class CMapsMixin:
                 self.cfg_pops_coda = True
             else:
                 self.cfg_pops_coda = False
+            self.ui.check_pops_coda.setChecked( self.cfg_pops_coda )
 
         # ACTIG
             

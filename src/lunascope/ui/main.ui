@@ -1780,7 +1780,7 @@ QPushButton:pressed { background: #21262d; }</string>
      <item>
       <widget class="QTabWidget" name="tabWidget">
        <property name="currentIndex">
-        <number>0</number>
+        <number>2</number>
        </property>
        <widget class="QWidget" name="tab_hypno_2">
         <attribute name="title">
@@ -2275,7 +2275,7 @@ QPushButton:pressed { background: #21262d; }</string>
             <item row="0" column="2">
              <widget class="QLabel" name="label_9">
               <property name="text">
-               <string>Model (default s2)</string>
+               <string>Model (default s2a)</string>
               </property>
               <property name="alignment">
                <set>Qt::AlignmentFlag::AlignLeading|Qt::AlignmentFlag::AlignLeft|Qt::AlignmentFlag::AlignVCenter</set>
@@ -2320,7 +2320,7 @@ QPushButton:pressed { background: #21262d; }</string>
                </size>
               </property>
               <property name="text">
-               <string>s2</string>
+               <string>s2a</string>
               </property>
              </widget>
             </item>
@@ -2342,19 +2342,20 @@ QPushButton:pressed { background: #21262d; }</string>
              <widget class="QPushButton" name="butt_pops">
               <property name="minimumSize">
                <size>
-                <width>0</width>
+                <width>90</width>
                 <height>56</height>
                </size>
               </property>
               <property name="text">
-               <string>Run POPS</string>
+               <string>Stage
+(30s)</string>
               </property>
              </widget>
             </item>
             <item row="1" column="4">
-             <widget class="QRadioButton" name="radio_pops_hypnodens">
+             <widget class="QCheckBox" name="radio_pops_hypnodens">
               <property name="text">
-               <string>Hypnodensities</string>
+               <string>Posteriors</string>
               </property>
               <property name="checked">
                <bool>true</bool>
@@ -2368,10 +2369,13 @@ QPushButton:pressed { background: #21262d; }</string>
               </property>
              </widget>
             </item>
-            <item row="0" column="4">
-             <widget class="QCheckBox" name="check_pops_emit_pp">
+            <item row="1" column="3">
+             <widget class="QCheckBox" name="check_pops_coda">
               <property name="text">
-               <string>Emit PP</string>
+               <string>CODA</string>
+              </property>
+              <property name="checked">
+               <bool>true</bool>
               </property>
              </widget>
             </item>

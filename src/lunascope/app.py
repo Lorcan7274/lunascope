@@ -245,6 +245,9 @@ def _apply_forced_dark_theme(app: QApplication) -> None:
         QCheckBox, QRadioButton, QLabel {
             color: #E7EAEE;
         }
+        QCheckBox:disabled, QRadioButton:disabled {
+            color: #7B838C;
+        }
         QCheckBox::indicator, QRadioButton::indicator {
             width: 15px;
             height: 15px;
@@ -260,6 +263,10 @@ def _apply_forced_dark_theme(app: QApplication) -> None:
         QCheckBox::indicator:hover, QRadioButton::indicator:hover {
             border: 1px solid #A6AFBA;
         }
+        QCheckBox::indicator:disabled, QRadioButton::indicator:disabled {
+            background: #23262A;
+            border: 1px solid #32363C;
+        }
         QCheckBox::indicator:checked {
             background: #2F6DB2;
             border: 1px solid #C9D4E2;
@@ -267,6 +274,10 @@ def _apply_forced_dark_theme(app: QApplication) -> None:
         QRadioButton::indicator:checked {
             background: #2F6DB2;
             border: 1px solid #C9D4E2;
+        }
+        QCheckBox::indicator:checked:disabled, QRadioButton::indicator:checked:disabled {
+            background: #3A4E66;
+            border: 1px solid #32363C;
         }
         QTableView::indicator, QListView::indicator, QTreeView::indicator {
             width: 15px;

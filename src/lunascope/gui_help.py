@@ -115,12 +115,13 @@ WIDGET_HELP: dict[str, str] = {
     "butt_soap": "Run SOAP and plot hypnodensity output.",
     "combo_pops": "Channel(s) used for POPS. Open dropdown and check one or more channels.",
     "txt_pops_path": "Resource folder containing POPS model files (*.mod).",
-    "txt_pops_model": "POPS model basename (for example: s2).",
+    "txt_pops_model": "POPS model library basename (for example: s2a).",
     "butt_pops_browse": "Choose the POPS resource folder and update the cached path field.",
     "check_pops_ignore_obs": "Ignore observed staging and run POPS in prediction-only mode.",
-    "check_pops_emit_pp": "Emit POPS posterior channels such as PP_N1, PP_N2, PP_N3, PP_R, PP_W, and PP_VALID into the in-memory EDF.",
-    "radio_pops_hypnodens": "Toggle POPS hypnodensity rendering mode.",
-    "butt_pops": "Run POPS and populate output tables/plots.",
+    "check_pops_coda": "Apply the CODA second-stage model, if one is available for the selected model (requires a <model>.coda30.mod file; greyed out otherwise).",
+    "radio_pops_hypnodens": "Post-run view: show hypnodensity (checked) or hypnogram (unchecked) for the last POPS result.",
+    "butt_pops": "Run POPS staging at 30s resolution and populate output tables/plots.",
+    "butt_pops_hypno": "Run POPS at 5s resolution with posterior channels emitted (PP_N1, PP_N2, PP_N3, PP_R, PP_W) into the in-memory EDF. Restructures the EDF to 5s records as needed.",
     "butt_pops_resource": "Download POPS resources and update the POPS resource folder field.",
 
     # Masks

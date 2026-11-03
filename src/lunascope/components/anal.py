@@ -603,6 +603,8 @@ class AnalMixin:
         self.ui.butt_calc_hypnostats.setEnabled(stage_tools_enabled)
         self.ui.butt_soap.setEnabled(stage_tools_enabled)
         self.ui.butt_pops.setEnabled(stage_tools_enabled)
+        if hasattr(self.ui, "butt_pops_hypno"):
+            self.ui.butt_pops_hypno.setEnabled(stage_tools_enabled)
         self.ui.butt_render.setEnabled(status)
         self.ui.butt_refresh.setEnabled(status)
         self.ui.butt_load_slist.setEnabled(status)
