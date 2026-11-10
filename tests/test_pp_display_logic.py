@@ -24,11 +24,23 @@ class _DummyText:
         self._text = text
 
 
+class _DummyCheck:
+    def __init__(self, checked: bool = False):
+        self._checked = checked
+
+    def setChecked(self, checked):
+        self._checked = bool(checked)
+
+    def isChecked(self):
+        return self._checked
+
+
 class _DummyUI:
     def __init__(self):
         self.txt_cmap = _DummyText("")
         self.txt_pops_path = _DummyText("")
         self.txt_pops_model = _DummyText("")
+        self.check_pops_coda = _DummyCheck()
 
 
 class _DummyCMaps(CMapsMixin):

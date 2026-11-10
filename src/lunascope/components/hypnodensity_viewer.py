@@ -592,7 +592,7 @@ class HypnodensityViewerDialog(QtWidgets.QDialog):
         for w in (browse, run, cache, load_cache): top.addWidget(w)
         download_hdpc = QtWidgets.QPushButton("Download HDPC")
         download_hdpc.setToolTip("Download the current core HDSTATS-PC model and descriptor")
-        download_hdpc.clicked.connect(self.ctrl._download_hdpc_resources)
+        download_hdpc.clicked.connect(lambda: self.ctrl._download_hdpc_resources())
         top.addWidget(download_hdpc)
         descriptor_row = QtWidgets.QHBoxLayout(); root.addLayout(descriptor_row)
         self.descriptor_edit = QtWidgets.QLineEdit()
@@ -1860,20 +1860,20 @@ class HypnodensityViewerDialog(QtWidgets.QDialog):
         table = QtWidgets.QTableWidget()
         table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         layout.addWidget(table)
-        keys = list(dict.fromkeys(key for entry in self.session.flagged.values()
-                                  for key in entry.get("values", {})))
-        columns = ["ID", "Note", *keys]
-        table.setColumnCount(len(columns))
-        table.setHorizontalHeaderLabels(columns)
         table.horizontalHeader().setStretchLastSection(False)
-        table.setColumnWidth(0, 170)
-        table.setColumnWidth(1, 260)
-        for col in range(2, len(columns)): table.setColumnWidth(col, 160)
         table.setAlternatingRowColors(True)
         table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        keys, columns = [], []
 
         def populate():
+            keys[:] = self._flagged_value_keys()
+            columns[:] = ["ID", "Note", *keys]
             table.blockSignals(True)
+            table.setColumnCount(len(columns))
+            table.setHorizontalHeaderLabels(columns)
+            table.setColumnWidth(0, 170)
+            table.setColumnWidth(1, 260)
+            for col in range(2, len(columns)): table.setColumnWidth(col, 160)
             table.setRowCount(len(self.session.flagged))
             for row, (sid, entry) in enumerate(self.session.flagged.items()):
                 cells = [sid, entry.get("note", ""), *(entry.get("values", {}).get(key, "") for key in keys)]
@@ -1911,17 +1911,20 @@ class HypnodensityViewerDialog(QtWidgets.QDialog):
                 populate()
 
         def copy_table():
-            lines = ["\t".join(columns)]
-            for sid, entry in self.session.flagged.items():
-                cells = [sid, entry.get("note", ""), *(entry.get("values", {}).get(key, "") for key in keys)]
-                lines.append("\t".join(str(cell).replace("\t", " ").replace("\n", " ") for cell in cells))
-            QtWidgets.QApplication.clipboard().setText("\n".join(lines))
+            QtWidgets.QApplication.clipboard().setText(self._flagged_table_text())
+
+        def save_list():
+            self.save_flagged_list(dialog)
+
+        def load_list():
+            if self.load_flagged_list(dialog): populate()
 
         table.itemChanged.connect(note_changed)
         table.cellDoubleClicked.connect(lambda row, col: open_selected() if col == 0 else None)
         actions = QtWidgets.QHBoxLayout()
         for label, callback in (("Open in sample list", open_selected),
                                 ("Remove selected", remove_selected), ("Clear list", clear_all),
+                                ("Save list…", save_list), ("Load list…", load_list),
                                 ("Copy table", copy_table),
                                 ("Copy IDs", lambda: QtWidgets.QApplication.clipboard().setText("\n".join(self.session.flagged)))):
             button = QtWidgets.QPushButton(label); button.clicked.connect(callback); actions.addWidget(button)
@@ -1931,6 +1934,108 @@ class HypnodensityViewerDialog(QtWidgets.QDialog):
         populate()
         dialog.resize(850, 550)
         dialog.exec()
+
+    def _flagged_value_keys(self):
+        return list(dict.fromkeys(key for entry in self.session.flagged.values()
+                                  for key in entry.get("values", {})))
+
+    def _flagged_table_text(self):
+        keys = self._flagged_value_keys()
+        clean = lambda cell: str(cell).replace("\t", " ").replace("\r", " ").replace("\n", " ")
+        lines = ["\t".join(clean(c) for c in ["ID", "Note", *keys])]
+        for sid, entry in self.session.flagged.items():
+            cells = [sid, entry.get("note", ""), *(entry.get("values", {}).get(key, "") for key in keys)]
+            lines.append("\t".join(clean(cell) for cell in cells))
+        return "\n".join(lines) + "\n"
+
+    def save_flagged_list(self, parent=None):
+        parent = parent or self
+        if not self.session.flagged:
+            QtWidgets.QMessageBox.information(parent, "Save flagged list", "There are no flagged individuals to save.")
+            return False
+        path, _ = save_file_name(parent, "Save flagged list", "", "Flag lists (*.flags.tsv);;Tab-delimited files (*.tsv *.txt);;All files (*)")
+        if not path:
+            return False
+        try:
+            Path(path).write_text(self._flagged_table_text(), encoding="utf-8")
+        except OSError as exc:
+            QtWidgets.QMessageBox.warning(parent, "Save flagged list", f"Could not write {path}:\n{exc}")
+            return False
+        return True
+
+    @staticmethod
+    def _parse_flagged_list(text):
+        """Parse a saved flag list: either a TSV with an ID/Note header (+ value
+        columns), or a plain list with one ID per line (optional tab + note)."""
+        lines = [line.rstrip("\r") for line in text.splitlines()]
+        lines = [line for line in lines if line.strip() and not line.lstrip().startswith("#")]
+        if not lines:
+            return {}
+        header = lines[0].split("\t")
+        has_header = header[0].strip().upper() == "ID"
+        if has_header:
+            names = [h.strip() for h in header]
+            note_col = next((i for i, h in enumerate(names) if h.lower() == "note"), None)
+            body = lines[1:]
+        else:
+            names, note_col, body = [], 1, lines
+        flagged = {}
+        for line in body:
+            cells = line.split("\t")
+            sid = cells[0].strip()
+            if not sid:
+                continue
+            note = cells[note_col].strip() if note_col is not None and note_col < len(cells) else ""
+            values = {}
+            for i, name in enumerate(names):
+                if i == 0 or i == note_col or not name:
+                    continue
+                values[name] = cells[i].strip() if i < len(cells) else ""
+            flagged[sid] = {"note": note, "values": values}
+        return flagged
+
+    def load_flagged_list(self, parent=None):
+        parent = parent or self
+        path, _ = open_file_name(parent, "Load flagged list", "", "Flag lists (*.flags.tsv);;Tab-delimited files (*.tsv *.txt);;All files (*)")
+        if not path:
+            return False
+        try:
+            loaded = self._parse_flagged_list(Path(path).read_text(encoding="utf-8-sig"))
+        except (OSError, UnicodeDecodeError) as exc:
+            QtWidgets.QMessageBox.warning(parent, "Load flagged list", f"Could not read {path}:\n{exc}")
+            return False
+        if not loaded:
+            QtWidgets.QMessageBox.information(parent, "Load flagged list", "No IDs found in that file.")
+            return False
+        replace = True
+        if self.session.flagged:
+            box = QtWidgets.QMessageBox(parent)
+            box.setWindowTitle("Load flagged list")
+            box.setText(f"Loaded {len(loaded)} IDs. There are already {len(self.session.flagged)} flagged individuals.")
+            box.setInformativeText("Merge adds the loaded IDs (loaded notes win for IDs in both); Replace discards the current list.")
+            merge_btn = box.addButton("Merge", QtWidgets.QMessageBox.AcceptRole)
+            replace_btn = box.addButton("Replace", QtWidgets.QMessageBox.DestructiveRole)
+            box.addButton(QtWidgets.QMessageBox.Cancel)
+            box.setDefaultButton(merge_btn)
+            box.exec()
+            if box.clickedButton() is merge_btn: replace = False
+            elif box.clickedButton() is not replace_btn: return False
+        if replace:
+            self.session.flagged.clear()
+        for sid, entry in loaded.items():
+            existing = self.session.flagged.get(sid)
+            if existing:
+                # Per-column merge: keep existing values, overwrite only with non-blank loaded ones.
+                values = dict(existing.get("values", {}))
+                values.update({k: v for k, v in entry["values"].items() if v != ""})
+                entry["values"] = values
+            if existing and not entry["note"]:
+                entry["note"] = existing.get("note", "")
+            self.session.flagged[sid] = entry
+        self._update_flagged_count()
+        if self.browser_flagged_only.isChecked(): self._refresh_views()
+        else: self.browser.viewport().update()
+        return True
 
     def save_cache(self, path=None, quiet=False):
         if path is None:

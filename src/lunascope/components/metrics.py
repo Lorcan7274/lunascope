@@ -818,15 +818,40 @@ class MetricsMixin:
     def _mark_instances_dirty(self, anns):
         self._update_instances(anns)
 
+    def _ensure_ssa(self):
+        # self.ssa is nulled in a couple of places (e.g. around POPS/SOAP
+        # runs) and is meant to be recreated shortly after; if that recreate
+        # was ever skipped or silently failed, Dock5 would otherwise stay
+        # stuck (frozen, no error) since callers below just no-op on None.
+        # Rebuild it here the same minimal way _update_metrics() does, so a
+        # missing ssa self-heals instead of latching into a dead state.
+        if getattr(self, "ssa", None) is not None:
+            return True
+        if not hasattr(self, "p"):
+            return False
+        try:
+            ssa_anns = [s for s in self.p.edf.annots() if s != "SleepStage"]
+            ssa = lp.segsrv(self.p)
+            ssa.populate(chs=[], anns=ssa_anns)
+            ssa.set_annot_format6(False)
+            ssa.set_clip_xaxes(False)
+            self.ssa = ssa
+            self.ssa_anns = ssa_anns
+        except Exception:
+            return False
+        return True
+
     def _update_instances(self, anns):
         if not getattr(self.ui, "dock_annots", None) or not self.ui.dock_annots.isVisible():
             return
-        if getattr(self, "ssa", None) is None:
+        if not self._ensure_ssa():
             return
         self._rebuild_instances_table(list(anns or []))
 
     def _on_instances_dock_visibility_changed(self, visible: bool):
-        if not visible or getattr(self, "ssa", None) is None:
+        if not visible:
+            return
+        if not self._ensure_ssa():
             return
         anns = self.ui.tbl_desc_annots.checked() if hasattr(self.ui.tbl_desc_annots, "checked") else []
         self._rebuild_instances_table(list(anns))

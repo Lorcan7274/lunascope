@@ -4843,4 +4843,19 @@ def _ensure_min_px_width(vb, x0, x1, px=1):
     xc = 0.5 * (x0 + x1)
     x0a = np.where(too_narrow, xc - 0.5*wmin, x0)
     x1a = np.where(too_narrow, xc + 0.5*wmin, x1)
+
+    # A widened (too-narrow) box is centered on its own onset, which can push
+    # half of it outside the view when that onset sits at/near the view edge
+    # (e.g. a zero-duration event exactly at the window's left boundary,
+    # which navigation pins flush to 0) -- leaving only a sub-pixel sliver
+    # visible, effectively invisible after rasterization. Shift any such box
+    # (never the untouched ones) back fully inside the current view range.
+    (vx0, vx1), _ = vb.viewRange()
+    shift = np.where(too_narrow, np.maximum(0.0, vx0 - x0a), 0.0)
+    x0a = x0a + shift
+    x1a = x1a + shift
+    shift = np.where(too_narrow, np.minimum(0.0, vx1 - x1a), 0.0)
+    x0a = x0a + shift
+    x1a = x1a + shift
+
     return x0a, x1a
