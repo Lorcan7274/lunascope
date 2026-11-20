@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=72", "wheel"]
+requires = ["setuptools>=77.0.3", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,13 +8,13 @@ version = "1.7.2"
 description = "Desktop sleep-EEG viewer and annotation interface for Luna"
 readme = "README.md"
 requires-python = ">=3.9, <3.15"
-license = {file = "LICENSE"}
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
 keywords = ["sleep", "EEG", "PSG", "Luna", "viewer", "annotation", "GUI"]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Intended Audience :: Science/Research",
   "Intended Audience :: Healthcare Industry",
-  "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
   "Natural Language :: English",
   "Operating System :: MacOS",
   "Operating System :: Microsoft :: Windows",

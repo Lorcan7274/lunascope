@@ -458,6 +458,8 @@ def main(argv=None) -> int:
     args = _parse_args(argv or sys.argv[1:])
     qInstallMessageHandler(_qt_message_handler)
     _boot_log("Creating application...")
+    from .qt_opengl import configure_opengl
+    configure_opengl()
     app = QApplication(sys.argv)
     app.setApplicationName("Lunascope")
     app.setApplicationDisplayName("Lunascope")

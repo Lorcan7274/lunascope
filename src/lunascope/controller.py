@@ -677,6 +677,7 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
             del self.p
 
     def _detach_inst_preserve_analysis(self):
+        self._pause_explorer_recording()
         self.ns = 0
         self.ne = 0
         self.ss = None
@@ -978,6 +979,7 @@ class Controller( QObject, CMapsMixin, ResultsIOMixin,
     # ------------------------------------------------------------
 
     def _clear_all(self):
+        self._pause_explorer_recording()
 
         # Dock3/4/5 search-filter text is per-individual; a leftover filter
         # string would otherwise silently keep filtering the next individual's

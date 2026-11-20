@@ -101,7 +101,7 @@ class ExplorerMixin:
         tabs.addTab(self._tab_filter_design.widget(), "Filter Design")  # 8
         tabs.addTab(self._tab_topo.widget(),         "Topo (Experimental)")  # 9
 
-        tabs.setTabVisible(4, False)   # Player
+        tabs.setTabVisible(tabs.indexOf(self._tab_two_channel.widget()), False)
 
         tabs.currentChanged.connect(self._explorer_tab_changed)
 
@@ -124,8 +124,13 @@ class ExplorerMixin:
     # Visibility / tab-switch callbacks
     # ------------------------------------------------------------------
 
+    def _pause_explorer_recording(self):
+        if hasattr(self, "_tab_topo"):
+            self._tab_topo.pause_live_playback()
+
     def _explorer_on_visibility(self, visible):
         if not visible:
+            self._tab_topo.pause_live_playback()
             try:
                 from lunapi import gpa_clear_cache
                 gpa_clear_cache()
@@ -152,21 +157,15 @@ class ExplorerMixin:
 
     def _explorer_tab_changed(self, idx):
         """Refresh context-sensitive controls when switching tabs."""
-        if idx != 9:
+        current = self._explorer_tabs.widget(idx)
+        if current is not self._tab_topo.widget():
             self._tab_topo.pause_live_playback()
-        if idx == 0:     # Harmonizer tab
-            self._tab_harm.refresh_controls()
-        elif idx == 1:   # Annotations tab: reload from Dock 4 unless cache is pinned
-            self._tab_annot.refresh_controls()
-        elif idx == 3:   # Waveforms tab: reload channels/annotations
-            self._tab_wave.refresh_controls()
-        elif idx == 4:   # Two-channel tab (hidden): reload channel list
-            self._tab_two_channel.refresh_controls()
-        elif idx == 5:   # Tables tab: reload available result tables
-            self._tab_tables.refresh_tables()
-        elif idx == 6:   # Plotter tab: reload available result tables
-            self._tab_plot.refresh_tables()
-        elif idx == 8:   # Filter Design tab
-            self._tab_filter_design.refresh_controls()
-        elif idx == 9:   # Topo tab: sync results table list
-            self._tab_topo.refresh_tables()
+        for tab in (self._tab_harm, self._tab_annot, self._tab_wave,
+                    self._tab_two_channel, self._tab_filter_design):
+            if current is tab.widget():
+                tab.refresh_controls()
+                return
+        for tab in (self._tab_tables, self._tab_plot, self._tab_topo):
+            if current is tab.widget():
+                tab.refresh_tables()
+                return

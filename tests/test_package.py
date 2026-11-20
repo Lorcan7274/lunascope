@@ -31,6 +31,10 @@ def test_version_string_format():
         "lunascope.updater",
         "lunascope.components.topo_clocs",
         "lunascope.components.topo_core",
+        "lunascope.components.atlas_model",
+        "lunascope.components.cortical_data",
+        "lunascope.components.cortical_view",
+        "lunascope.components.explorer_cortex",
         "lunascope.components.harmonizer_funcs",
     ],
 )
