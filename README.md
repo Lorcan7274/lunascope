@@ -39,6 +39,8 @@ or batch analysis at any point.
 
 ## Installation
 
+`pip install lunascope` pulls in `lunapi`, whose prebuilt wheels include the compiled Luna library plus `luna.py` and `destrat.py` command-line equivalents, so there is no need to clone or build luna-base or luna-api separately.
+
 ### Standalone binaries (no Python required)
 
 Pre-built apps for macOS and Windows are available from the

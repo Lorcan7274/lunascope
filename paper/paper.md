@@ -49,7 +49,7 @@ authors:
     
 affiliations:
 
-  - name: Northfield Mount Hermon School, Mount Hermon, MA, United States
+  - name: Independent Researcher
     index: 1
 
   - name: Division of Sleep and Circadian Disorders, Brigham and Women's Hospital, Harvard Medical School, Boston, MA, United States
@@ -91,7 +91,7 @@ application for visualization, annotation, and review. Scripted and
 graphical workflows operate on a common data model and command set.
 Lunascope provides a synchronized multichannel
 viewer with hypnogram display, spectral summaries, annotation
-handling, automated sleep staging, cohort-level exploration, multiday
+handling, automated sleep staging, a cohort-level Explorer, multiday
 actigraphy views, and direct access to the National Sleep Research
 Resource (NSRR). An embedded scripting console exposes Luna's command
 language inside the application, allowing users
@@ -169,8 +169,8 @@ staging, visualization, or selected spindle, spectral, or
 preprocessing pipelines. Luna instead provides a shared analytical
 engine spanning dataset manipulation, interval-level annotations,
 multi-day and actigraphy-based analyses, statistical modeling,
-high-density EEG, and multiple spectral methods. This build-versus-
-contribute decision reflects the central contribution of the ecosystem:
+high-density EEG, and multiple spectral methods. This build-versus-contribute
+decision reflects the central contribution of the ecosystem:
 integrating scalable analysis, Python workflows, and interactive review
 around a common data model and command language.
 
@@ -198,8 +198,8 @@ and structured retrieval of Luna result tables as Python objects.
 
 Luna separates computation from presentation: command outputs can be
 written to result stores, returned to Python as structured objects, or
-displayed in Lunascope, preserving comparable results across command-
-line, scripted, and interactive settings.
+displayed in Lunascope, preserving comparable results across
+command-line, scripted, and interactive settings.
 
 Lunascope is implemented in Python (3.9--3.14) using PySide6 (Qt 6)
 and pyqtgraph as the graphical layer on top of `lunapi`, meaning every
@@ -229,11 +229,13 @@ annotation-aware review, and direct visual inspection of outputs from
 Luna analyses.
 
 The embedded console uses native Luna commands, while Moonbeam and the
-Explorer connect NSRR data and cohort-level displays to the same analytic
-context. This design allows outputs to be inspected as part of the
-visual workflow rather than only as exported tables, while the command-
-line tool supports parallel workflows whose results can be combined with
-`destrat`.
+Explorer (Lunascope's cohort-level view of hypnograms, annotation
+summaries, and result tables across a sample list) connect NSRR data and
+cohort-level displays to the same analytic context. This design allows
+outputs to be inspected as part of the visual workflow rather than only
+as exported tables, while the command-line tool supports parallel
+workflows whose output databases can be combined and queried with
+`destrat`, Luna's utility for extracting results into tables.
 
 
 
@@ -268,7 +270,7 @@ publicly available [@luna_repo].
 
 # AI usage disclosure
 
-Generative AI tools (Claude, Anthropic and Codex, OpenAI) were used to
+Generative AI tools, Claude (Anthropic) and Codex (OpenAI), were used to
 assist in editing and formatting the text of this manuscript, and
 during software development, primarily to help refactor code, generate
 help-related functions and documentation, and assist with use of the
